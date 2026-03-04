@@ -1,231 +1,175 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Spring回测 - 基于wyckoff-analyzer脚本 (增强版)
-使用ProbabilityCloud类的增强Spring检测
+Spring回测脚本 - 分析Spring检测效果
 """
 
+import sys
 import pandas as pd
 import numpy as np
-import sys
-import os
+from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '.agents/skills/wyckoff-analyzer/scripts'))
+sys.path.insert(0, '.')
 from wyckoff_analysis import ProbabilityCloud
 
 
-def load_data(filename: str) -> pd.DataFrame:
-    """加载CSV数据"""
-    df = pd.read_csv(filename)
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date').reset_index(drop=True)
-    return df
-
-
-def backtest_spring_enhanced(df: pd.DataFrame, hold_days: list = [1, 3, 5], 
-                            require_bull_market: bool = True,
-                            require_demand_followup: bool = True,
-                            followup_days: int = 3) -> dict:
-    """
-    增强版Spring回测 - 包含市场背景过滤和需求跟随验证
-    """
-    print("正在计算似然度...")
-    cloud = ProbabilityCloud(df)
-    cloud.calculate_all_likelihoods()
+def backtest_spring(symbol: str, threshold: float = 0.5, holding_days: list = [5, 10, 20]):
+    """回测Spring检测效果"""
     
-    results = {
-        'total_springs': 0,
-        'by_position': {},
-        'by_context': {},
-        'hold_days': {}
-    }
+    print(f"\n{'='*60}")
+    print(f"Spring回测 - 股票 {symbol}")
+    print(f"{'='*60}")
     
-    # 初始化持有天数统计
-    for days in hold_days:
-        results['hold_days'][days] = {
-            'count': 0,
-            'success': 0,
-            'avg_return': 0,
-            'returns': []
-        }
-    
-    # 遍历所有日期检测Spring
-    for idx in range(30, len(df) - max(hold_days)):
-        result = cloud.detect_spring_enhanced(
-            idx, 
-            require_bull_market=require_bull_market,
-            require_demand_followup=require_demand_followup,
-            followup_days=followup_days
+    # 加载数据
+    try:
+        import akshare as ak
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = '20070101'
+        
+        prefix = f"sh{symbol}" if symbol.startswith('6') else f"sz{symbol}"
+        df = ak.stock_zh_a_daily(
+            symbol=prefix,
+            start_date=start_date,
+            end_date=end_date
         )
         
-        if not result.get('detected', False):
-            continue
+        df = df.rename(columns={
+            '日期': 'date', '开盘': 'open', '收盘': 'close',
+            '最高': 'high', '最低': 'low', '成交量': 'volume'
+        })
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date').reset_index(drop=True)
         
-        position = result.get('position', 'ORDINARY')
-        context = result.get('market_context', 'ANY')
+        print(f"加载数据: {len(df)} 条记录")
+        print(f"时间范围: {df['date'].min()} ~ {df['date'].max()}")
         
-        # 初始化统计
-        if position not in results['by_position']:
-            results['by_position'][position] = {
-                'total': 0,
-                'success_by_days': {days: {'count': 0, 'success': 0} for days in hold_days}
-            }
+    except Exception as e:
+        print(f"加载数据失败: {e}")
+        return
+    
+    # 分析 - 使用ProbabilityCloud
+    pc = ProbabilityCloud(df)
+    pc.calculate_all_likelihoods()
+    
+    # 获取Spring概率
+    spring_prob = pc.likelihood.get('SPRING', pd.Series([0]*len(df)))
+    spring_best = pc.likelihood.get('SPRING_BEST', pd.Series([0]*len(df)))
+    spring_confirm = pc.likelihood.get('SPRING_CONFIRM', pd.Series([0]*len(df)))
+    spring_shakeout = pc.likelihood.get('SPRING_SHAKEOUT', pd.Series([0]*len(df)))
+    spring_1day = pc.likelihood.get('SPRING_1DAY', pd.Series([0]*len(df)))
+    
+    # 筛选Spring信号
+    signals = []
+    for i in range(len(df)):
+        if spring_prob.iloc[i] >= threshold:
+            signals.append({
+                'date': df.iloc[i]['date'],
+                'close': df.iloc[i]['close'],
+                'prob': spring_prob.iloc[i],
+                'best': spring_best.iloc[i],
+                'confirm': spring_confirm.iloc[i],
+                'shakeout': spring_shakeout.iloc[i],
+                '1day': spring_1day.iloc[i],
+                'idx': i
+            })
+    
+    print(f"\n检测到 {len(signals)} 个Spring信号 (阈值={threshold})")
+    
+    if not signals:
+        return
+    
+    # 分析每个信号之后的涨幅
+    results = []
+    for sig in signals:
+        idx = sig['idx']
+        result = {
+            'date': sig['date'].strftime('%Y-%m-%d'),
+            'close': sig['close'],
+            'prob': sig['prob'],
+            'best': sig['best'],
+            'confirm': sig['confirm'],
+            'shakeout': sig['shakeout'],
+            '1day': sig['1day']
+        }
         
-        if context not in results['by_context']:
-            results['by_context'][context] = {
-                'total': 0,
-                'success_by_days': {days: {'count': 0, 'success': 0} for days in hold_days}
-            }
-        
-        results['by_position'][position]['total'] += 1
-        results['by_context'][context]['total'] += 1
-        results['total_springs'] += 1
-        
-        entry_price = df.iloc[idx]['close']
-        
-        # 测试不同持有天数
-        for days in hold_days:
+        for days in holding_days:
             if idx + days < len(df):
-                exit_price = df.iloc[idx + days]['close']
-                return_pct = (exit_price - entry_price) / entry_price * 100
-                is_success = return_pct > 0
-                
-                results['hold_days'][days]['count'] += 1
-                results['hold_days'][days]['success'] += int(is_success)
-                results['hold_days'][days]['returns'].append(return_pct)
-                
-                results['by_position'][position]['success_by_days'][days]['count'] += 1
-                results['by_position'][position]['success_by_days'][days]['success'] += int(is_success)
-                
-                results['by_context'][context]['success_by_days'][days]['count'] += 1
-                results['by_context'][context]['success_by_days'][days]['success'] += int(is_success)
+                future_close = df.iloc[idx + days]['close']
+                pct = (future_close - sig['close']) / sig['close'] * 100
+                result[f'pct_{days}d'] = pct
+                result[f'up_{days}d'] = 1 if pct > 0 else 0
+            else:
+                result[f'pct_{days}d'] = None
+                result[f'up_{days}d'] = None
+        
+        results.append(result)
     
-    # 计算成功率
-    for days in hold_days:
-        if results['hold_days'][days]['count'] > 0:
-            results['hold_days'][days]['success_rate'] = (
-                results['hold_days'][days]['success'] / results['hold_days'][days]['count'] * 100
-            )
-            results['hold_days'][days]['avg_return'] = np.mean(
-                results['hold_days'][days]['returns']
-            ) if results['hold_days'][days]['returns'] else 0
+    # 统计
+    df_results = pd.DataFrame(results)
     
-    for position in results['by_position']:
-        for days in hold_days:
-            cnt = results['by_position'][position]['success_by_days'][days]['count']
-            suc = results['by_position'][position]['success_by_days'][days]['success']
-            if cnt > 0:
-                results['by_position'][position]['success_by_days'][days]['success_rate'] = suc / cnt * 100
-    
-    for context in results['by_context']:
-        for days in hold_days:
-            cnt = results['by_context'][context]['success_by_days'][days]['count']
-            suc = results['by_context'][context]['success_by_days'][days]['success']
-            if cnt > 0:
-                results['by_context'][context]['success_by_days'][days]['success_rate'] = suc / cnt * 100
-    
-    return results
-
-
-def print_results(results: dict, name: str):
-    """打印回测结果"""
     print("\n" + "="*60)
-    print(f"回测结果: {name}")
+    print("Spring信号统计")
     print("="*60)
     
-    print(f"\n总Spring数量: {results['total_springs']}")
+    for days in holding_days:
+        valid = df_results[f'pct_{days}d'].dropna()
+        if len(valid) > 0:
+            avg_pct = valid.mean()
+            success_rate = (valid > 0).sum() / len(valid) * 100
+            print(f"\n{days}天后:")
+            print(f"  样本数: {len(valid)}")
+            print(f"  平均涨幅: {avg_pct:.2f}%")
+            print(f"  成功率: {success_rate:.1f}%")
+            print(f"  最大涨幅: {valid.max():.2f}%")
+            print(f"  最大跌幅: {valid.min():.2f}%")
     
-    # 按位置统计
-    if results['by_position']:
-        print("\n--- 按位置统计 ---")
-        for position, data in results['by_position'].items():
-            print(f"\n{position}: 共{data['total']}个")
-            for days, stats in data['success_by_days'].items():
-                if stats['count'] > 0:
-                    print(f"  持有{days}天: 成功率{stats['success_rate']:.1f}% ({stats['success']}/{stats['count']})")
+    # 按Spring类型分析
+    print("\n" + "="*60)
+    print("按Spring类型分析")
+    print("="*60)
     
-    # 按背景统计
-    if results['by_context']:
-        print("\n--- 按市场背景统计 ---")
-        for context, data in results['by_context'].items():
-            print(f"\n{context}: 共{data['total']}个")
-            for days, stats in data['success_by_days'].items():
-                if stats['count'] > 0:
-                    print(f"  持有{days}天: 成功率{stats['success_rate']:.1f}% ({stats['success']}/{stats['count']})")
+    # 最佳Spring
+    best_signals = df_results[df_results['best'] > 0.3]
+    if len(best_signals) > 0:
+        print(f"\n最佳Spring (SPRING_BEST > 0.3): {len(best_signals)}个")
+        for days in holding_days:
+            valid = best_signals[f'pct_{days}d'].dropna()
+            if len(valid) > 0:
+                print(f"  {days}天: 平均{valid.mean():.2f}%, 成功率{(valid>0).mean()*100:.1f}%")
     
-    # 总体统计
-    print("\n--- 总体统计 ---")
-    for days, stats in results['hold_days'].items():
-        if stats['count'] > 0:
-            print(f"持有{days}天: 成功率{stats['success_rate']:.1f}% ({stats['success']}/{stats['count']}), 平均收益{stats['avg_return']:.2f}%")
+    # 需确认Spring
+    confirm_signals = df_results[df_results['confirm'] > 0.3]
+    if len(confirm_signals) > 0:
+        print(f"\n需确认Spring (SPRING_CONFIRM > 0.3): {len(confirm_signals)}个")
+        for days in holding_days:
+            valid = confirm_signals[f'pct_{days}d'].dropna()
+            if len(valid) > 0:
+                print(f"  {days}天: 平均{valid.mean():.2f}%, 成功率{(valid>0).mean()*100:.1f}%")
     
-    return results
+    # 震仓Spring
+    shakeout_signals = df_results[df_results['shakeout'] > 0.3]
+    if len(shakeout_signals) > 0:
+        print(f"\n震仓Spring (SPRING_SHAKEOUT > 0.3): {len(shakeout_signals)}个")
+        for days in holding_days:
+            valid = shakeout_signals[f'pct_{days}d'].dropna()
+            if len(valid) > 0:
+                print(f"  {days}天: 平均{valid.mean():.2f}%, 成功率{(valid>0).mean()*100:.1f}%")
+    
+    # 打印所有信号详情
+    print("\n" + "="*60)
+    print("所有Spring信号详情")
+    print("="*60)
+    print(df_results[['date', 'close', 'prob', 'best', 'confirm', 'shakeout', 'pct_5d', 'pct_10d', 'pct_20d']].to_string())
+    
+    return df_results
 
 
 if __name__ == '__main__':
-    # 加载数据
-    print("加载数据...")
-    df_515100 = load_data('etf_515100_data.csv')
-    df_601600 = load_data('stock_601600_data.csv')
-    df_combined = pd.concat([df_515100, df_601600], ignore_index=True)
+    # 测试不同阈值 - 0.6以上普通Spring, 0.8以上高置信度
+    thresholds = [0.3, 0.5, 0.6, 0.7, 0.8]
     
-    print(f"515100: {len(df_515100)}条, 601600: {len(df_601600)}条, 合并: {len(df_combined)}条")
-    
-    # ==================== 第一轮: 基础对比 ====================
-    print("\n" + "="*70)
-    print("第一轮: 对比不同配置")
-    print("="*70)
-    
-    configs = [
-        {'name': '增强版(完整)', 'require_bull_market': True, 'require_demand_followup': True, 'followup_days': 3},
-        {'name': '无背景+需求跟随', 'require_bull_market': False, 'require_demand_followup': True, 'followup_days': 3},
-    ]
-    
-    for config in configs:
-        print(f"\n--- {config['name']} ---")
-        results = backtest_spring_enhanced(
-            df_combined, 
-            hold_days=[1, 3, 5],
-            require_bull_market=config['require_bull_market'],
-            require_demand_followup=config['require_demand_followup'],
-            followup_days=config['followup_days']
-        )
-        print_results(results, config['name'])
-    
-    # ==================== 第二轮: 优化参数 ====================
-    print("\n" + "="*70)
-    print("第二轮: 优化参数组合")
-    print("="*70)
-    
-    configs2 = [
-        {'name': '需求跟随2天', 'require_bull_market': False, 'require_demand_followup': True, 'followup_days': 2},
-        {'name': '需求跟随4天', 'require_bull_market': False, 'require_demand_followup': True, 'followup_days': 4},
-        {'name': '仅背景过滤', 'require_bull_market': True, 'require_demand_followup': False, 'followup_days': 3},
-    ]
-    
-    for config in configs2:
-        print(f"\n--- {config['name']} ---")
-        results = backtest_spring_enhanced(
-            df_combined, 
-            hold_days=[1, 3, 5],
-            require_bull_market=config['require_bull_market'],
-            require_demand_followup=config['require_demand_followup'],
-            followup_days=config['followup_days']
-        )
-        print_results(results, config['name'])
-    
-    # ==================== 第三轮: 最终验证 ====================
-    print("\n" + "="*70)
-    print("第三轮: 最终验证 - 最佳配置")
-    print("="*70)
-    
-    # 最佳配置: 无背景过滤 + 需求跟随(3天)
-    print("\n--- 最终验证: 无背景+需求跟随(3天) ---")
-    results_final = backtest_spring_enhanced(
-        df_combined, 
-        hold_days=[1, 3, 5, 7, 10],
-        require_bull_market=False,
-        require_demand_followup=True,
-        followup_days=3
-    )
-    print_results(results_final, "最终配置")
+    for th in thresholds:
+        print("\n" + "="*60)
+        print(f"阈值测试: threshold={th}")
+        print("="*60)
+        results = backtest_spring('600108', threshold=th)

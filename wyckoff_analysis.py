@@ -686,6 +686,37 @@ class ProbabilityCloud:
         df['amplitude'] = (df['high'] - df['low']) / df['close'] * 100
         df['pct_change'] = df['close'].pct_change() * 100
         df['vol_ratio'] = df['volume'] / df['vol_ma20']
+        
+        # ===== SASE支撑位预计算 =====
+        # 计算ATR
+        df['high_low'] = df['high'] - df['low']
+        df['high_close'] = abs(df['high'] - df['close'].shift(1))
+        df['low_close'] = abs(df['low'] - df['close'].shift(1))
+        df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
+        df['atr_14'] = df['tr'].rolling(14).mean()
+        df['atr_100'] = df['tr'].rolling(100).mean()
+        df['atr_ratio'] = df['atr_14'] / (df['atr_100'] + 1e-9)
+        
+        # 计算ADX
+        df['plus_dm'] = df['high'].diff()
+        df['minus_dm'] = -df['low'].diff()
+        df['plus_dm'] = df['plus_dm'].apply(lambda x: x if x > 0 else 0)
+        df['minus_dm'] = df['minus_dm'].apply(lambda x: x if x > 0 else 0)
+        df['plus_di'] = df['plus_dm'].rolling(14).mean() / (df['atr_14'] + 1e-9) * 100
+        df['minus_di'] = df['minus_dm'].rolling(14).mean() / (df['atr_14'] + 1e-9) * 100
+        dx = abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'] + 1e-9) * 100
+        df['adx'] = dx.rolling(14).mean()
+        
+        # 布林带支撑 - 动态容差
+        df['bb_mid'] = df['close'].rolling(20).mean()
+        df['bb_std'] = df['close'].rolling(20).std()
+        atr_ratio = df['atr_ratio'].fillna(1.0)
+        tolerance = 2.0 * (1.0 + (1 - atr_ratio.clip(0, 2)) * 0.5)
+        df['bb_lower'] = df['bb_mid'] - tolerance * df['bb_std']
+        
+        # 支撑位：布林下轨
+        df['support'] = df['bb_lower']
+        
         self.df = df
     
     def calculate_all_likelihoods(self):
@@ -731,52 +762,72 @@ class ProbabilityCloud:
         )
     
     def _calc_spring_likelihood(self):
+        """
+        Spring概率云 - SASE支撑位 + 回弹综合评价
+        1. 使用SASE动态识别支撑位
+        2. 跌破支撑（幅度需超过1%）
+        3. 5天内回弹，回弹幅度+成交量综合评分
+        """
         df = self.df
-        low_20 = df['low_20']
-        close_near_low = ((df['close'] - low_20) / low_20).abs() < 0.02
-        low_below = (df['low'] < low_20)
-        near_support = (close_near_low | low_below).astype(float)
         
-        def check_recovery(idx):
-            if idx + 3 >= len(df):
-                return 0.0
-            next_3 = df.iloc[idx:min(idx+4, len(df))]
-            return 1.0 if (next_3['close'] > low_20.iloc[idx]).any() else 0.0
+        body_amplitude = abs(df['close'] - df['open']) / df['open'] * 100
+        vol_ratio = df['vol_ratio'].fillna(1.0)
         
-        recovered = pd.Series([check_recovery(i) for i in range(len(df))], index=df.index)
-        amplitude = (df['high'] - df['low']) / df['close'] * 100
-        vol_ratio = df['vol_ratio']
-        vol_shrink = (vol_ratio < 0.85).astype(float)
+        spring_strength = pd.Series([0.0] * len(df), index=df.index)
+        spring_best = pd.Series([0.0] * len(df), index=df.index)
+        spring_confirm = pd.Series([0.0] * len(df), index=df.index)
         
-        base_score = near_support * 0.30 + recovered * 0.30 + vol_shrink * 0.20
+        min_break_depth = 0.01  # 最小跌破幅度1%
         
-        best_spring = ((amplitude < 3).astype(float) * 0.5 + (vol_ratio < 0.5).astype(float) * 0.5)
-        self.likelihood['SPRING_BEST'] = base_score * best_spring
+        for i in range(30, len(df) - 10):
+            support = df.iloc[i]['support']
+            break_price = df.iloc[i]['low']
+            
+            # 检查跌破支撑（幅度需超过阈值）
+            break_depth = (support - break_price) / support
+            if break_depth < min_break_depth:
+                continue
+            
+            # 检查5天内是否回弹到支撑上方
+            recovered = False
+            rebound_info = {'found': False, 'days': 0, 'high': 0, 'vol': 0}
+            
+            for j in range(1, 6):
+                if i + j < len(df):
+                    if df.iloc[i + j]['close'] > support:
+                        recovered = True
+                        rebound_info['found'] = True
+                        rebound_info['days'] = j
+                        rebound_info['high'] = df.iloc[i + j]['high']
+                        rebound_info['vol'] = df.iloc[i + j]['vol_ratio']
+                        break
+            
+            if recovered:
+                # ===== 回弹综合评分 =====
+                rebound_pct = (rebound_info['high'] - break_price) / break_price
+                rebound_score = min(rebound_pct / 0.15, 1.0)
+                
+                vol_score = 1.0 - min(rebound_info['vol'], 2.0) / 2.0
+                vol_score = max(vol_score, 0)
+                
+                strength = rebound_score * 0.6 + vol_score * 0.4
+                
+                body_amp = body_amplitude.iloc[i]
+                vol = rebound_info['vol']
+                
+                # 最佳Spring
+                if body_amp < 3 and vol < 0.8:
+                    spring_best.iloc[i] = strength
+                
+                # 普通Spring
+                if body_amp < 5 and vol < 1.2:
+                    spring_confirm.iloc[i] = strength
+                
+                spring_strength.iloc[i] = strength
         
-        close_above_mid = (df['close'] > (df['high'] + df['low']) / 2).astype(float)
-        vol_expand = (vol_ratio > 1.0).astype(float)
-        strong_demand_spring = (vol_expand * 0.5 + close_above_mid * 0.5)
-        strong_demand_base = (near_support * 0.30 + recovered * 0.30 + vol_expand * 0.20)
-        self.likelihood['SPRING_STRONG'] = strong_demand_base * strong_demand_spring
-        
-        confirm_spring = (
-            ((amplitude >= 3) & (amplitude < 5)).astype(float) * 0.4 +
-            ((vol_ratio >= 0.5) & (vol_ratio < 1.0)).astype(float) * 0.6
-        )
-        self.likelihood['SPRING_CONFIRM'] = base_score * confirm_spring
-        
-        shakeout_spring = (
-            (amplitude > 5).astype(float) * 0.5 +
-            (vol_ratio > 1.0).astype(float) * 0.5
-        )
-        self.likelihood['SPRING_SHAKEOUT'] = base_score * shakeout_spring
-        
-        self.likelihood['SPRING'] = (
-            self.likelihood['SPRING_BEST'] * 1.0 +
-            self.likelihood['SPRING_STRONG'] * 1.0 +
-            self.likelihood['SPRING_CONFIRM'] * 0.7 +
-            self.likelihood['SPRING_SHAKEOUT'] * 0.3
-        )
+        self.likelihood['SPRING_BEST'] = spring_best
+        self.likelihood['SPRING_CONFIRM'] = spring_confirm
+        self.likelihood['SPRING'] = spring_strength
     
     def _calc_sos_likelihood(self):
         """SOS概率云：大阳线型 + JOC震荡区识别"""

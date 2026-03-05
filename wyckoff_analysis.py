@@ -133,7 +133,71 @@ class EventVerifier:
         # 量比
         df['vol_ratio'] = df['volume'] / df['vol_ma20']
         
+        # ===== SASE动态支撑（布林带下轨） =====
+        df['bb_mid'] = df['close'].rolling(20).mean()
+        df['bb_std'] = df['close'].rolling(20).std()
+        
+        # 计算ATR
+        df['high_low'] = df['high'] - df['low']
+        df['high_close'] = abs(df['high'] - df['close'].shift(1))
+        df['low_close'] = abs(df['low'] - df['close'].shift(1))
+        df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
+        df['atr_14'] = df['tr'].rolling(14).mean()
+        df['atr_100'] = df['tr'].rolling(100).mean()
+        df['atr_ratio'] = df['atr_14'] / (df['atr_100'] + 1e-9)
+        
+        # 恢复原容差2.0
+        atr_ratio = df['atr_ratio'].fillna(1.0)
+        tolerance = 2.0 * (1.0 + (1 - atr_ratio.clip(0, 2)) * 0.5)
+        df['bb_lower'] = df['bb_mid'] - tolerance * df['bb_std']
+        
+        # 支撑位：布林下轨（SASE动态支撑）
+        df['support'] = df['bb_lower']
+        
         self.df = df
+    
+    def _calculate_zigzag(self, df, threshold=0.05):
+        """
+        计算Zigzag拐点
+        threshold: 波动阈值（默认5%）
+        返回: 包含zigzag支撑位(波谷)和阻力位(波峰)的列表
+        """
+        close = df['close'].values
+        n = len(close)
+        
+        # 记录拐点索引
+        pivots = [0]
+        direction = 0
+        
+        for i in range(1, n):
+            if direction == 0:
+                if close[i] >= close[0] * (1 + threshold):
+                    direction = 1
+                    pivots.append(i)
+                elif close[i] <= close[0] * (1 - threshold):
+                    direction = -1
+                    pivots.append(i)
+            elif direction == 1:
+                if close[i] > close[pivots[-1]]:
+                    pivots[-1] = i
+                elif close[i] <= close[pivots[-1]] * (1 - threshold):
+                    direction = -1
+                    pivots.append(i)
+            elif direction == -1:
+                if close[i] < close[pivots[-1]]:
+                    pivots[-1] = i
+                elif close[i] >= close[pivots[-1]] * (1 + threshold):
+                    direction = 1
+                    pivots.append(i)
+        
+        # 提取支撑位（波谷）
+        supports = []
+        for i in range(1, len(pivots) - 1):
+            idx = pivots[i]
+            if (close[pivots[i-1]] > close[idx]) and (close[pivots[i+1]] > close[idx]):
+                supports.append({'idx': idx, 'price': close[idx], 'type': 'support'})
+        
+        return None, supports
     
     def add_pending_event(self, event: WyckoffEvent):
         """添加待验证事件"""
@@ -150,6 +214,8 @@ class EventVerifier:
             # 根据事件类型选择验证器
             if event.event_type in ['SC']:
                 self._verify_sc(event, total_bars)
+            elif event.event_type in ['SPRING_ZIGZAG']:
+                self._verify_spring_zigzag(event, total_bars)
             elif event.event_type in ['SPRING', 'SPRING_BEST', 'SPRING_STRONG', 'SPRING_CONFIRM', 'SPRING_SHAKEOUT']:
                 self._verify_spring(event, total_bars)
             elif event.event_type in ['SOS', 'JOC']:
@@ -214,21 +280,22 @@ class EventVerifier:
             event.failed_reason = "数据不足，无法验证"
             return
         
-        # 支撑位
-        support = self.df.iloc[event_idx]['low_20']
+        # 支撑位 - 使用SASE动态支撑（布林带下轨）
+        support = self.df.iloc[event_idx]['support']
         
         # 检查1：是否迅速收复支撑
         recovered = False
         for idx in range(verify_start, verify_end):
             if idx >= total_bars:
                 break
-            if self.df.iloc[idx]['close'] > support:
+            # 收盘价需要超过支撑位1%以上
+            if self.df.iloc[idx]['close'] > support * 1.01:
                 recovered = True
                 break
         
         if not recovered:
             event.status = EventStatus.FAILED
-            event.failed_reason = "未能在5日内收复支撑位"
+            event.failed_reason = "未能在5日内收复支撑位1%"
             return
         
         # 检查2：是否有连续阴线（失效信号）
@@ -269,7 +336,75 @@ class EventVerifier:
         # 普通Spring确认
         event.status = EventStatus.CONFIRMED
         event.confirmed_by = "立即反弹确认"
-        event.verification_details = "收盘站稳支撑，无连续阴线"
+        event.verification_details = "收盘站稳支撑1%，无连续阴线"
+    
+    def _verify_spring_zigzag(self, event: WyckoffEvent, total_bars: int):
+        """验证SPRING_ZIGZAG - 使用Zigzag支撑位验证"""
+        event_idx = self.df[self.df['date'] == event.date].index[0]
+        
+        # 验证窗口：5天内
+        verify_start = event_idx + 1
+        verify_end = min(event_idx + 5, total_bars)
+        
+        if verify_start >= total_bars:
+            event.status = EventStatus.FAILED
+            event.failed_reason = "数据不足，无法验证"
+            return
+        
+        # 重新计算Zigzag支撑位（使用event_idx之前的数据，避免前视偏差）
+        historical_df = self.df.iloc[:event_idx]
+        if len(historical_df) < 30:
+            event.status = EventStatus.FAILED
+            event.failed_reason = "历史数据不足"
+            return
+        
+        zigzag, zigzag_supports = self._calculate_zigzag(historical_df, threshold=0.05)
+        
+        # 获取最近的Zigzag支撑位
+        support_price = None
+        for s in zigzag_supports:
+            if s['idx'] < event_idx - 1:
+                support_price = s['price']
+        
+        if support_price is None:
+            event.status = EventStatus.FAILED
+            event.failed_reason = "无Zigzag支撑位"
+            return
+        
+        # 检查1：是否迅速收复支撑
+        recovered = False
+        for idx in range(verify_start, verify_end):
+            if idx >= total_bars:
+                break
+            # 收盘价需要超过支撑位1%以上
+            if self.df.iloc[idx]['close'] > support_price * 1.01:
+                recovered = True
+                break
+        
+        if not recovered:
+            event.status = EventStatus.FAILED
+            event.failed_reason = "未能在5日内收复Zigzag支撑位1%"
+            return
+        
+        # 检查2：是否有连续阴线（失效信号）
+        consecutive_down = 0
+        for idx in range(event_idx + 1, min(event_idx + 4, total_bars)):
+            if idx >= total_bars:
+                break
+            if self.df.iloc[idx]['close'] < self.df.iloc[idx]['open']:
+                consecutive_down += 1
+            else:
+                break
+        
+        if consecutive_down >= 2:
+            event.status = EventStatus.FAILED
+            event.failed_reason = "跌破后出现连续阴线"
+            return
+        
+        # 确认
+        event.status = EventStatus.CONFIRMED
+        event.confirmed_by = "Zigzag支撑反弹确认"
+        event.verification_details = f"收盘站稳Zigzag支撑{support_price:.2f}，无连续阴线"
     
     def _verify_sos(self, event: WyckoffEvent, total_bars: int):
         """验证SOS - 需要回测不破，且回测振幅小于SOS到回测期间的均幅"""
@@ -710,6 +845,8 @@ class ProbabilityCloud:
         # 布林带支撑 - 动态容差
         df['bb_mid'] = df['close'].rolling(20).mean()
         df['bb_std'] = df['close'].rolling(20).std()
+        
+        # 恢复原容差2.0
         atr_ratio = df['atr_ratio'].fillna(1.0)
         tolerance = 2.0 * (1.0 + (1 - atr_ratio.clip(0, 2)) * 0.5)
         df['bb_lower'] = df['bb_mid'] - tolerance * df['bb_std']
@@ -718,10 +855,12 @@ class ProbabilityCloud:
         df['support'] = df['bb_lower']
         
         self.df = df
+
     
     def calculate_all_likelihoods(self):
         self._calc_sc_likelihood()
         self._calc_spring_likelihood()
+        self._calc_spring_zigzag_likelihood()  # Zigzag支撑的Spring检测
         self._calc_sos_likelihood()  # SOS包含JOC标记
         self._calc_bc_likelihood()
         self._calc_ut_likelihood()
@@ -763,24 +902,26 @@ class ProbabilityCloud:
     
     def _calc_spring_likelihood(self):
         """
-        Spring概率云 - SASE支撑位 + 回弹综合评价
-        1. 使用SASE动态识别支撑位
-        2. 跌破支撑（幅度需超过1%）
-        3. 5天内回弹，回弹幅度+成交量综合评分
+        Spring概率云 - 基于布林带下轨支撑
+        检测条件：
+        1. 跌破布林带下轨支撑（幅度需超过1%）
+        2. 5天内回弹，且收盘价超过支撑位至少1%
+        一旦检测到，直接识别为Spring事件（评分=1.0）
+        
+        布林带下轨支撑逻辑：
+        - 布林带下轨 = 20日均线 - 2倍标准差
+        - 当价格跌破布林下轨后反弹，形成Spring
         """
         df = self.df
         
-        body_amplitude = abs(df['close'] - df['open']) / df['open'] * 100
-        vol_ratio = df['vol_ratio'].fillna(1.0)
-        
         spring_strength = pd.Series([0.0] * len(df), index=df.index)
-        spring_best = pd.Series([0.0] * len(df), index=df.index)
-        spring_confirm = pd.Series([0.0] * len(df), index=df.index)
         
         min_break_depth = 0.01  # 最小跌破幅度1%
         
         for i in range(30, len(df) - 10):
+            # 使用布林下轨作为支撑
             support = df.iloc[i]['support']
+            
             break_price = df.iloc[i]['low']
             
             # 检查跌破支撑（幅度需超过阈值）
@@ -788,46 +929,137 @@ class ProbabilityCloud:
             if break_depth < min_break_depth:
                 continue
             
-            # 检查5天内是否回弹到支撑上方
-            recovered = False
-            rebound_info = {'found': False, 'days': 0, 'high': 0, 'vol': 0}
-            
+            # 检查5天内是否回弹到支撑上方（需超过支撑位1%以上）
             for j in range(1, 6):
                 if i + j < len(df):
-                    if df.iloc[i + j]['close'] > support:
-                        recovered = True
-                        rebound_info['found'] = True
-                        rebound_info['days'] = j
-                        rebound_info['high'] = df.iloc[i + j]['high']
-                        rebound_info['vol'] = df.iloc[i + j]['vol_ratio']
+                    # 收盘价需要超过支撑位至少1%
+                    if df.iloc[i + j]['close'] > support * 1.01:
+                        spring_strength.iloc[i] = 1.0
                         break
-            
-            if recovered:
-                # ===== 回弹综合评分 =====
-                rebound_pct = (rebound_info['high'] - break_price) / break_price
-                rebound_score = min(rebound_pct / 0.15, 1.0)
-                
-                vol_score = 1.0 - min(rebound_info['vol'], 2.0) / 2.0
-                vol_score = max(vol_score, 0)
-                
-                strength = rebound_score * 0.6 + vol_score * 0.4
-                
-                body_amp = body_amplitude.iloc[i]
-                vol = rebound_info['vol']
-                
-                # 最佳Spring
-                if body_amp < 3 and vol < 0.8:
-                    spring_best.iloc[i] = strength
-                
-                # 普通Spring
-                if body_amp < 5 and vol < 1.2:
-                    spring_confirm.iloc[i] = strength
-                
-                spring_strength.iloc[i] = strength
         
-        self.likelihood['SPRING_BEST'] = spring_best
-        self.likelihood['SPRING_CONFIRM'] = spring_confirm
         self.likelihood['SPRING'] = spring_strength
+    
+    def _calculate_zigzag(self, df, threshold=0.05):
+        """
+        计算Zigzag拐点
+        threshold: 波动阈值（默认5%）
+        返回: 包含zigzag支撑位(波谷)和阻力位(波峰)的Series
+        """
+        close = df['close'].values
+        n = len(close)
+        
+        # 初始化zigzag线
+        zigzag = np.full(n, np.nan)
+        zigzag[0] = close[0]
+        
+        # 记录拐点索引
+        pivots = [0]  # 起始点
+        direction = 0  # 0: 未确定, 1: 上涨, -1: 下跌
+        
+        for i in range(1, n):
+            if direction == 0:
+                # 初始方向
+                if close[i] >= close[0] * (1 + threshold):
+                    direction = 1
+                    pivots.append(i)
+                elif close[i] <= close[0] * (1 - threshold):
+                    direction = -1
+                    pivots.append(i)
+            elif direction == 1:
+                # 上涨趋势，寻找波峰
+                if close[i] > close[pivots[-1]]:
+                    pivots[-1] = i
+                elif close[i] <= close[pivots[-1]] * (1 - threshold):
+                    # 转势
+                    direction = -1
+                    pivots.append(i)
+            elif direction == -1:
+                # 下跌趋势，寻找波谷
+                if close[i] < close[pivots[-1]]:
+                    pivots[-1] = i
+                elif close[i] >= close[pivots[-1]] * (1 + threshold):
+                    # 转势
+                    direction = 1
+                    pivots.append(i)
+        
+        # 构建zigzag线
+        for i in range(len(pivots) - 1):
+            start_idx = pivots[i]
+            end_idx = pivots[i + 1]
+            start_price = close[start_idx]
+            end_price = close[end_idx]
+            for j in range(start_idx, end_idx + 1):
+                zigzag[j] = start_price + (end_price - start_price) * (j - start_idx) / (end_idx - start_idx + 1)
+        
+        # 提取支撑位（波谷）和阻力位（波峰）
+        supports = []
+        for i in range(1, len(pivots) - 1):
+            idx = pivots[i]
+            # 波谷是支撑
+            if (close[pivots[i-1]] > close[idx]) and (close[pivots[i+1]] > close[idx]):
+                supports.append({'idx': idx, 'price': close[idx], 'type': 'support'})
+            # 波峰是阻力
+            elif (close[pivots[i-1]] < close[idx]) and (close[pivots[i+1]] < close[idx]):
+                pass  # 阻力暂时不用
+        
+        return zigzag, supports
+    
+    def _calc_spring_zigzag_likelihood(self):
+        """
+        Spring概率云 - 基于Zigzag支撑位
+        检测条件（与布林带一致）：
+        1. 跌破Zigzag支撑位（幅度需超过1%）
+        2. 5天内回弹，且收盘价超过支撑位至少1%
+        一旦检测到，直接识别为Spring事件（评分=1.0）
+        
+        Zigzag支撑逻辑：
+        - 使用Zigzag算法识别波谷作为支撑位
+        - 修正前视偏差：每天只使用之前的数据计算Zigzag
+        """
+        df = self.df
+        
+        spring_strength = pd.Series([0.0] * len(df), index=df.index)
+        
+        min_break_depth = 0.01  # 最小跌破幅度1%
+        
+        # 需要至少30天历史数据才能计算Zigzag
+        for i in range(50, len(df) - 10):
+            # 只使用i之前的数据计算Zigzag（避免前视偏差）
+            historical_df = df.iloc[:i]
+            
+            if len(historical_df) < 30:
+                continue
+            
+            # 计算历史数据的Zigzag支撑位
+            _, zigzag_supports = self._calculate_zigzag(historical_df, threshold=0.05)
+            
+            if not zigzag_supports:
+                continue
+            
+            # 获取最近的Zigzag支撑位（在i之前形成的）
+            support_price = None
+            for s in zigzag_supports:
+                if s['idx'] < i - 1:  # 至少1天前形成的支撑位
+                    support_price = s['price']
+            
+            if support_price is None:
+                continue
+            
+            # 检查是否跌破支撑（与布林带一致：幅度超过1%）
+            break_price = df.iloc[i]['low']
+            break_depth = (support_price - break_price) / support_price
+            
+            if break_depth < min_break_depth:  # 跌破幅度不足1%
+                continue
+            
+            # 检查5天内是否回弹到支撑位上方（需超过支撑位1%以上）
+            for j in range(1, 6):
+                if i + j < len(df):
+                    if df.iloc[i + j]['close'] > support_price * 1.01:
+                        spring_strength.iloc[i] = 1.0
+                        break
+        
+        self.likelihood['SPRING_ZIGZAG'] = spring_strength
     
     def _calc_sos_likelihood(self):
         """SOS概率云：大阳线型 + JOC震荡区识别"""
@@ -1171,7 +1403,8 @@ class WyckoffAnalyzer:
             'BC': 0.5,
             'UT': 0.5,
             'SOW': 0.5,
-            'SPRING': 0.5,
+            'SPRING': 0.5,          # 布林带下轨支撑的Spring
+            'SPRING_ZIGZAG': 0.5,   # Zigzag支撑的Spring
             'SPRING_BEST': 0.5,
             'SPRING_STRONG': 0.5,
             'SPRING_CONFIRM': 0.5,

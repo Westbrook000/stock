@@ -156,48 +156,69 @@ class EventVerifier:
         
         self.df = df
     
-    def _calculate_zigzag(self, df, threshold=0.05):
+    def _calculate_zigzag(self, df, threshold=0.02, depth=14, backstep=1):
         """
-        计算Zigzag拐点
-        threshold: 波动阈值（默认5%）
-        返回: 包含zigzag支撑位(波谷)和阻力位(波峰)的列表
+        计算Zigzag拐点（使用high/low高低点）
+        返回: (pivots, supports, resistances)
         """
-        close = df['close'].values
-        n = len(close)
+        high = df['high'].values
+        low = df['low'].values
+        n = len(df)
         
-        # 记录拐点索引
         pivots = [0]
         direction = 0
+        last_pivot_direction = 0
+        last_pivot_idx = 0
         
         for i in range(1, n):
+            if i - last_pivot_idx < depth:
+                continue
+            
             if direction == 0:
-                if close[i] >= close[0] * (1 + threshold):
+                if high[i] >= high[0] * (1 + threshold):
                     direction = 1
                     pivots.append(i)
-                elif close[i] <= close[0] * (1 - threshold):
+                    last_pivot_direction = 1
+                    last_pivot_idx = i
+                elif low[i] <= low[0] * (1 - threshold):
                     direction = -1
                     pivots.append(i)
+                    last_pivot_direction = -1
+                    last_pivot_idx = i
             elif direction == 1:
-                if close[i] > close[pivots[-1]]:
+                if high[i] > high[pivots[-1]]:
                     pivots[-1] = i
-                elif close[i] <= close[pivots[-1]] * (1 - threshold):
-                    direction = -1
-                    pivots.append(i)
+                elif low[i] <= low[pivots[-1]] * (1 - threshold):
+                    if i - pivots[-1] >= backstep:
+                        direction = -1
+                        pivots.append(i)
+                        last_pivot_direction = -1
+                        last_pivot_idx = i
             elif direction == -1:
-                if close[i] < close[pivots[-1]]:
+                if low[i] < low[pivots[-1]]:
                     pivots[-1] = i
-                elif close[i] >= close[pivots[-1]] * (1 + threshold):
-                    direction = 1
-                    pivots.append(i)
+                elif high[i] >= high[pivots[-1]] * (1 + threshold):
+                    if i - pivots[-1] >= backstep:
+                        direction = 1
+                        pivots.append(i)
+                        last_pivot_direction = 1
+                        last_pivot_idx = i
         
         # 提取支撑位（波谷）
         supports = []
         for i in range(1, len(pivots) - 1):
             idx = pivots[i]
-            if (close[pivots[i-1]] > close[idx]) and (close[pivots[i+1]] > close[idx]):
-                supports.append({'idx': idx, 'price': close[idx], 'type': 'support'})
+            if (low[pivots[i-1]] > low[idx]) and (low[pivots[i+1]] > low[idx]):
+                supports.append({'idx': idx, 'price': low[idx], 'type': 'support'})
         
-        return None, supports
+        # 提取阻力位（波峰）
+        resistances = []
+        for i in range(1, len(pivots) - 1):
+            idx = pivots[i]
+            if (high[pivots[i-1]] < high[idx]) and (high[pivots[i+1]] < high[idx]):
+                resistances.append({'idx': idx, 'price': high[idx], 'type': 'resistance'})
+        
+        return pivots, supports, resistances
     
     def add_pending_event(self, event: WyckoffEvent):
         """添加待验证事件"""
@@ -358,7 +379,7 @@ class EventVerifier:
             event.failed_reason = "历史数据不足"
             return
         
-        zigzag, zigzag_supports = self._calculate_zigzag(historical_df, threshold=0.05)
+        _, zigzag_supports, _ = self._calculate_zigzag(historical_df, threshold=0.05)
         
         # 获取最近的Zigzag支撑位
         support_price = None
@@ -376,14 +397,14 @@ class EventVerifier:
         for idx in range(verify_start, verify_end):
             if idx >= total_bars:
                 break
-            # 收盘价需要超过支撑位1%以上
-            if self.df.iloc[idx]['close'] > support_price * 1.01:
+            # 收盘价需要超过支撑位
+            if self.df.iloc[idx]['close'] > support_price:
                 recovered = True
                 break
         
         if not recovered:
             event.status = EventStatus.FAILED
-            event.failed_reason = "未能在5日内收复Zigzag支撑位1%"
+            event.failed_reason = "未能在5日内收复Zigzag支撑位"
             return
         
         # 检查2：是否有连续阴线（失效信号）
@@ -851,22 +872,110 @@ class ProbabilityCloud:
         tolerance = 2.0 * (1.0 + (1 - atr_ratio.clip(0, 2)) * 0.5)
         df['bb_lower'] = df['bb_mid'] - tolerance * df['bb_std']
         
-        # 支撑位：布林下轨
-        df['support'] = df['bb_lower']
+        # ===== ATR自适应Zigzag支撑计算 =====
+        df['atr_multiplier'] = 2.0
+        df['atr_threshold'] = df['atr_14'] * df['atr_multiplier']
         
         self.df = df
 
     
     def calculate_all_likelihoods(self):
         self._calc_sc_likelihood()
-        self._calc_spring_likelihood()
-        self._calc_spring_zigzag_likelihood()  # Zigzag支撑的Spring检测
+        self._calc_spring_zigzag_likelihood()  # Zigzag支撑的Spring检测（使用最佳参数: threshold=2%, depth=14, backstep=1 + 趋势过滤）
         self._calc_sos_likelihood()  # SOS包含JOC标记
         self._calc_bc_likelihood()
         self._calc_ut_likelihood()
         self._calc_sow_likelihood()
         self._calc_st_likelihood()
         return self.likelihood
+    
+    def _calculate_zigzag(self, df, threshold=0.02, depth=14, backstep=1):
+        """
+        计算Zigzag拐点（使用high/low高低点）
+        返回: (pivots, supports, resistances)
+        """
+        high = df['high'].values
+        low = df['low'].values
+        n = len(df)
+        
+        pivots = [0]
+        direction = 0
+        last_pivot_direction = 0
+        last_pivot_idx = 0
+        
+        for i in range(1, n):
+            if i - last_pivot_idx < depth:
+                continue
+            
+            if direction == 0:
+                if high[i] >= high[0] * (1 + threshold):
+                    direction = 1
+                    pivots.append(i)
+                    last_pivot_direction = 1
+                    last_pivot_idx = i
+                elif low[i] <= low[0] * (1 - threshold):
+                    direction = -1
+                    pivots.append(i)
+                    last_pivot_direction = -1
+                    last_pivot_idx = i
+            elif direction == 1:
+                if high[i] > high[pivots[-1]]:
+                    pivots[-1] = i
+                elif low[i] <= low[pivots[-1]] * (1 - threshold):
+                    if i - pivots[-1] >= backstep:
+                        direction = -1
+                        pivots.append(i)
+                        last_pivot_direction = -1
+                        last_pivot_idx = i
+            elif direction == -1:
+                if low[i] < low[pivots[-1]]:
+                    pivots[-1] = i
+                elif high[i] >= high[pivots[-1]] * (1 + threshold):
+                    if i - pivots[-1] >= backstep:
+                        direction = 1
+                        pivots.append(i)
+                        last_pivot_direction = 1
+                        last_pivot_idx = i
+        
+        supports = []
+        for i in range(1, len(pivots) - 1):
+            idx = pivots[i]
+            if (low[pivots[i-1]] > low[idx]) and (low[pivots[i+1]] > low[idx]):
+                supports.append({'idx': idx, 'price': low[idx], 'type': 'support'})
+        
+        resistances = []
+        for i in range(1, len(pivots) - 1):
+            idx = pivots[i]
+            if (high[pivots[i-1]] < high[idx]) and (high[pivots[i+1]] < high[idx]):
+                resistances.append({'idx': idx, 'price': high[idx], 'type': 'resistance'})
+        
+        return pivots, supports, resistances
+    
+    def _is_uptrend_or_sideways(self, current_idx):
+        """
+        趋势过滤：只允许非下跌趋势
+        条件：最近2个Zigzag低点不创新低（Low2 >= Low1）
+        """
+        if current_idx < 30:
+            return True
+        
+        historical_df = self.df.iloc[:current_idx]
+        
+        if len(historical_df) < 30:
+            return True
+        
+        _, supports, _ = self._calculate_zigzag(
+            historical_df,
+            threshold=0.05, depth=10, backstep=3
+        )
+        
+        if len(supports) < 2:
+            return True
+        
+        last1 = supports[-1]['price']
+        last2 = supports[-2]['price']
+        
+        return last1 >= last2
     
     def _calc_sc_likelihood(self):
         """SC概率云：使用sigmoid平滑评分"""
@@ -900,164 +1009,95 @@ class ProbabilityCloud:
             cond_amp * 0.20
         )
     
-    def _calc_spring_likelihood(self):
+    def _is_uptrend_or_sideways(self, current_idx):
         """
-        Spring概率云 - 基于布林带下轨支撑
-        检测条件：
-        1. 跌破布林带下轨支撑（幅度需超过1%）
-        2. 5天内回弹，且收盘价超过支撑位至少1%
-        一旦检测到，直接识别为Spring事件（评分=1.0）
-        
-        布林带下轨支撑逻辑：
-        - 布林带下轨 = 20日均线 - 2倍标准差
-        - 当价格跌破布林下轨后反弹，形成Spring
+        趋势过滤：只允许非下跌趋势
+        条件：最近2个Zigzag低点不创新低（Low2 >= Low1）
         """
-        df = self.df
+        if current_idx < 30:
+            return True
         
-        spring_strength = pd.Series([0.0] * len(df), index=df.index)
+        historical_df = self.df.iloc[:current_idx]
         
-        min_break_depth = 0.01  # 最小跌破幅度1%
+        if len(historical_df) < 30:
+            return True
         
-        for i in range(30, len(df) - 10):
-            # 使用布林下轨作为支撑
-            support = df.iloc[i]['support']
-            
-            break_price = df.iloc[i]['low']
-            
-            # 检查跌破支撑（幅度需超过阈值）
-            break_depth = (support - break_price) / support
-            if break_depth < min_break_depth:
-                continue
-            
-            # 检查5天内是否回弹到支撑上方（需超过支撑位1%以上）
-            for j in range(1, 6):
-                if i + j < len(df):
-                    # 收盘价需要超过支撑位至少1%
-                    if df.iloc[i + j]['close'] > support * 1.01:
-                        spring_strength.iloc[i] = 1.0
-                        break
+        _, supports, _ = self._calculate_zigzag(
+            historical_df,
+            threshold=0.05, depth=10, backstep=3
+        )
         
-        self.likelihood['SPRING'] = spring_strength
-    
-    def _calculate_zigzag(self, df, threshold=0.05):
-        """
-        计算Zigzag拐点
-        threshold: 波动阈值（默认5%）
-        返回: 包含zigzag支撑位(波谷)和阻力位(波峰)的Series
-        """
-        close = df['close'].values
-        n = len(close)
+        if len(supports) < 2:
+            return True
         
-        # 初始化zigzag线
-        zigzag = np.full(n, np.nan)
-        zigzag[0] = close[0]
+        last1 = supports[-1]['price']
+        last2 = supports[-2]['price']
         
-        # 记录拐点索引
-        pivots = [0]  # 起始点
-        direction = 0  # 0: 未确定, 1: 上涨, -1: 下跌
-        
-        for i in range(1, n):
-            if direction == 0:
-                # 初始方向
-                if close[i] >= close[0] * (1 + threshold):
-                    direction = 1
-                    pivots.append(i)
-                elif close[i] <= close[0] * (1 - threshold):
-                    direction = -1
-                    pivots.append(i)
-            elif direction == 1:
-                # 上涨趋势，寻找波峰
-                if close[i] > close[pivots[-1]]:
-                    pivots[-1] = i
-                elif close[i] <= close[pivots[-1]] * (1 - threshold):
-                    # 转势
-                    direction = -1
-                    pivots.append(i)
-            elif direction == -1:
-                # 下跌趋势，寻找波谷
-                if close[i] < close[pivots[-1]]:
-                    pivots[-1] = i
-                elif close[i] >= close[pivots[-1]] * (1 + threshold):
-                    # 转势
-                    direction = 1
-                    pivots.append(i)
-        
-        # 构建zigzag线
-        for i in range(len(pivots) - 1):
-            start_idx = pivots[i]
-            end_idx = pivots[i + 1]
-            start_price = close[start_idx]
-            end_price = close[end_idx]
-            for j in range(start_idx, end_idx + 1):
-                zigzag[j] = start_price + (end_price - start_price) * (j - start_idx) / (end_idx - start_idx + 1)
-        
-        # 提取支撑位（波谷）和阻力位（波峰）
-        supports = []
-        for i in range(1, len(pivots) - 1):
-            idx = pivots[i]
-            # 波谷是支撑
-            if (close[pivots[i-1]] > close[idx]) and (close[pivots[i+1]] > close[idx]):
-                supports.append({'idx': idx, 'price': close[idx], 'type': 'support'})
-            # 波峰是阻力
-            elif (close[pivots[i-1]] < close[idx]) and (close[pivots[i+1]] < close[idx]):
-                pass  # 阻力暂时不用
-        
-        return zigzag, supports
+        return last1 >= last2
     
     def _calc_spring_zigzag_likelihood(self):
         """
-        Spring概率云 - 基于Zigzag支撑位
-        检测条件（与布林带一致）：
-        1. 跌破Zigzag支撑位（幅度需超过1%）
-        2. 5天内回弹，且收盘价超过支撑位至少1%
-        一旦检测到，直接识别为Spring事件（评分=1.0）
+        Spring概率云 - 基于Zigzag支撑位（使用high/low高低点，无未来函数）
         
-        Zigzag支撑逻辑：
-        - 使用Zigzag算法识别波谷作为支撑位
-        - 修正前视偏差：每天只使用之前的数据计算Zigzag
+        检测条件：
+        1. 只用i之前的历史数据计算Zigzag支撑位
+        2. 趋势过滤：只允许非下跌趋势
+        3. 价格（low）跌破Zigzag支撑位
+        4. 5天内收盘价超过支撑位
+        5. Spring确立日 = 价格翻回支撑线的那天
+        
+        参数（使用最佳参数: threshold=2%, depth=14, backstep=1）
         """
         df = self.df
-        
         spring_strength = pd.Series([0.0] * len(df), index=df.index)
         
-        min_break_depth = 0.01  # 最小跌破幅度1%
+        threshold = 0.02
+        depth = 14
+        backstep = 1
         
-        # 需要至少30天历史数据才能计算Zigzag
-        for i in range(50, len(df) - 10):
-            # 只使用i之前的数据计算Zigzag（避免前视偏差）
-            historical_df = df.iloc[:i]
+        close = df['close'].values
+        low = df['low'].values
+        high = df['high'].values
+        
+        for i in range(50, len(df)):
+            # 趋势过滤：只允许非下跌趋势
+            if not self._is_uptrend_or_sideways(i):
+                continue
+            
+            historical_df = df.iloc[:i][['high', 'low']].copy()
             
             if len(historical_df) < 30:
                 continue
             
-            # 计算历史数据的Zigzag支撑位
-            _, zigzag_supports = self._calculate_zigzag(historical_df, threshold=0.05)
+            _, zigzag_supports, _ = self._calculate_zigzag(
+                historical_df,
+                threshold=threshold, 
+                depth=depth, 
+                backstep=backstep
+            )
             
             if not zigzag_supports:
                 continue
             
-            # 获取最近的Zigzag支撑位（在i之前形成的）
             support_price = None
             for s in zigzag_supports:
-                if s['idx'] < i - 1:  # 至少1天前形成的支撑位
+                if s['idx'] < i - 1:
                     support_price = s['price']
             
             if support_price is None:
                 continue
             
-            # 检查是否跌破支撑（与布林带一致：幅度超过1%）
-            break_price = df.iloc[i]['low']
-            break_depth = (support_price - break_price) / support_price
+            break_price = low[i]
             
-            if break_depth < min_break_depth:  # 跌破幅度不足1%
+            if break_price >= support_price:
                 continue
             
-            # 检查5天内是否回弹到支撑位上方（需超过支撑位1%以上）
             for j in range(1, 6):
-                if i + j < len(df):
-                    if df.iloc[i + j]['close'] > support_price * 1.01:
-                        spring_strength.iloc[i] = 1.0
-                        break
+                if i + j >= len(df):
+                    break
+                if close[i + j] > support_price:
+                    spring_strength.iloc[i + j] = 1.0
+                    break
         
         self.likelihood['SPRING_ZIGZAG'] = spring_strength
     
@@ -1403,8 +1443,7 @@ class WyckoffAnalyzer:
             'BC': 0.5,
             'UT': 0.5,
             'SOW': 0.5,
-            'SPRING': 0.5,          # 布林带下轨支撑的Spring
-            'SPRING_ZIGZAG': 0.5,   # Zigzag支撑的Spring
+            'SPRING_ZIGZAG': 0.5,   # Zigzag支撑的Spring（使用最佳参数: threshold=2%, depth=14, backstep=3）
             'SPRING_BEST': 0.5,
             'SPRING_STRONG': 0.5,
             'SPRING_CONFIRM': 0.5,

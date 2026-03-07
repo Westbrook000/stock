@@ -881,7 +881,7 @@ class ProbabilityCloud:
     
     def calculate_all_likelihoods(self):
         self._calc_sc_likelihood()
-        self._calc_spring_zigzag_likelihood()  # Zigzag支撑的Spring检测（使用最佳参数: threshold=2%, depth=14, backstep=1 + 趋势过滤）
+        self._calc_spring_zigzag()  # Zigzag支撑的Spring检测（使用最佳参数: threshold=2%, depth=14, backstep=1 + 趋势过滤）
         self._calc_sos_likelihood()  # SOS包含JOC标记
         self._calc_bc_likelihood()
         self._calc_ut_likelihood()
@@ -1035,12 +1035,12 @@ class ProbabilityCloud:
         
         return last1 >= last2
     
-    def _calc_spring_zigzag_likelihood(self):
+    def _calc_spring_zigzag(self):
         """
-        Spring概率云 - 基于Zigzag支撑位（使用high/low高低点，无未来函数）
+        Spring检测 - 基于Zigzag支撑位（使用high/low高低点，无未来函数）
         
         检测条件：
-        1. 只用i之前的历史数据计算Zigzag支撑位
+        1. 只用i之前的历史数据计算Zigzag支撑位（第i-1日）
         2. 趋势过滤：只允许非下跌趋势
         3. 价格（low）跌破Zigzag支撑位
         4. 5天内收盘价超过支撑位

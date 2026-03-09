@@ -156,7 +156,54 @@ class EventVerifier:
         
         self.df = df
     
-    def _calculate_zigzag(self, df, threshold=0.02, depth=14, backstep=1):
+    def calculate_zigzag_static(self, prices, threshold=0.05, depth=15):
+        """
+        静态Zigzag算法 - 顺序确认，无未来数据
+        threshold: 反转阈值 (如0.05代表5%)
+        depth: 确认需要的K线数
+        
+        返回: [(idx, price, type), ...] type='high' or 'low'
+        """
+        if len(prices) < 2:
+            return []
+        
+        pivots = []
+        current_trend = 'up' if prices[1] > prices[0] else 'down'
+        current_extreme_index = 0
+        current_extreme_price = prices[0]
+        
+        for i in range(1, len(prices)):
+            price = prices[i]
+            
+            if current_trend == 'down':
+                if price < current_extreme_price:
+                    current_extreme_price = price
+                    current_extreme_index = i
+                
+                if current_extreme_price > 0:
+                    rise_pct = (price - current_extreme_price) / current_extreme_price
+                    if rise_pct >= threshold and (i - current_extreme_index) >= depth:
+                        pivots.append((current_extreme_index, current_extreme_price, 'low'))
+                        current_trend = 'up'
+                        current_extreme_price = price
+                        current_extreme_index = i
+            
+            elif current_trend == 'up':
+                if price > current_extreme_price:
+                    current_extreme_price = price
+                    current_extreme_index = i
+                
+                if current_extreme_price > 0:
+                    drop_pct = (current_extreme_price - price) / current_extreme_price
+                    if drop_pct >= threshold and (i - current_extreme_index) >= depth:
+                        pivots.append((current_extreme_index, current_extreme_price, 'high'))
+                        current_trend = 'down'
+                        current_extreme_price = price
+                        current_extreme_index = i
+        
+        return pivots
+    
+    def _calculate_zigzag(self, df, threshold=0.05, depth=15):
         """
         计算Zigzag拐点（使用high/low高低点）
         返回: (pivots, supports, resistances)
@@ -165,60 +212,25 @@ class EventVerifier:
         low = df['low'].values
         n = len(df)
         
-        pivots = [0]
-        direction = 0
-        last_pivot_direction = 0
-        last_pivot_idx = 0
-        
-        for i in range(1, n):
-            if i - last_pivot_idx < depth:
-                continue
-            
-            if direction == 0:
-                if high[i] >= high[0] * (1 + threshold):
-                    direction = 1
-                    pivots.append(i)
-                    last_pivot_direction = 1
-                    last_pivot_idx = i
-                elif low[i] <= low[0] * (1 - threshold):
-                    direction = -1
-                    pivots.append(i)
-                    last_pivot_direction = -1
-                    last_pivot_idx = i
-            elif direction == 1:
-                if high[i] > high[pivots[-1]]:
-                    pivots[-1] = i
-                elif low[i] <= low[pivots[-1]] * (1 - threshold):
-                    if i - pivots[-1] >= backstep:
-                        direction = -1
-                        pivots.append(i)
-                        last_pivot_direction = -1
-                        last_pivot_idx = i
-            elif direction == -1:
-                if low[i] < low[pivots[-1]]:
-                    pivots[-1] = i
-                elif high[i] >= high[pivots[-1]] * (1 + threshold):
-                    if i - pivots[-1] >= backstep:
-                        direction = 1
-                        pivots.append(i)
-                        last_pivot_direction = 1
-                        last_pivot_idx = i
+        # 使用静态Zigzag算法
+        pivots = self.calculate_zigzag_static(low, threshold=threshold, depth=depth)
         
         # 提取支撑位（波谷）
         supports = []
-        for i in range(1, len(pivots) - 1):
-            idx = pivots[i]
-            if (low[pivots[i-1]] > low[idx]) and (low[pivots[i+1]] > low[idx]):
-                supports.append({'idx': idx, 'price': low[idx], 'type': 'support'})
+        lows = [p for p in pivots if p[2] == 'low']
+        for i in range(len(lows) - 1):
+            if lows[i+1][1] < lows[i][1]:
+                supports.append({'idx': lows[i+1][0], 'price': lows[i+1][1], 'type': 'support'})
         
         # 提取阻力位（波峰）
         resistances = []
-        for i in range(1, len(pivots) - 1):
-            idx = pivots[i]
-            if (high[pivots[i-1]] < high[idx]) and (high[pivots[i+1]] < high[idx]):
-                resistances.append({'idx': idx, 'price': high[idx], 'type': 'resistance'})
+        highs = [p for p in pivots if p[2] == 'high']
+        for i in range(len(highs) - 1):
+            if highs[i+1][1] > highs[i][1]:
+                resistances.append({'idx': highs[i+1][0], 'price': highs[i+1][1], 'type': 'resistance'})
         
-        return pivots, supports, resistances
+        pivot_indices = [p[0] for p in pivots]
+        return pivot_indices, supports, resistances
     
     def add_pending_event(self, event: WyckoffEvent):
         """添加待验证事件"""
@@ -815,6 +827,47 @@ class ProbabilityCloud:
         self.likelihood = pd.DataFrame(index=df.index)
         self._prepare_indicators()
     
+    def calculate_zigzag_static(self, prices, threshold=0.05, depth=15):
+        """静态Zigzag算法"""
+        if len(prices) < 2:
+            return []
+        
+        pivots = []
+        current_trend = 'up' if prices[1] > prices[0] else 'down'
+        current_extreme_index = 0
+        current_extreme_price = prices[0]
+        
+        for i in range(1, len(prices)):
+            price = prices[i]
+            
+            if current_trend == 'down':
+                if price < current_extreme_price:
+                    current_extreme_price = price
+                    current_extreme_index = i
+                
+                if current_extreme_price > 0:
+                    rise_pct = (price - current_extreme_price) / current_extreme_price
+                    if rise_pct >= threshold and (i - current_extreme_index) >= depth:
+                        pivots.append((current_extreme_index, current_extreme_price, 'low'))
+                        current_trend = 'up'
+                        current_extreme_price = price
+                        current_extreme_index = i
+            
+            elif current_trend == 'up':
+                if price > current_extreme_price:
+                    current_extreme_price = price
+                    current_extreme_index = i
+                
+                if current_extreme_price > 0:
+                    drop_pct = (current_extreme_price - price) / current_extreme_price
+                    if drop_pct >= threshold and (i - current_extreme_index) >= depth:
+                        pivots.append((current_extreme_index, current_extreme_price, 'high'))
+                        current_trend = 'down'
+                        current_extreme_price = price
+                        current_extreme_index = i
+        
+        return pivots
+    
     def sigmoid_score(self, value, min_threshold, max_threshold, mid_threshold=None, steepness=5):
         """
         平滑评分函数（Sigmoid改进）
@@ -889,94 +942,6 @@ class ProbabilityCloud:
         self._calc_st_likelihood()
         return self.likelihood
     
-    def _calculate_zigzag(self, df, threshold=0.02, depth=14, backstep=1):
-        """
-        计算Zigzag拐点（使用high/low高低点）
-        返回: (pivots, supports, resistances)
-        """
-        high = df['high'].values
-        low = df['low'].values
-        n = len(df)
-        
-        pivots = [0]
-        direction = 0
-        last_pivot_direction = 0
-        last_pivot_idx = 0
-        
-        for i in range(1, n):
-            if i - last_pivot_idx < depth:
-                continue
-            
-            if direction == 0:
-                if high[i] >= high[0] * (1 + threshold):
-                    direction = 1
-                    pivots.append(i)
-                    last_pivot_direction = 1
-                    last_pivot_idx = i
-                elif low[i] <= low[0] * (1 - threshold):
-                    direction = -1
-                    pivots.append(i)
-                    last_pivot_direction = -1
-                    last_pivot_idx = i
-            elif direction == 1:
-                if high[i] > high[pivots[-1]]:
-                    pivots[-1] = i
-                elif low[i] <= low[pivots[-1]] * (1 - threshold):
-                    if i - pivots[-1] >= backstep:
-                        direction = -1
-                        pivots.append(i)
-                        last_pivot_direction = -1
-                        last_pivot_idx = i
-            elif direction == -1:
-                if low[i] < low[pivots[-1]]:
-                    pivots[-1] = i
-                elif high[i] >= high[pivots[-1]] * (1 + threshold):
-                    if i - pivots[-1] >= backstep:
-                        direction = 1
-                        pivots.append(i)
-                        last_pivot_direction = 1
-                        last_pivot_idx = i
-        
-        supports = []
-        for i in range(1, len(pivots) - 1):
-            idx = pivots[i]
-            if (low[pivots[i-1]] > low[idx]) and (low[pivots[i+1]] > low[idx]):
-                supports.append({'idx': idx, 'price': low[idx], 'type': 'support'})
-        
-        resistances = []
-        for i in range(1, len(pivots) - 1):
-            idx = pivots[i]
-            if (high[pivots[i-1]] < high[idx]) and (high[pivots[i+1]] < high[idx]):
-                resistances.append({'idx': idx, 'price': high[idx], 'type': 'resistance'})
-        
-        return pivots, supports, resistances
-    
-    def _is_uptrend_or_sideways(self, current_idx):
-        """
-        趋势过滤：只允许非下跌趋势
-        条件：最近2个Zigzag低点不创新低（Low2 >= Low1）
-        """
-        if current_idx < 30:
-            return True
-        
-        historical_df = self.df.iloc[:current_idx]
-        
-        if len(historical_df) < 30:
-            return True
-        
-        _, supports, _ = self._calculate_zigzag(
-            historical_df,
-            threshold=0.05, depth=10, backstep=3
-        )
-        
-        if len(supports) < 2:
-            return True
-        
-        last1 = supports[-1]['price']
-        last2 = supports[-2]['price']
-        
-        return last1 >= last2
-    
     def _calc_sc_likelihood(self):
         """SC概率云：使用sigmoid平滑评分"""
         df = self.df
@@ -1022,22 +987,18 @@ class ProbabilityCloud:
         if len(historical_df) < 30:
             return True
         
-        _, supports, _ = self._calculate_zigzag(
-            historical_df,
-            threshold=0.05, depth=10, backstep=3
-        )
+        low = historical_df['low'].values
+        pivots = self.calculate_zigzag_static(low, threshold=0.05, depth=15)
+        lows = [p for p in pivots if p[2] == 'low']
         
-        if len(supports) < 2:
+        if len(lows) < 2:
             return True
         
-        last1 = supports[-1]['price']
-        last2 = supports[-2]['price']
-        
-        return last1 >= last2
+        return lows[-1][1] >= lows[-2][1]
     
     def _calc_spring_zigzag_likelihood(self):
         """
-        Spring概率云 - 基于Zigzag支撑位（使用high/low高低点，无未来函数）
+        Spring概率云 - 基于Zigzag支撑位（使用静态Zigzag算法）
         
         检测条件：
         1. 只用i之前的历史数据计算Zigzag支撑位
@@ -1046,46 +1007,34 @@ class ProbabilityCloud:
         4. 5天内收盘价超过支撑位
         5. Spring确立日 = 价格翻回支撑线的那天
         
-        参数（使用最佳参数: threshold=2%, depth=14, backstep=1）
+        参数（使用最佳参数: threshold=5%, depth=15）
         """
         df = self.df
         spring_strength = pd.Series([0.0] * len(df), index=df.index)
         
-        threshold = 0.02
-        depth = 14
-        backstep = 1
+        threshold = 0.05
+        depth = 15
         
         close = df['close'].values
         low = df['low'].values
-        high = df['high'].values
         
         for i in range(50, len(df)):
             # 趋势过滤：只允许非下跌趋势
             if not self._is_uptrend_or_sideways(i):
                 continue
             
-            historical_df = df.iloc[:i][['high', 'low']].copy()
+            historical_low = low[:i]
             
-            if len(historical_df) < 30:
+            if len(historical_low) < 30:
                 continue
             
-            _, zigzag_supports, _ = self._calculate_zigzag(
-                historical_df,
-                threshold=threshold, 
-                depth=depth, 
-                backstep=backstep
-            )
+            pivots = self.calculate_zigzag_static(historical_low, threshold=threshold, depth=depth)
+            lows = [p for p in pivots if p[2] == 'low']
             
-            if not zigzag_supports:
+            if len(lows) < 2:
                 continue
             
-            support_price = None
-            for s in zigzag_supports:
-                if s['idx'] < i - 1:
-                    support_price = s['price']
-            
-            if support_price is None:
-                continue
+            support_price = lows[-1][1]
             
             break_price = low[i]
             

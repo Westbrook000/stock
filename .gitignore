@@ -1,0 +1,28 @@
+# --- 系统与 Python ---
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+.grill/
+
+# --- 行情数据与产出（本地生成，约1GB，不入库）---
+data/
+*.csv
+/*.png
+
+# --- 版权材料：原书 PDF 与整本提取文本，禁止入库 ---
+*.pdf
+wyckoff.md
+duokong.md
+供需交易法*.md
+多空转折*.md
+
+# --- 本机技能目录（含第三方内容与嵌套 git 仓库）---
+.agents/
+skills-lock.json
+
+# --- 本地服务/临时 ---
+*.tmp
+nohup.out

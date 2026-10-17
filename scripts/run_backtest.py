@@ -4,9 +4,10 @@
 用法:
     python3 scripts/run_backtest.py --sample 100 --since 2015-01-01
     python3 scripts/run_backtest.py --code 600108 --kind stock
-    python3 scripts/run_backtest.py --all-etf --set buy_threshold=1.6 stop_loss=0.07
+    python3 scripts/run_backtest.py --all-etf --set merge_percent=0.5 stop_loss=0.07
 """
 import argparse
+import yaml
 import sys
 import time
 from pathlib import Path
@@ -34,10 +35,7 @@ def main():
     overrides = {}
     for kv in args.set:
         k, v = kv.split("=", 1)
-        try:
-            overrides[k] = float(v) if any(c in v for c in ".e") else int(v)
-        except ValueError:
-            overrides[k] = v
+        overrides[k] = yaml.safe_load(v)
 
     if args.code:
         r = run_symbol(args.code, args.kind, overrides or None, args.since, args.until)

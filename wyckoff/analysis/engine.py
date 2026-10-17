@@ -13,7 +13,7 @@ from .indicators import add_candle_features
 from .phase import PHASES, phase_series
 from .supply_demand import Zone, detect_zones, zone_state_series
 from .support import SupportSeries
-from .zigzag import Pivot, zigzag_pivots
+from .zigzag import Pivot, day0_pivots, filter_pivots
 
 
 @dataclass
@@ -25,8 +25,9 @@ class AnalysisResult:
     events: List[Event]
     zones: List[Zone]
     signals: pd.DataFrame           # 逐K线: action/buy_score/sell_score/stop/entry_type/reason/phase/trend
-    levels: List = field(default_factory=list)   # 合并后的支撑/阻力带
+    levels: List = field(default_factory=list)   # day0水平线历史版本
     latest: Dict = field(default_factory=dict)
+    snapshot_levels: List = field(default_factory=list)  # 原版首尾端点参与的离线绘图快照
 
     @property
     def action(self) -> str:
@@ -46,16 +47,23 @@ def run_analysis(df: pd.DataFrame, cfg: Optional[StrategyConfig] = None,
 
     zc = cfg.zigzag
     if zc.adaptive:
-        atr_arr = feats["atr"].to_numpy(float)
-        atrp = np.where(c > 0, atr_arr / c, np.nan)
-        thr = np.where(np.isfinite(atrp),
-                       np.clip(zc.atr_mult * atrp, zc.min_threshold, zc.max_threshold),
-                       zc.threshold)
+        atr_ratio = feats["atr"].to_numpy(float) / np.maximum(c, np.finfo(float).eps)
+        adaptive_values = atr_ratio * zc.atr_mult
+        adaptive_values = np.where(np.isfinite(adaptive_values), adaptive_values, zc.threshold)
+        threshold = np.clip(adaptive_values, zc.min_threshold, zc.max_threshold)
     else:
-        thr = zc.threshold
-    pivots = zigzag_pivots(h, l, thr, zc.depth,
-                           open_=feats["open"].to_numpy(float), close=c)
-    ss = SupportSeries.compute(h, l, c, pivots, zone_max_width=cfg.zigzag.zone_max_width)
+        threshold = zc.threshold
+    pivots = day0_pivots(c, threshold)
+    selected = filter_pivots(pivots, zc.min_bars_between_peaks, zc.peaks)
+    ss = SupportSeries.compute(c, feats["atr"].to_numpy(float), selected, cfg.support)
+    snapshot_levels = SupportSeries.snapshot(c, selected, cfg.support)
+    live = {(level.pivot_indices,level.price):level for level in ss.levels if level.active}
+    for level in snapshot_levels:
+        reference = live.get((level.pivot_indices,level.price))
+        if reference is not None:
+            level.known_from = reference.known_from
+        else:
+            level.known_from,level.provisional = n,True
     events = detect_events(feats, ss, cfg)
 
     trend = trend_state(c, feats["ema20"].to_numpy(float), feats["ema60"].to_numpy(float))
@@ -74,141 +82,61 @@ def run_analysis(df: pd.DataFrame, cfg: Optional[StrategyConfig] = None,
     sig = _make_signals(feats, events, trend, phases, zst, ss, cfg)
     latest = _summarize(sig, feats, events, zones, cfg)
     return AnalysisResult(code or str(feats["code"].iloc[-1]), name or str(feats["name"].iloc[-1]),
-                          feats, pivots, events, zones, sig, list(ss.levels or []), latest)
+                          feats, pivots, events, zones, sig, list(ss.levels or []), latest, snapshot_levels)
 
 
-def _make_signals(feats, events, trend, phases, zst, ss, cfg) -> pd.DataFrame:
+STRATEGY_VERSION = "day0_022_compatible_direct_v3"
+
+
+def _entry_type(event, cfg):
+    # Explicit booleans and pattern subtypes only. Quality and diagnostic scores are never gates.
+    if event.meta.get("entry_allowed") is not True:
+        return None
+    if event.etype == "SPRING" and cfg.signal.entry_spring and event.kind in ("ideal", "absorption"):
+        return "spring"
+    if event.etype == "SC" and cfg.signal.entry_sc and event.kind == "confirmed":
+        return "sc"
+    if event.etype == "ST" and cfg.signal.entry_tests:
+        return "st_breakout" if event.kind == "breakout_test" else "st_sc"
+    if event.etype == "TEST" and cfg.signal.entry_tests:
+        return "st_spring"
+    if event.etype == "LPS" and cfg.signal.entry_lps:
+        return "lps"
+    if event.etype in ("JOC", "SOS") and cfg.signal.entry_breakouts:
+        return event.etype.lower()
+    return None
+
+
+def _make_signals(feats, events, trend, phases, zst, ss, cfg):
     n = len(feats)
-    c = feats["close"].to_numpy(float)
-    vr = feats["vol_ratio"].to_numpy(float)
-    pos60 = feats["pos_in_60"].to_numpy(float)
-
-    buy = np.zeros(n)
-    sell = np.zeros(n)
-    stop = np.full(n, np.nan)
-    actions = ["HOLD"] * n
-    entries = [""] * n
-    reasons = [""] * n
-
-    confirmed = sorted(events, key=lambda e: e.confirm_idx)
-    by_bar: Dict[int, List[Event]] = {}
-    for e in confirmed:
-        by_bar.setdefault(e.confirm_idx, []).append(e)
-
-    # 失败Spring标记
-    spring_fail_at = {e.failed_idx for e in events if e.etype == "SPRING" and e.failed_idx}
-
-    for t in range(1, n):
-        b, s = 0.0, 0.0
-        st, ent, rsn = np.nan, "", []
-
-        for e in by_bar.get(t, []):
-            if e.etype == "SPRING" and e.failed_idx is None and e.kind in ("ideal", "needs_test"):
-                # 书中铁律：熊市背景不做Spring
-                if trend[t] >= 0 or phases[t] in (1, 2):
-                    if e.kind == "ideal":
-                        b += 3.0 * e.quality + 0.5
-                    else:
-                        b += 2.2 * e.quality
-                    st = e.meta["break_low"] * 0.99
-                    ent = "spring"
-                    rsn.append(f"Spring({e.kind}@{e.price:.2f})")
-            elif e.etype == "SPRING" and e.kind == "shock":
-                s += 0.5  # 震仓：警示，不进场
-                rsn.append("震仓Spring(需缩量二次测试)")
-            elif e.etype == "TEST":
-                b += 3.0
-                st = e.meta.get("break_low", e.price * 0.985) * 0.99 if "break_low" in e.meta else e.price * 0.97
-                ent = "test"
-                rsn.append("Spring缩量二次测试成功")
-            elif e.etype == "LPS":
-                b += 2.5
-                st = e.meta["ref"] * 0.97
-                ent = "lps"
-                rsn.append("LPS缩量回踩")
-            elif e.etype in ("SOS", "JOC"):
-                b += 1.2 * e.quality
-                st = e.meta["ref"] * 0.97 if e.meta.get("ref") else c[t] * 0.95
-                ent = ent or ("joc" if e.etype == "JOC" else "sos")
-                rsn.append(f"{e.etype}放量突破")
-            elif e.etype == "ST":
-                # 缩量二次测试站回恐慌低点上方：供应消失的首个入场点（书中左侧买点）
-                b += 2.4 * e.quality
-                st = e.meta.get("test_low", e.price) * 0.99
-                ent = ent or "st"
-                rsn.append(f"ST缩量二次测试(量{e.meta.get('contraction', 0):.0%}低于恐慌)")
-            elif e.etype == "SOW":
-                s += 2.5
-                rsn.append("SOW放量跌破支撑")
-            elif e.etype == "UT":
-                s += 1.8 * e.quality
-                rsn.append("UT上冲回落(诱多)")
-            elif e.etype == "BC":
-                s += 1.5
-                rsn.append("BC抢购高潮")
-            elif e.etype == "NDR":
-                s += 1.5
-                rsn.append("无需求反弹")
-            elif e.etype == "EVR":
-                if e.kind == "top":
-                    s += 1.0
-                    rsn.append("顶部放量滞涨(努力结果背离)")
-                elif e.kind == "bottom":
-                    b += 0.8
-                    rsn.append("底部放量滞跌(供应被吸收)")
-            elif e.etype == "SC":
-                b += 0.5
-                rsn.append("SC恐慌抛售(观察)")
-
-        # Spring失败回补卖出
-        if t in spring_fail_at:
-            s += 3.0
-            rsn.append("Spring失败：跌破破位低点")
-
-        # 供需区信号（独立策略线）
-        if zst["demand_touch"][t] and zst["demand_quality"][t] >= 3.5 and trend[t] >= 0:
-            lts = zst["lts_position"][t]
-            if np.isfinite(lts) and lts <= 0.5:
-                b += 1.5 + 0.5 * (0.5 - lts)
-                ent = ent or "demand_zone"
-                st = zst["demand_bottom"][t] * 0.995
-                rsn.append(f"回踩新鲜需求区(s1={zst['demand_top'][t]:.2f})")
-        if zst["supply_touch"][t] and zst["supply_quality"][t] >= 3.5 and trend[t] <= 0:
-            s += 1.8
-            rsn.append("触供给区(高位)")
-
-        # 背景衰减：熊压买、牛压卖（书中"背景"权重；吸筹期允许左侧试仓）
-        sc = cfg.signal
-        if trend[t] == -1:
-            b *= sc.bear_accum_mult if phases[t] == 1 else sc.bear_mult
-        if trend[t] == 1:
-            s *= 0.7
-        if phases[t] == 0:
-            b *= 0.5
-        if phases[t] == 3:
-            b *= sc.dist_mult
-
-        buy[t], sell[t] = b, s
-        # 信号规则：分差显著才行动
-        action = "BUY" if b >= sc.buy_threshold and b > s * sc.confirm_margin else (
-            "SELL" if s >= sc.sell_threshold and s > b * sc.confirm_margin else "HOLD")
-        actions[t] = action
-        entries[t] = ent if action == "BUY" else ""
-        stop[t] = st if action == "BUY" else np.nan
-        reasons[t] = ";".join(rsn)
-
-    out = pd.DataFrame({
-        "date": feats["date"].to_numpy(),
-        "action": actions,
-        "buy_score": buy,
-        "sell_score": sell,
-        "stop": stop,
-        "entry_type": entries,
-        "reason": reasons,
-    })
-    out["phase"] = [PHASES[p] for p in phases]
-    out["trend"] = trend
-    return out
+    by_bar = {}
+    for event in events:
+        by_bar.setdefault(event.confirm_idx, []).append(event)
+    priority = {"TEST": 0, "ST": 1, "LPS": 2, "SPRING": 3, "SC": 4, "JOC": 5, "SOS": 6}
+    exit_types = {"SPRING_FAIL", "SC_FAIL", "SOW", "UT", "BC", "LPSY"}
+    rows = []
+    for t in range(n):
+        known = by_bar.get(t, [])
+        eligible = [(event, _entry_type(event, cfg)) for event in known]
+        eligible = [(event, typ) for event, typ in eligible if typ]
+        exits = [event for event in known if event.etype in exit_types]
+        action, entry, stop, origin_idx = "HOLD", "", np.nan, -1
+        reasons = [f"{e.etype}({e.kind})" if e.kind else e.etype for e in known]
+        if exits:
+            action = "SELL"
+        elif eligible:
+            chosen, entry = min(eligible, key=lambda item: priority[item[0].etype])
+            action, origin_idx = "BUY", chosen.idx
+            stop = chosen.meta.get("stop_price", chosen.meta.get("test_low", chosen.meta.get("break_low", chosen.price)) * .99)
+            reasons.append(f"事件条件确认直接入场:{entry}")
+        buy_score = sum((2 + float(e.quality) for e, _ in eligible), 0.0) if cfg.signal.diagnostic_scores else 0.0
+        sell_score = sum((2 + float(e.quality) for e in exits), 0.0) if cfg.signal.diagnostic_scores else 0.0
+        rows.append({"date": feats["date"].iloc[t], "action": action, "entry_type": entry,
+                     "stop": stop, "buy_score": buy_score, "sell_score": sell_score,
+                     "reason": ";".join(reasons), "event_idx": origin_idx,
+                     "phase": PHASES[int(phases[t])], "trend": int(trend[t]),
+                     "strategy_version": STRATEGY_VERSION})
+    return pd.DataFrame(rows)
 
 
 def _summarize(sig: pd.DataFrame, feats: pd.DataFrame, events: List[Event],
@@ -216,6 +144,8 @@ def _summarize(sig: pd.DataFrame, feats: pd.DataFrame, events: List[Event],
     t = len(feats) - 1
     c = feats["close"].to_numpy(float)
     recent = [e for e in events if t - e.confirm_idx <= 20]
+    failed_springs = {e.meta.get("spring_idx") for e in events
+                      if e.etype == "SPRING_FAIL" and e.confirm_idx <= t}
     act = sig["action"].iloc[-1]
     atr_val = feats["atr"].iloc[-1]
     targets = []
@@ -227,6 +157,8 @@ def _summarize(sig: pd.DataFrame, feats: pd.DataFrame, events: List[Event],
         "date": str(pd.Timestamp(feats["date"].iloc[-1]).date()),
         "close": round(float(c[t]), 3),
         "action": str(act),
+        "strategy_version": STRATEGY_VERSION,
+        "entry_rule": "confirmed_event",
         "buy_score": round(float(sig["buy_score"].iloc[-1]), 2),
         "sell_score": round(float(sig["sell_score"].iloc[-1]), 2),
         "entry_type": str(sig["entry_type"].iloc[-1]),
@@ -240,7 +172,8 @@ def _summarize(sig: pd.DataFrame, feats: pd.DataFrame, events: List[Event],
             {"type": e.etype, "kind": e.kind, "idx": int(e.confirm_idx),
              "date": str(pd.Timestamp(feats["date"].iloc[e.confirm_idx]).date()),
              "price": round(e.price, 3), "quality": round(e.quality, 2),
-             "failed": e.failed_idx is not None}
+             "failed": (e.failed_idx is not None and e.failed_idx <= t)
+                       or (e.etype == "SPRING" and e.idx in failed_springs)}
             for e in recent
         ],
         "active_zones": [

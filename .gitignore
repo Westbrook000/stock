@@ -26,3 +26,6 @@ skills-lock.json
 # --- 本地服务/临时 ---
 *.tmp
 nohup.out
+
+# Explicit upstream clone; source/patch provenance tracked separately
+third_party/day0_support_resistance/

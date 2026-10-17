@@ -1,366 +1,323 @@
-"""威科夫事件检测：单向前扫，事件在其"确认K线"产生交易信号，绝不引用未来数据。
+"""Wyckoff price/volume events against already-known day0 horizontal lines.
 
-事件：PS SC AR ST SPRING TEST SOS JOC LPS PSY BC UT SOW LPSY EVR NDR
-依据《威科夫操盘法》（孟洪涛）第2/3/4章规则实现，参数见 StrategyConfig。
+Candidates, confirmations, tests and failures are separate causal events. Scores are
+annotations; entry eligibility is an explicit boolean based on the pattern rules.
 """
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-
 import numpy as np
 
 
 @dataclass
 class Event:
     etype: str
-    idx: int                 # 事件价格所在K线（如Spring的破位K线）
-    confirm_idx: int         # 可交易确认K线（信号最早可用时刻）
-    price: float             # 关键价（支撑位/高低点）
-    quality: float = 1.0     # 0-1 质量分（量价形态优劣）
-    kind: str = ""           # 子类：ideal / needs_test / shock / top / bottom ...
-    failed_idx: Optional[int] = None
+    idx: int
+    confirm_idx: int
+    price: float
+    quality: float = 1.0
+    kind: str = ''
+    failed_idx: Optional[int] = None  # legacy read compatibility; new events never backfill this
     meta: Dict = field(default_factory=dict)
 
 
-def trend_state(close, ema20, ema60) -> np.ndarray:
-    st = np.zeros(len(close), dtype=int)
-    above = (close > ema20) & (ema20 > ema60)
-    below = (close < ema20) & (ema20 < ema60)
-    st[above] = 1
-    st[below] = -1
-    return st
+def trend_state(close, ema20, ema60):
+    result = np.zeros(len(close), dtype=int)
+    result[(close > ema20) & (ema20 > ema60)] = 1
+    result[(close < ema20) & (ema20 < ema60)] = -1
+    return result
 
 
 class EventScanner:
-    def __init__(self, df, ss, cfg):
-        self.n = len(df)
-        self.o = df["open"].to_numpy(float)
-        self.h = df["high"].to_numpy(float)
-        self.l = df["low"].to_numpy(float)
-        self.c = df["close"].to_numpy(float)
-        self.v = df["volume"].to_numpy(float)
-        self.vr = df["vol_ratio"].to_numpy(float)
-        self.vmax30 = df["vol_max_30"].to_numpy(float)
-        self.body = df["body"].to_numpy(float)
-        self.body_avg = df["body_avg_14"].to_numpy(float)
-        self.upper_shadow = df["upper_shadow"].to_numpy(float)
-        self.close_pos = df["close_pos"].to_numpy(float)
-        self.pos60 = df["pos_in_60"].to_numpy(float)
-        self.chg_avg = df["chg_avg_abs_14"].to_numpy(float)
-        self.sup = ss.support_top           # 支撑带上沿（贴价侧）
-        self.sup_bot = ss.support_bottom    # 支撑带下沿（影线侧）
-        self.supm = ss.mature_top           # 成熟支撑带上沿（Spring参照）
-        self.supm_bot = ss.mature_bottom    # 成熟支撑带下沿
-        self.res = ss.resistance_bottom     # 阻力带下沿（贴价侧）
-        self.trend = trend_state(self.c, df["ema20"].to_numpy(float), df["ema60"].to_numpy(float))
-        self.cfg = cfg
+    def __init__(self, df, lines, cfg):
+        self.n, self.cfg, self.lines = len(df), cfg, lines
+        for attr, col in [('o','open'), ('h','high'), ('l','low'), ('c','close'), ('v','volume')]:
+            setattr(self, attr, df[col].to_numpy(float))
+        self.atr = df['atr'].to_numpy(float) if 'atr' in df else self.h-self.l
+        self.ema20 = df['ema20'].to_numpy(float)
+        self.ema60 = df['ema60'].to_numpy(float)
+        self.pos60 = df['pos_in_60'].to_numpy(float)
+        self.close_pos = df['close_pos'].to_numpy(float)
+        self.trend = trend_state(self.c, self.ema20, self.ema60)
+        self.support, self.res = lines.support, lines.resistance
         self.events: List[Event] = []
+        self.sc_candidates, self.resolved_sc = [], set()
+        self.failed_parents, self.tested_springs = set(), set()
 
-    # ------ 基础判定 ------
-    def ultra_vol(self, t):
-        return self.v[t] >= 0.8 * self.vmax30[t] or self.vr[t] >= 2.2
+    def avg_vol_before(self, t, k=None):
+        k = self.cfg.volume.ma_window if k is None else k
+        return float(np.mean(self.v[max(0,t-k):t])) if t else float(self.v[0])
+
+    def _atr(self, t):
+        return max(float(self.atr[max(0,t)]), 1e-9)
+
+    def _volume_ratio(self, t):
+        return float(self.v[t]/max(self.avg_vol_before(t),1e-9))
 
     def big_down(self, t):
-        return self.c[t] < self.o[t] and self.body[t] >= 1.8 * self.body_avg[t]
+        return self.c[t]<self.o[t] and self.h[t]-self.l[t]>=1.5*self._atr(t-1)
 
-    def big_up(self, t):
-        return self.c[t] > self.o[t] and self.body[t] >= 1.8 * self.body_avg[t]
+    def _last(self, types, t, only_active=False):
+        types = (types,) if isinstance(types,str) else types
+        for event in reversed(self.events):
+            if event.etype not in types or event.confirm_idx>t: continue
+            if event.failed_idx is not None and event.failed_idx<=t: continue
+            if only_active and event.etype in ('SPRING','SC'):
+                key='spring_idx' if event.etype=='SPRING' else 'sc_idx'
+                failure=event.etype+'_FAIL'
+                if any(e.confirm_idx<=t and e.meta.get(key)==event.idx
+                       and (e.etype==failure or (event.etype=='SPRING' and e.etype=='TEST')) for e in self.events):
+                    continue
+            return event
+        return None
 
-    def avg_vol_before(self, t, k=20):
-        seg = self.v[max(0, t - k):t]
-        return float(np.nanmean(seg)) if len(seg) else self.v[t]
+    def _recent(self, types, within, t):
+        event=self._last(types,t)
+        return event is not None and t-event.confirm_idx<=within
 
-    def add(self, ev):
-        self.events.append(ev)
+    def _tolerance(self, ref, idx):
+        c=self.cfg.spring
+        return float(np.clip(c.test_tolerance_atr*self._atr(idx)/max(ref,1e-9),c.min_test_tolerance,c.max_test_tolerance))
 
-    # ------ 主扫描 ------
-    def run(self) -> List[Event]:
-        n = self.n
-        vol_cfg, sp_cfg = self.cfg.volume, self.cfg.spring
-        t = 61
-        while t < n:
-            last = self._recent
-            handled = False
+    def _reference(self, idx, side='support'):
+        value=float((self.support if side=='support' else self.res)[idx])
+        ids=getattr(self.lines,side+'_id',np.full(self.n,-1))
+        counts=getattr(self.lines,side+'_count',np.ones(self.n,dtype=int))
+        return value,int(ids[idx]),int(counts[idx])
 
-            # SC 恐慌抛售
-            if (self.trend[t] <= 0 and self.pos60[t] <= 0.25 and self.c[t] < self.o[t]
-                    and self.big_down(t) and self.close_pos[t] <= 0.4 and self.ultra_vol(t)
-                    and not self._recent("SC", 20, t)):
-                self.add(Event("SC", t, t, float(self.l[t]), quality=0.8,
-                               meta={"vol": float(self.v[t]), "vol_ratio": float(self.vr[t])}))
-                handled = True
+    def _context(self, t):
+        return (self.trend[t]>=0 or self.c[t]>=self.ema60[t]
+                or self._recent(('ST','TEST','SOS','JOC'),60,t))
 
-            # AR 自动反弹（SC后1-6根）
-            if not handled:
-                sc = self._last("SC", t)
-                if sc is not None and 1 <= t - sc.idx <= 6 and self.c[t] > self.o[t] and (
-                        self.big_up(t) or self.vr[t] >= vol_cfg.high_vol_ratio):
-                    self.add(Event("AR", t, t, float(self.h[t]), quality=0.6,
-                                   meta={"sc_idx": sc.idx}))
+    def _sc_events_at(self,t):
+        cfg=self.cfg.climax
+        output=[]
+        previous=self.c[max(0,t-10):t]
+        falling=(self.trend[t-1]<0 or (len(previous) and previous[0]-self.c[t-1]>=2*self._atr(t-1)))
+        ref,line_id,count=self._reference(t-1)
+        past_low=float(min(self.l[max(0,t-cfg.lookback):t]))
+        new_low=self.l[t]<=past_low+0.1*self._atr(t-1)
+        near_line=(np.isfinite(ref) and self.l[t]<=ref+0.5*self._atr(t-1)
+                   and self.h[t]>=ref-0.5*self._atr(t-1))
+        spread=self.h[t]-self.l[t]
+        if (not self._recent('SC',cfg.cooldown,t) and falling and np.isfinite(ref) and near_line
+                and self.c[t]<self.c[t-1] and spread>=cfg.range_atr*self._atr(t-1)
+                and self._volume_ratio(t)>=cfg.volume_ratio):
+            reference=ref
+            meta={'reference_price':float(reference),'line_id':line_id,'support_count':count,
+                  'support_source':'day0',
+                  'reference_asof':t-1,'vol':float(self.v[t]),'range':float(spread),
+                  'climax_low':float(self.l[t]),'climax_high':float(self.h[t]),
+                  'midpoint':float((self.h[t]+self.l[t])/2),'atr':self._atr(t-1),'entry_allowed':False}
+            candidate=Event('SC_CANDIDATE',t,t,float(self.l[t]),kind='panic',meta=meta)
+            self.sc_candidates.append(candidate)
+            output.append(candidate)
+        for candidate in reversed(self.sc_candidates):
+            if candidate.idx in self.resolved_sc: continue
+            age=t-candidate.idx
+            if age>cfg.confirm_bars:
+                self.resolved_sc.add(candidate.idx)
+                continue
+            if age<0: continue
+            m=candidate.meta
+            if min(self.l[candidate.idx:t+1])<m['climax_low']-0.2*m['atr']:
+                self.resolved_sc.add(candidate.idx)
+                continue
+            lower_wick=min(self.o[t],self.c[t])-self.l[t]
+            stopping=(age==0 and self.close_pos[t]>=cfg.stopping_close_position
+                      and (self.c[t]>self.o[t] or lower_wick>=.3*(self.h[t]-self.l[t])))
+            recovery=(age>0 and self.c[t]>m['midpoint'] and self.c[t]>self.c[t-1]
+                      and self.c[t]>self.o[t] and self._volume_ratio(t)>=.6)
+            if stopping or recovery:
+                meta={**m,'entry_allowed':True,'confirmation':'stopping' if stopping else 'demand_reversal',
+                      'stop_price':float(min(self.l[candidate.idx:t+1])-.15*m['atr'])}
+                output.append(Event('SC',candidate.idx,t,float(m['climax_low']),quality=.85,kind='confirmed',meta=meta))
+                self.resolved_sc.update(e.idx for e in self.sc_candidates if e.idx<=candidate.idx)
+                break
+        return output
 
-            # Spring：必须【穿进成熟支撑带腰部或更深】才算下冲；只刮到带上沿不算Spring。
-            # deep=进一步刺破带下沿（创新低）。置于ST/PSY之前：同一根回踩K线可以既是ST又是Spring。
-            if not handled and np.isfinite(self.supm[t]) and np.isfinite(self.supm_bot[t]):
-                waist = self.supm_bot[t] + sp_cfg.recover_frac * (self.supm[t] - self.supm_bot[t])
-                if self.l[t] <= waist * (1 + sp_cfg.recover_margin):
-                    deep = self.l[t] < self.supm_bot[t] * (1 - 0.002)
-                    if not self._spring_cool(t, self.supm[t], sp_cfg):
-                        ev = self._detect_spring(t, sp_cfg, vol_cfg, deep, waist)
-                        if ev is not None:
-                            self.add(ev)
-                            t = ev.confirm_idx + 1
-                            continue
+    def _spring_at(self,t):
+        cfg=self.cfg.spring
+        for start in range(max(61,t-cfg.spring_window+1),t+1):
+            ref,line_id,count=self._reference(start-1)
+            atr=self._atr(start-1)
+            if not np.isfinite(ref) or self.c[start-1]<ref or self.l[start]>=ref-.05*atr: continue
+            if any(e.etype=='SPRING' and e.idx==start for e in self.events): continue
+            if any(e.etype=='SPRING' and e.meta.get('line_id')==line_id and t-e.confirm_idx<=cfg.recover_window for e in self.events): continue
+            reclaim=ref+cfg.recover_margin_atr*atr
+            if self.c[t]<reclaim: continue
+            probes=[i for i in range(start,t+1) if self.l[i]<ref]
+            volume=max(self.v[i] for i in probes)
+            ratio=float(volume/max(self.avg_vol_before(start),1e-9))
+            spread=max(self.h[i]-self.l[i] for i in probes)
+            deepest=(ref-min(self.l[start:t+1]))/atr
+            context=self._context(start-1)
+            if ratio<=self.cfg.volume.low_vol_ratio and spread<=cfg.ideal_range_atr*atr and deepest<=1:
+                kind='ideal'
+            elif context and self.close_pos[t]>=.6 and self.c[t]>=self.o[t] and spread<=cfg.absorption_range_atr*atr and deepest<=1.5:
+                kind='absorption'
+            elif ratio>=cfg.vol_confirm_ratio and (spread>=1.5*atr or deepest>1.5):
+                kind='shock'
+            else:
+                kind='needs_test'
+            low=float(min(self.l[start:t+1]))
+            return Event('SPRING',start,t,float(ref),quality=float(np.clip(1.1-.3*ratio,.1,1)),kind=kind,
+                         meta={'reference_price':ref,'line_id':line_id,'support_count':count,'reference_asof':start-1,
+                               'break_low':low,'break_vol':float(volume),'probe_range':float(spread),'atr':atr,
+                               'recover_line':float(reclaim),'vol_ratio':ratio,'entry_allowed':context and kind in ('ideal','absorption'),
+                               'stop_price':low-.15*atr})
+        return None
 
-            # ST 二次测试：SC后4-30根回踩恐慌低点不破+缩量，并在recover_window内收阳站回低点上方。
-            # 书中ST成功=供应消失的首个可入场点；确认根才可用（confirm_idx），不回溯。
-            if not handled:
-                sc = self._last("SC", t)
-                if sc is not None and 4 <= t - sc.idx <= 30 and not self._st_cool(t, sc.idx, sp_cfg):
-                    if (self.l[t] <= sc.price * 1.02 and self.l[t] >= sc.price * 0.995
-                            and self.v[t] < 0.75 * sc.meta["vol"]):
-                        ev = self._confirm_st(t, sc, sp_cfg)
-                        if ev is not None:
-                            self.add(ev)
-                            t = ev.confirm_idx + 1
-                            continue
+    def _sc_test_at(self,t):
+        cfg=self.cfg.spring
+        sc=self._last('SC',t,only_active=True)
+        if sc is None or not 4<=t-sc.idx<=cfg.test_window: return None
+        if any(e.etype=='ST' and e.meta.get('sc_idx')==sc.idx for e in self.events): return None
+        # A recovery cannot revive an already lost climax structure.
+        if min(self.c[sc.confirm_idx+1:t+1]) < sc.price-self._tolerance(sc.price,sc.confirm_idx)*sc.price: return None
+        for start in range(max(sc.confirm_idx+2,t-cfg.recover_window),t+1):
+            if not any(e.etype=='AR' and e.meta.get('sc_idx')==sc.idx and e.confirm_idx<start for e in self.events): continue
+            ref=sc.price
+            tol=self._tolerance(ref,start)*ref
+            spread=self.h[start]-self.l[start]
+            if not (ref-tol<=self.l[start]<=ref+tol and self.v[start]<=cfg.test_volume_ratio*sc.meta['vol']
+                    and self.v[start]<=self.avg_vol_before(start) and spread<=cfg.test_range_ratio*sc.meta['range']
+                    and spread<=cfg.test_range_atr*self._atr(start-1)): continue
+            if min(self.l[start:t+1])<ref-tol: continue
+            if any(self.big_down(i) and self._volume_ratio(i)>1 for i in range(start,t+1)): continue
+            if self.c[t]>self.o[t] and self.c[t]>=ref+cfg.recover_margin_atr*self._atr(start):
+                low=float(min(self.l[start:t+1]))
+                return Event('ST',start,t,float(ref),quality=.85,kind='sc_test',
+                             meta={'sc_idx':sc.idx,'origin':'SC','reference_price':ref,'line_id':sc.meta.get('line_id',-1),
+                                   'test_low':low,'stop_price':low-.15*self._atr(start),'entry_allowed':True})
+        return None
 
-            # PSY 初步供给：高位放量收低且带长上影或长阴（收紧，避免误判）
-            if not handled and self.pos60[t] >= 0.72 and self.vr[t] >= 1.5 and self.c[t] < self.o[t] \
-                    and (self.upper_shadow[t] >= self.body[t] or self.big_down(t)) \
-                    and self._last("BC", t) is None and not self._recent("PSY", 20, t):
-                self.add(Event("PSY", t, t, float(self.h[t]), quality=0.5))
-                handled = True
-            if not handled and self.pos60[t] <= 0.35 and self.vr[t] >= 1.3 and self.c[t] > self.o[t] \
-                    and self.close_pos[t] >= 0.7 and self.trend[t] == -1:
-                if self._last("SC", t) is None and not self._recent("PS", 15, t):
-                    self.add(Event("PS", t, t, float(self.c[t]), quality=0.5))
-                    handled = True
+    def _spring_test_at(self,t):
+        cfg=self.cfg.spring
+        parent=self._last('SPRING',t,only_active=True)
+        if parent is None or not 2<=t-parent.confirm_idx<=cfg.test_window: return None
+        ref,low=parent.meta['reference_price'],parent.meta['break_low']
+        parent_atr=parent.meta.get('atr',self._atr(parent.confirm_idx))
+        if min(self.c[parent.confirm_idx+1:t+1]) < low-.05*parent_atr: return None
+        tol=self._tolerance(ref,t)*ref
+        if max(self.c[parent.confirm_idx+1:t])<=ref+tol: return None
+        if not (low-.2*parent_atr<=self.l[t]<=ref+tol and self.c[t]>=ref+cfg.recover_margin_atr*self._atr(t-1)
+                and self.v[t]<=cfg.test_volume_ratio*parent.meta['break_vol'] and self.v[t]<=self.avg_vol_before(t)
+                and self.h[t]-self.l[t]<=cfg.test_range_atr*self._atr(t-1) and self.c[t]>self.o[t]): return None
+        return Event('TEST',t,t,float(ref),quality=.9,kind='spring_test',
+                     meta={'spring_idx':parent.idx,'reference_price':ref,'line_id':parent.meta['line_id'],
+                           'test_low':float(self.l[t]),'break_low':low,'stop_price':low-.15*parent_atr,'entry_allowed':True})
 
-            # Spring 的二次测试
-            if not handled:
-                sp_ev = self._last("SPRING", t, only_active=True)
-                if sp_ev is not None and sp_ev.kind in ("needs_test", "shock") \
-                        and 2 <= t - sp_ev.confirm_idx <= sp_cfg.test_window \
-                        and np.isfinite(self.supm[t]):
-                    brk_low = sp_ev.meta["break_low"]
-                    brk_vol = sp_ev.meta["break_vol"]
-                    if (self.l[t] <= self.supm[t] * 1.015 and self.l[t] >= brk_low * 0.995
-                            and self.c[t] > self.o[t]
-                            and self.v[t] <= 0.6 * brk_vol
-                            and self.body[t] <= self.body_avg[t]):
-                        self.add(Event("TEST", t, t, float(self.supm[t]), quality=0.9,
-                                       meta={"spring_idx": sp_ev.idx}))
-                        sp_ev.kind = "tested"
-                        handled = True
+    def _breakout_at(self,t):
+        cfg=self.cfg.spring
+        chain=(self.c[t]>self.c[t-1]>self.c[t-2] and self.l[t]>self.l[t-1]>self.l[t-2]
+               and self.v[t]>self.v[t-1]>=self.v[t-2])
+        start=t-2 if chain else t
+        atr=self._atr(start-1)
+        spread=max(self.h[start:t+1])-min(self.l[start:t+1])
+        strong=(self.close_pos[t]>=.7 and ((self.c[t]>self.o[t] and self.h[t]-self.l[t]>=1.2*atr and self._volume_ratio(t)>=1.5)
+                                        or (chain and self.c[t]-self.c[start-1]>=2*atr)))
+        if not strong: return None
+        ref,line_id,count=self._reference(start-1,'resistance')
+        if np.isfinite(ref) and self.c[t]>ref+.05*atr and self.c[start-1]<=ref+.2*atr:
+            etype,kind='JOC','breakout'
+        elif self.c[t]>max(self.h[max(0,start-5):start]) and self.c[t]-self.c[start-1]>=1.5*atr:
+            etype,kind,ref,line_id,count='SOS','demand',float(self.l[start]),-1,0
+        else: return None
+        if self._recent(etype,5,t): return None
+        low=float(min(self.l[start:t+1]))
+        return Event(etype,start,t,float(ref),quality=.9,kind=kind,
+                     meta={'ref':float(ref),'reference_price':float(ref),'line_id':line_id,'support_count':count,
+                           'wave_start':start,'volume':float(np.mean(self.v[start:t+1])),'range':float(spread),
+                           'wave_low':low,'wave_high':float(max(self.h[start:t+1])),
+                           'stop_price':float(ref-.3*atr),'entry_allowed':True})
 
-            # SOS / JOC：大阳线+放量收高，或2-3连阳(更高H/L/C且量递增)；越过有效阻力记JOC
-            if not handled:
-                single = self.big_up(t) and self.vr[t] >= 1.3 and self.close_pos[t] >= 0.7
-                chain = (t >= 2 and self.c[t] > self.o[t] and self.c[t - 1] > self.o[t - 1]
-                         and self.h[t] > self.h[t - 1] and self.l[t] > self.l[t - 1] and self.c[t] > self.c[t - 1]
-                         and self.v[t] > self.v[t - 1] >= self.v[t - 2])
-                if single or chain:
-                    kind, ref, source = "", None, "spring"
-                    if np.isfinite(self.res[t]) and self.c[t] > self.res[t]:
-                        kind, ref, source = "JOC", float(self.res[t]), "breakout"
-                    else:
-                        sp_ev = self._last("SPRING", t, only_active=True)
-                        if sp_ev is not None and t - sp_ev.confirm_idx <= 20 and self.c[t] >= sp_ev.price * 1.03:
-                            kind, ref = "SOS", float(sp_ev.price)
-                        elif self.c[t] >= self.c[t - 20] * 1.05 and self.pos60[t] >= 0.5 \
-                                and not self._recent("SOS", 15, t):
-                            kind, ref, source = "SOS", float(self.c[t - 20]), "streak"
-                    if kind:
-                        q = float(np.clip(self.vr[t] / 3.0, 0.2, 1.0))
-                        if source == "streak":
-                            q *= 0.6
-                        self.add(Event(kind, t, t, float(self.c[t]), quality=q,
-                                       meta={"ref": ref, "chain": bool(chain and not single),
-                                             "source": source}))
-                        handled = True
+    def _detect_breakout_test(self,t,cfg):
+        parent=self._last(('JOC','SOS'),t,only_active=True)
+        if parent is None or not 2<=t-parent.confirm_idx<=cfg.test_window: return None
+        if any(e.etype=='ST' and e.meta.get('breakout_idx')==parent.idx for e in self.events): return None
+        ref,volume,spread=(parent.meta.get(k) for k in ('ref','volume','range'))
+        if not ref or not volume or not spread: return None
+        tol=self._tolerance(ref,parent.confirm_idx)*ref
+        if any(self.c[i]<ref-tol or (self.big_down(i) and self.v[i]>volume) for i in range(parent.confirm_idx+1,t+1)): return None
+        if not (self.c[t]>self.o[t] and self.c[t]>=ref+cfg.recover_margin_atr*self._atr(t-1)): return None
+        for start in range(max(parent.confirm_idx+2,t-cfg.recover_window),t+1):
+            if not (ref-tol<=self.l[start]<=ref+tol and self.v[start]<=cfg.test_volume_ratio*volume
+                    and self.v[start]<=self.avg_vol_before(start) and self.h[start]-self.l[start]<=cfg.test_range_ratio*spread
+                    and self.h[start]-self.l[start]<=cfg.test_range_atr*self._atr(start-1)): continue
+            low=float(min(self.l[start:t+1]))
+            return Event('ST',start,t,float(ref),quality=.85,kind='breakout_test',
+                         meta={'origin':parent.etype,'breakout_idx':parent.idx,'reference_price':float(ref),
+                               'line_id':parent.meta.get('line_id',-1),'test_low':low,'stop_price':low-.15*self._atr(start-1),'entry_allowed':True})
+        return None
 
-            # LPS：SOS/JOC后缩量浅回调、不破参照位，阳线确认
-            if not handled:
-                sos = self._last(("SOS", "JOC"), t)
-                if sos is not None and 2 <= t - sos.idx <= 15:
-                    wave_low = min(self.l[sos.idx:t + 1])
-                    pullback = (self.c[sos.idx] - wave_low) / max(1e-9, self.c[sos.idx] - sos.meta["ref"])
-                    pull_vol = self.v[sos.idx + 1:t + 1].max()
-                    if (self.c[t] > self.o[t] and pullback <= 0.618
-                            and pull_vol <= 0.8 * self.avg_vol_before(sos.idx)
-                            and wave_low >= sos.meta["ref"]):
-                        self.add(Event("LPS", t, t, float(self.c[t]), quality=0.75,
-                                       meta={"sos_idx": sos.idx, "ref": sos.meta["ref"]}))
-                        handled = True
+    def _lps_at(self,t):
+        parent=self._last(('SOS','JOC'),t)
+        if parent is None or not 2<=t-parent.confirm_idx<=20 or self._recent('LPS',5,t): return None
+        ref=parent.meta['ref']
+        peak=max(self.h[parent.idx:t+1])
+        depth=(peak-self.l[t])/max(peak-ref,1e-9)
+        if (0<=depth<=.5 and self.l[t]>=ref and self.c[t]>self.o[t] and self.v[t]<=.8*self.avg_vol_before(t)
+                and self.h[t]-self.l[t]<=self._atr(t-1)
+                and min(self.c[parent.confirm_idx+1:t+1])>=ref):
+            return Event('LPS',t,t,float(ref),quality=.85,kind='held',
+                         meta={'ref':ref,'reference_price':ref,'sos_idx':parent.idx,'test_low':float(self.l[t]),
+                               'stop_price':float(self.l[t]-.15*self._atr(t-1)),'entry_allowed':True})
+        return None
 
-            # BC 抢购高潮：高位、天量、新高、上影或弱收
-            if not handled and self.trend[t] >= 0 and self.pos60[t] >= 0.75 and self.ultra_vol(t) \
-                    and self.h[t] >= np.nanmax(self.h[max(0, t - 60):t]) - 1e-9 \
-                    and (self.upper_shadow[t] >= self.body[t] or self.close_pos[t] <= 0.55) \
-                    and not self._recent("BC", 20, t):
-                self.add(Event("BC", t, t, float(self.h[t]), quality=0.7))
-                handled = True
+    def _failures_at(self,t):
+        for parent in list(self.events):
+            if parent.etype not in ('SPRING','SC'): continue
+            key=(parent.etype,parent.idx)
+            if key in self.failed_parents or not 1<=t-parent.confirm_idx<=12: continue
+            low=parent.meta.get('break_low',parent.meta.get('climax_low',parent.price))
+            atr=parent.meta.get('atr',self._atr(t-1))
+            broke=self.c[t]<low-.05*atr
+            supply=self.big_down(t) and self._volume_ratio(t)>1.3
+            no_follow=(t-parent.confirm_idx==4 and max(self.c[parent.confirm_idx+1:t+1])<=self.c[parent.confirm_idx]+.25*atr)
+            if broke or supply or no_follow:
+                self.failed_parents.add(key)
+                self.events.append(Event(parent.etype+'_FAIL',t,t,float(low),kind='lost_support' if broke else 'no_follow',
+                                         meta={('spring_idx' if parent.etype=='SPRING' else 'sc_idx'):parent.idx}))
 
-            # UT 上冲回落：冲破阻力后1-3根内收盘收回其下
-            if not handled and np.isfinite(self.res[t]) and self.h[t] > self.res[t] * 1.002 \
-                    and not self._recent_confirm_after("UT", t):
-                level = float(self.res[t])
-                for r2 in range(t, min(t + 4, self.n)):
-                    if self.c[r2] < level:
-                        self.add(Event("UT", t, r2, level,
-                                       quality=0.85 if r2 == t else 0.7,
-                                       meta={"vol_ratio": float(self.vr[t])}))
-                        handled = True
+    def run(self):
+        for t in range(61,self.n):
+            self._failures_at(t)
+            sc_events=self._sc_events_at(t)
+            self.events.extend(sc_events)
+            confirmed_sc=any(e.etype=='SC' for e in sc_events)
+            spring=self._spring_at(t)
+            if spring is not None and not confirmed_sc: self.events.append(spring)
+            sc=self._last('SC',t)
+            if sc is not None and 1<=t-sc.confirm_idx<=6 and self.c[t]>self.o[t] and self.c[t]>self.c[t-1]:
+                if not any(e.etype=='AR' and e.meta.get('sc_idx')==sc.idx for e in self.events):
+                    self.events.append(Event('AR',t,t,float(self.h[t]),meta={'sc_idx':sc.idx}))
+            for detector in (self._sc_test_at,self._spring_test_at):
+                event=detector(t)
+                if event is not None: self.events.append(event)
+            event=self._detect_breakout_test(t,self.cfg.spring)
+            if event is not None: self.events.append(event)
+            for detector in (self._breakout_at,self._lps_at):
+                event=detector(t)
+                if event is not None: self.events.append(event)
+            if confirmed_sc or spring is not None: continue
+            ref=self.support[t-1]
+            if (np.isfinite(ref) and self.c[t]<ref-.1*self._atr(t-1) and self.l[t]<self.l[t-1]
+                    and self.h[t]<self.h[t-1] and self.c[t]<self.c[t-1] and self.v[t]>=self.v[t-1]
+                    and (self.big_down(t) or self._volume_ratio(t)>=1.5) and not self._recent('SOW',3,t)):
+                self.events.append(Event('SOW',t,t,float(ref),quality=.85))
+            if not self._recent('UT',3,t):
+                for probe in range(max(61,t-3),t+1):
+                    resistance=self.res[probe-1]
+                    if np.isfinite(resistance) and self.h[probe]>resistance+.1*self._atr(probe-1) and self.c[t]<resistance:
+                        self.events.append(Event('UT',probe,t,float(resistance),quality=.8))
                         break
-
-            # SOW 弱势信号：书中三条件——最低/最高均低于昨日、收盘低于昨日、量不低于昨日；
-            # 再叠加跌破支撑或派发背景
-            if not handled:
-                book3 = (self.l[t] < self.l[t - 1] and self.h[t] < self.h[t - 1]
-                         and self.c[t] < self.c[t - 1] and self.v[t] >= self.v[t - 1])
-                if book3 and self.c[t] < self.o[t]:
-                    broke_sup = np.isfinite(self.sup_bot[t]) and self.c[t] < self.sup_bot[t] * 0.995
-                    dist_ctx = self._last("BC", t) is not None or self._last("UT", t) is not None
-                    if broke_sup and (self.big_down(t) or self.vr[t] >= 1.5 or dist_ctx):
-                        self.add(Event("SOW", t, t, float(self.sup_bot[t]), quality=0.85,
-                                       meta={"vol_ratio": float(self.vr[t])}))
-                        handled = True
-
-            # LPSY：SOW后无需求反抽不过50%
-            if not handled:
-                sow = self._last("SOW", t)
-                if sow is not None and 3 <= t - sow.idx <= 20 and self.c[t] > self.c[t - 3]:
-                    rebound = (self.c[t] - sow.price) / max(1e-9, self.h[max(0, sow.idx - 10):sow.idx + 1].max() - sow.price)
-                    if rebound <= 0.5 and self.v[t] < self.avg_vol_before(t) * 0.8 \
-                            and not self._recent("LPSY", 10, t):
-                        self.add(Event("LPSY", t, t, float(self.c[t]), quality=0.6))
-                        handled = True
-
-            # EVR 努力与结果背离：天量微波动
-            if not handled and self.vr[t] >= 2.2 and np.isfinite(self.chg_avg[t]):
-                chg_abs = abs(self.c[t] / self.c[t - 1] - 1)
-                if chg_abs <= 0.5 * self.chg_avg[t]:
-                    loc = "top" if self.pos60[t] >= 0.6 else ("bottom" if self.pos60[t] <= 0.4 else "mid")
-                    self.add(Event("EVR", t, t, float(self.c[t]), quality=0.5, kind=loc))
-                    handled = True
-
-            # NDR 无需求反弹：空头背景下连续小阳缩量
-            if not handled and self.trend[t] == -1 and t >= 3:
-                if (self.c[t] > self.c[t - 3]
-                        and self.v[t] < self.v[t - 1] < self.v[t - 2] and self.vr[t] < 0.8
-                        and max(self.body[t], self.body[t - 1], self.body[t - 2]) <= 0.8 * self.body_avg[t]):
-                    self.add(Event("NDR", t, t, float(self.c[t]), quality=0.6))
-
-            t += 1
-
-        self._postprocess()
+            if (self.pos60[t]>=.8 and self._volume_ratio(t)>=2 and self.h[t]-self.l[t]>=1.5*self._atr(t-1)
+                    and self.close_pos[t]<=.5 and not self._recent('BC',10,t)):
+                self.events.append(Event('BC',t,t,float(self.h[t]),quality=.8))
+            if self.trend[t]==-1 and self.c[t]>self.c[t-3] and self.v[t]<self.v[t-1]<self.v[t-2]:
+                self.events.append(Event('NDR',t,t,float(self.c[t]),quality=.6))
         return self.events
 
-    # ------ 辅助 ------
-    def _st_cool(self, t, sc_idx: int, sp_cfg) -> bool:
-        """同一次SC只保留一组二次测试，避免连续回踩逐根登记。"""
-        for e in reversed(self.events):
-            if e.etype == "ST" and e.meta.get("sc_idx") == sc_idx and e.confirm_idx < t:
-                return t - e.confirm_idx < sp_cfg.recover_window + 1
-        return False
 
-    def _confirm_st(self, t, sc, sp_cfg) -> Optional[Event]:
-        """二次测试确认：recover_window 根内出现收阳且收盘站回恐慌低点之上。"""
-        end = min(t + 1 + sp_cfg.recover_window, self.n)
-        for r in range(t, end):
-            if self.c[r] > self.o[r] and self.c[r] >= sc.price * (1 + sp_cfg.recover_margin):
-                contraction = float(np.clip((1 - self.v[t] / sc.meta["vol"]) / 0.75, 0, 1))
-                quality = float(np.clip(0.55 * contraction + 0.45 * self.close_pos[r], 0, 1))
-                return Event("ST", t, r, float(sc.price), quality=quality, kind="held",
-                             meta={"sc_idx": sc.idx, "test_low": float(self.l[t]),
-                                   "test_vol": float(self.v[t]),
-                                   "contraction": contraction})
-        return None
-
-    def _spring_cool(self, t, zone_top: float, sp_cfg) -> bool:
-        """同一条支撑带去重：相隔不足 recover_window+1 根的连续触带只算第一次，
-        避免价格在带内横磨时逐根重复登记Spring。"""
-        gap = sp_cfg.recover_window + 1
-        for e in reversed(self.events):
-            if e.etype == "SPRING" and e.confirm_idx < t and abs(e.meta.get("zone_top", 0.0) - zone_top) < 1e-9:
-                return t - e.confirm_idx < gap
-        return False
-
-    def _detect_spring(self, t, sp_cfg, vol_cfg, deep: bool, waist: float) -> Optional[Event]:
-        """Spring（支撑带版）：候选=影线穿进成熟支撑带腰部以下；recover_window 根内
-        收盘站回腰部+margin 之上成立。
-        分类：下冲供应小量→ideal（不必创新低）；有deep时量增→needs_test/shock。"""
-        zone_top = self.supm[t]        # 支撑带上沿（实体顶）
-        zone_bot = self.supm_bot[t]    # 支撑带下沿（影线底）
-        recover_line = waist           # 腰部收复线（下冲须过此线，收复须站回此线）
-        end = min(t + 1 + sp_cfg.recover_window, self.n)
-        for r in range(t + 1, end):
-            if self.c[r] >= recover_line * (1 + sp_cfg.recover_margin):
-                # 书中"小量"指下冲供应：取窗口内【打到腰部以下】那些K线的最大量，
-                # 与K线阴阳无关（插针下冲就是供应）；收复阳线放量属需求，不计。
-                probe_bars = [i for i in range(t, r + 1) if self.l[i] <= recover_line]
-                probe_vol = max((self.v[i] for i in probe_bars), default=self.v[t])
-                window_vol_ratio = float(probe_vol / max(1e-9, self.avg_vol_before(t)))
-                window_big = any(self.body[i] >= 1.8 * self.body_avg[i] and self.c[i] < self.o[i]
-                                 for i in range(t, r + 1))
-                # 触带K线不能是放量大阴（供应压倒需求）
-                is_ideal = (window_vol_ratio <= vol_cfg.low_vol_ratio
-                            and not self.big_down(t))
-                if is_ideal:
-                    kind = "ideal"
-                elif deep:
-                    kind = "shock" if (window_vol_ratio >= sp_cfg.vol_confirm_ratio and window_big) else "needs_test"
-                else:
-                    return None
-                quality = float(np.clip(1.2 - 0.4 * window_vol_ratio, 0.1, 1.0))
-                if self.c[r] >= zone_top * 1.005 and kind != "ideal":
-                    quality = min(1.0, quality + 0.2)   # 强收复：直接吞回带上沿
-                return Event("SPRING", t, r, float(zone_top), quality=quality, kind=kind,
-                             meta={"break_low": float(min(self.l[i] for i in range(t, r + 1))),
-                                   "break_vol": float(self.v[t]),
-                                   "vol_ratio": window_vol_ratio,
-                                   "zone_bottom": float(zone_bot),
-                                   "zone_top": float(zone_top),
-                                   "recover_line": float(recover_line),
-                                   "depth": "deep" if deep else "waist"})
-        return None
-
-    def _recent(self, etype, within, t):
-        e = self._last(etype, t, only_active=False)
-        return e is not None and t - e.idx <= within
-
-    def _recent_confirm_after(self, etype, t, within=3):
-        """近within根内已有同型事件（避免同一上冲重复登记）。"""
-        e = self._last(etype, t, only_active=False)
-        return e is not None and t - e.idx <= within
-
-    def _last(self, etype, t, only_active=False):
-        names = (etype,) if isinstance(etype, str) else etype
-        for e in reversed(self.events):
-            if e.etype in names and e.confirm_idx <= t:
-                if only_active and (e.kind in ("tested",) or e.failed_idx is not None):
-                    continue
-                if e.failed_idx is not None and e.failed_idx <= t:
-                    continue
-                return e
-        return None
-
-    def _postprocess(self):
-        """Spring失败判定：确认后又跌破破位低点，或收复后4根内滞涨（无需求反弹）。"""
-        for e in self.events:
-            if e.etype != "SPRING":
-                continue
-            lo = e.meta["break_low"]
-            for r in range(e.confirm_idx + 1, min(e.confirm_idx + 12, self.n)):
-                if self.c[r] < lo * 0.999 and self.v[r] > self.v[r - 1] and self.c[r] < self.o[r]:
-                    e.failed_idx = r
-                    break
-            if e.failed_idx is None:
-                hi = self.c[e.confirm_idx:min(e.confirm_idx + 5, self.n)]
-                if len(hi) >= 4 and hi.max() <= e.meta.get("recover_line", e.price) * 1.005:
-                    e.failed_idx = e.confirm_idx + len(hi) - 1
-
-
-def detect_events(df, ss, cfg) -> List[Event]:
-    return EventScanner(df, ss, cfg).run()
+def detect_events(df,lines,cfg):
+    return EventScanner(df,lines,cfg).run()

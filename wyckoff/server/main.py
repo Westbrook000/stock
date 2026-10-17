@@ -50,10 +50,11 @@ _CACHE_MAX = 128
 
 
 def _cached_analysis(code: str, kind: str, cfg_overrides: Optional[Dict]):
-    from ..analysis.engine import run_analysis
+    from ..analysis.engine import run_analysis, STRATEGY_VERSION
+    from ..config import CONFIG_FILE
     if kind == "auto":
         kind = "stock" if (REPO_ROOT / "data" / "stocks" / f"{code}.csv").exists() else "etf"
-    key = f"{kind}:{code}:{sorted((cfg_overrides or {}).items())}"
+    key = f"{STRATEGY_VERSION}:{CONFIG_FILE.read_text()}:{kind}:{code}:{sorted((cfg_overrides or {}).items())}"
     hit = _analyze_cache.get(key)
     if hit is not None:
         path = REPO_ROOT / "data" / ("stocks" if kind == "stock" else "etfs") / f"{code}.csv"
@@ -160,14 +161,19 @@ def symbol_detail(code: str, kind: str = "stock", bars: int = 500,
         feats["low"].iloc[lo:], feats["high"].iloc[lo:])]
     vols = [{"d": dates[i - lo], "v": float(feats["volume"].iloc[i]),
              "up": bool(feats["up"].iloc[i])} for i in range(lo, n)]
+    failed_springs = {e.meta.get("spring_idx") for e in res.events
+                      if e.etype == "SPRING_FAIL" and e.confirm_idx < n}
     events = []
     for e in res.events:
         if e.confirm_idx >= lo:
             events.append({
                 "type": e.etype, "kind": e.kind, "quality": e.quality,
                 "date": str(feats["date"].iloc[e.confirm_idx].date()),
-                "price": e.price, "failed": e.failed_idx is not None,
-                "bar": e.confirm_idx - lo,
+                "price": e.price, "failed": (e.failed_idx is not None and e.failed_idx < n)
+                or (e.etype == "SPRING" and e.idx in failed_springs),
+                "bar": e.confirm_idx - lo, "entry_allowed": bool(e.meta.get("entry_allowed", False)
+                    and sig["action"].iloc[e.confirm_idx] == "BUY"
+                    and sig["event_idx"].iloc[e.confirm_idx] == e.idx),
             })
     zones = []
     for z in res.zones:
@@ -185,10 +191,18 @@ def symbol_detail(code: str, kind: str = "stock", bars: int = 500,
         "events": events, "zones": zones,
         "signals": signals_tbl[-80:],
         "latest": res.latest,
-        "supports": [p.price for p in res.pivots if p.kind == "low" and p.price_idx >= lo][:10],
-        # 合并后的支撑带（宽度≤zone_max_width，只向下合并），未破位的才展示
-        "support_zones": [[round(lv.bottom, 4), round(lv.top, 4)] for lv in res.levels
-                          if lv.kind == "support" and lv.active and lv.created_idx >= lo],
+        "support_lines": [lv.price for lv in res.levels if lv.active and lv.price <= float(feats.close.iloc[-1])],
+        "resistance_lines": [lv.price for lv in res.levels if lv.active and lv.price > float(feats.close.iloc[-1])],
+        "level_regions": [{"id": lv.line_id, "price": lv.price, "bottom": lv.bottom, "top": lv.top,
+                           "first_pivot": lv.first_pivot_idx, "known_from": lv.known_from, "count": lv.peak_count,
+                           "start": max(lo, lv.first_pivot_idx)-lo, "known": min(n-1,max(lo,lv.known_from))-lo, "provisional": lv.provisional}
+                          for lv in res.snapshot_levels],
+        "line_history": [{"id": lv.line_id, "price": lv.price, "count": lv.peak_count,
+                          "start": max(lo, lv.first_pivot_idx)-lo, "known_from": max(lo, lv.known_from)-lo,
+                          "bottom": lv.bottom, "top": lv.top,
+                          "end": min(n-1, lv.valid_to if lv.valid_to is not None else n-1)-lo}
+                         for lv in res.levels if lv.known_from<n and (lv.valid_to is None or lv.valid_to>=lo)],
+
     })
 
 

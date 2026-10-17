@@ -1,104 +1,144 @@
-"""静态Zigzag：拐点在出现后 delay 根K线才"确认"，确认前不可使用（无未来函数）。
+"""Local Python port of ZigZag 0.2.2, the version required by day0.
 
-约定：pivot 在索引 i 处形成极值，最早在 i+delay 根K线被观察到。
-对外输出每个确认点 (price_idx, price, kind, confirm_idx)。
+Reference: https://github.com/jbn/ZigZag/blob/0.2.2/zigzag/core.pyx
+Copyright (c) 2014, John Bjorn Nelson; BSD-3-Clause, see
+third_party/ZIGZAG_LICENSE.txt. Scalar thresholds follow the upstream state
+machine including initial/terminal annotation. Per-extreme thresholds and
+confirmation timestamps are application extensions.
 """
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import List
-
+from typing import List, Optional
 import numpy as np
 
+PEAK, VALLEY = 1, -1
 
-@dataclass
+
+@dataclass(frozen=True)
 class Pivot:
     price_idx: int
     price: float
-    kind: str          # 'high' | 'low'
-    confirm_idx: int   # 该拐点最晚被确认的K线索引（price_idx + depth）
-    body_top: float = float("nan")     # 拐点K线实体上沿 max(open, close)
-    body_bottom: float = float("nan")  # 拐点K线实体下沿 min(open, close)
-
-    @property
-    def zone(self) -> tuple:
-        """支撑/阻力区间：低点→[最低价, 实体上沿]；高点→[实体下沿, 最高价]。"""
-        if self.kind == "low":
-            return (self.price, self.body_top)
-        return (self.body_bottom, self.price)
+    kind: str
+    confirm_idx: Optional[int]
+    confirmed: bool = True
 
 
-def zigzag_pivots(high: np.ndarray, low: np.ndarray, threshold, depth: int,
-                  open_: np.ndarray = None, close: np.ndarray = None) -> List[Pivot]:
-    """顺序扫描版Zigzag：维持候选极值，被反向波动或depth窗口确认。
+def _inputs(close, up_thresh, down_thresh):
+    close = np.asarray(close, dtype=float)
+    if close.ndim != 1 or not np.isfinite(close).all() or (close <= 0).any():
+        raise ValueError('close must be finite positive 1-D prices')
+    def aligned(value):
+        result = np.full(len(close), float(value)) if np.isscalar(value) else np.asarray(value, dtype=float)
+        if result.shape != close.shape or not np.isfinite(result).all():
+            raise ValueError('threshold must be finite and align with close')
+        return result
+    up, down = aligned(up_thresh), aligned(down_thresh)
+    if (up <= 0).any() or (down >= 0).any() or (down <= -1).any():
+        raise ValueError('up_thresh must be positive; down_thresh must be in (-1,0)')
+    return close, up, down
 
-    threshold 可为标量，或与 high 等长的数组（波动率自适应：每根K线自己的反转阈值）。
-    """
-    n = len(high)
-    pivots: List[Pivot] = []
-    if n <= depth + 1:
-        return pivots
-    adaptive_thr = not np.isscalar(threshold)
 
-    def thr_at(idx: int) -> float:
-        return float(threshold[idx]) if adaptive_thr else float(threshold)
+def _initial(close, up, down):
+    first = high = low = close[0]
+    high_idx = low_idx = 0
+    for t in range(1,len(close)):
+        price = close[t]
+        if price/low >= 1+up[low_idx]:
+            return (VALLEY if low_idx == 0 else PEAK), t
+        if price/high <= 1+down[high_idx]:
+            return (PEAK if high_idx == 0 else VALLEY), t
+        if price > high:
+            high,high_idx = price,t
+        if price < low:
+            low,low_idx = price,t
+    return (VALLEY if first < close[-1] else PEAK), None
 
-    state = 0          # 1=候选为低点(等待向上反转), -1=候选为高点(等待向下反转)
-    cand_idx = -1
-    cand_price = np.nan
 
-    # 初始化：用前 depth+1 根的相对极值定起点（先出现者作为首个候选拐点）
-    seg_h = int(np.argmax(high[: depth + 1]))
-    seg_l = int(np.argmin(low[: depth + 1]))
-    if seg_h <= seg_l:
-        cand_idx, cand_price, state = seg_h, float(high[seg_h]), -1  # 候选=高点
-    else:
-        cand_idx, cand_price, state = seg_l, float(low[seg_l]), 1    # 候选=低点
+def identify_initial_pivot(close, up_thresh, down_thresh):
+    values,up,down = _inputs(close,up_thresh,down_thresh)
+    if not len(values):
+        raise ValueError('cannot classify an empty series')
+    return _initial(values,up,down)[0]
 
-    i = depth + 1
-    has_body = open_ is not None and close is not None
 
-    def body_at(idx: int):
-        if not has_body:
-            return float("nan"), float("nan")
-        return float(max(open_[idx], close[idx])), float(min(open_[idx], close[idx]))
-
-    while i < n:
-        if state == 1:  # 当前候选是低点，等待向上
-            if low[i] < cand_price:       # 候选下移
-                cand_idx, cand_price = i, low[i]
-            elif high[i] - cand_price >= thr_at(cand_idx) * cand_price and i - cand_idx >= 1:
-                # 反转成立：确认低点
-                confirm = max(cand_idx + depth, i)
-                bt, bb = body_at(cand_idx)
-                pivots.append(Pivot(cand_idx, float(cand_price), "low", confirm, body_top=bt, body_bottom=bb))
-                state = -1
-                cand_idx, cand_price = i, high[i]
-        elif state == -1:  # 候选高点
-            if high[i] > cand_price:
-                cand_idx, cand_price = i, high[i]
-            elif cand_price - low[i] >= thr_at(cand_idx) * cand_price and i - cand_idx >= 1:
-                confirm = max(cand_idx + depth, i)
-                bt, bb = body_at(cand_idx)
-                pivots.append(Pivot(cand_idx, float(cand_price), "high", confirm, body_top=bt, body_bottom=bb))
-                state = 1
-                cand_idx, cand_price = i, low[i]
-        i += 1
-
-    # 去重：同一根K线可能高低点都留下，保留后出现的
-    dedup: List[Pivot] = []
-    for p in pivots:
-        if dedup and dedup[-1].price_idx == p.price_idx:
-            # 保留更极端的
-            if p.kind == "high" and p.price >= dedup[-1].price:
-                dedup[-1] = p
-            elif p.kind == "low" and p.price <= dedup[-1].price:
-                dedup[-1] = p
+def _scan(close, up_thresh, down_thresh):
+    values,up,down = _inputs(close,up_thresh,down_thresh)
+    marks = np.zeros(len(values),dtype=int)
+    confirmations = {}
+    if not len(values):
+        return values,marks,confirmations
+    initial,initial_known = _initial(values,up,down)
+    marks[0] = initial
+    # The forced initial label becomes stable only once the initial direction is known.
+    if initial_known is not None:
+        confirmations[0] = (initial,initial_known)
+    trend,last_idx,last_price = -initial,0,values[0]
+    for t in range(1,len(values)):
+        price = values[t]
+        ratio = price/last_price
+        if trend == VALLEY:
+            if ratio >= 1+up[last_idx]:
+                marks[last_idx] = trend
+                confirmations[last_idx] = (trend,t)
+                trend,last_price,last_idx = PEAK,price,t
+            elif price < last_price:
+                last_price,last_idx = price,t
         else:
-            dedup.append(p)
-    return dedup
+            if ratio <= 1+down[last_idx]:
+                marks[last_idx] = trend
+                confirmations[last_idx] = (trend,t)
+                trend,last_price,last_idx = VALLEY,price,t
+            elif price > last_price:
+                last_price,last_idx = price,t
+    # Exact 0.2.2 endpoint rules, including the one-observation case.
+    if last_idx == len(values)-1:
+        marks[last_idx] = trend
+    elif marks[-1] == 0:
+        marks[-1] = -trend
+    return values,marks,confirmations
 
 
-def pivots_known_by(confirm_bar: int, pivots: List[Pivot]) -> List[Pivot]:
-    """返回在 confirm_bar（含）之前已经可观察到的拐点。"""
-    return [p for p in pivots if p.confirm_idx <= confirm_bar]
+def peak_valley_pivots(close, up_thresh, down_thresh):
+    """Upstream-compatible labels: +1 peak, -1 valley, zero otherwise."""
+    return _scan(close,up_thresh,down_thresh)[1]
+
+
+def day0_pivots(close, threshold) -> List[Pivot]:
+    """Full upstream chart pivots, with confirmation metadata added."""
+    down = -float(threshold) if np.isscalar(threshold) else -np.asarray(threshold,dtype=float)
+    values,marks,confirmations = _scan(close,threshold,down)
+    result = []
+    for idx in np.flatnonzero(marks):
+        known = confirmations.get(int(idx))
+        confirmed = bool(known is not None and known[0] == marks[idx])
+        result.append(Pivot(int(idx),float(values[idx]),'high' if marks[idx] == PEAK else 'low',
+                            known[1] if confirmed else None,confirmed))
+    return result
+
+
+def filter_pivots(pivots, min_bars_between_peaks=0, peaks='All'):
+    """day0 BaseZigZagLevels: side filter first, then chronological greedy spacing."""
+    if peaks not in ('All','High','Low'):
+        raise ValueError('peaks must be All, High, or Low')
+    if (isinstance(min_bars_between_peaks,bool)
+            or not isinstance(min_bars_between_peaks,(int,float,np.integer,np.floating))
+            or not np.isfinite(min_bars_between_peaks) or min_bars_between_peaks < 0
+            or min_bars_between_peaks != int(min_bars_between_peaks)):
+        raise ValueError('min_bars_between_peaks must be a nonnegative integer')
+    min_bars_between_peaks = int(min_bars_between_peaks)
+    selected = sorted((p for p in pivots if peaks == 'All' or p.kind == ('high' if peaks == 'High' else 'low')),
+                      key=lambda p:p.price_idx)
+    if not min_bars_between_peaks:
+        return selected
+    result = []
+    for pivot in selected:
+        if not result or pivot.price_idx-result[-1].price_idx >= min_bars_between_peaks:
+            result.append(pivot)
+    return result
+
+
+def confirmed_close_pivots(close, threshold, min_bars_between_peaks=0, peaks='All') -> List[Pivot]:
+    return [p for p in filter_pivots(day0_pivots(close,threshold),min_bars_between_peaks,peaks) if p.confirmed]
+
+
+def pivots_known_by(confirm_bar,pivots):
+    return [p for p in pivots if p.confirmed and p.confirm_idx is not None and p.confirm_idx <= confirm_bar]

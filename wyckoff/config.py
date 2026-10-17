@@ -19,13 +19,31 @@ CONFIG_FILE = REPO_ROOT / "config" / "strategy.yaml"
 
 @dataclass
 class ZigzagConfig:
-    threshold: float = 0.05      # 固定反转阈值（adaptive=False时生效）
-    depth: int = 15              # 确认后回溯窗口（防未来函数：拐点延迟depth根确认）
-    zone_max_width: float = 0.05 # 支撑/阻力带全局最大宽度；支撑只向下合并
-    adaptive: bool = True        # 波动率自适应阈值：低波ETF自动放细、高波股自动放粗
-    atr_mult: float = 3.0        # threshold = atr_mult × 当日ATR占收盘价比
+    peak_percent_delta: float = 5.0  # day0百分数单位：5.0=5%
+    min_bars_between_peaks: int = 0
+    peaks: str = "All"  # All / High / Low
+    adaptive: bool = True        # 按 ATR / 价格动态调整阈值
+    atr_mult: float = 3.0
     min_threshold: float = 0.02
     max_threshold: float = 0.08
+
+
+    @property
+    def threshold(self):
+        """Legacy fractional alias; canonical YAML parameter is peak_percent_delta."""
+        return self.peak_percent_delta / 100
+
+    @threshold.setter
+    def threshold(self, value):
+        self.peak_percent_delta = float(value)*100
+
+
+@dataclass
+class SupportConfig:
+    lookback_bars: int = 0  # 0=全样本；交易输入另按确认时点过滤
+    merge_distance: Optional[float] = None  # 与merge_percent二选一
+    merge_percent: Optional[float] = 0.5  # 百分数；0.5表示0.5%
+    level_selector: str = "median"
 
 
 @dataclass
@@ -37,12 +55,19 @@ class VolumeConfig:
 
 @dataclass
 class SpringConfig:
-    lookback: int = 60         # 支撑位有效回溯窗口
     recover_window: int = 5    # 破位/触带后收复天数上限
-    recover_frac: float = 0.6  # 收复线 = 带下沿 + frac×带宽（0.6=腰部偏上）
-    recover_margin: float = 0.002  # 收盘还须高出收复线这一比例
+    recover_margin_atr: float = 0.05  # 收盘收复水平线的ATR缓冲
     vol_confirm_ratio: float = 1.8  # 超过此量比视为"震仓"（高风险）
     test_window: int = 30      # 二次测试等待窗口
+    spring_window: int = 3
+    ideal_range_atr: float = 1.2
+    absorption_range_atr: float = 1.8
+    test_volume_ratio: float = 0.7
+    test_range_ratio: float = 0.6
+    test_range_atr: float = 1.2
+    test_tolerance_atr: float = 0.5
+    min_test_tolerance: float = 0.003
+    max_test_tolerance: float = 0.02
 
 
 @dataclass
@@ -54,13 +79,23 @@ class SupplyDemandConfig:
 
 
 @dataclass
+class ClimaxConfig:
+    lookback: int = 20
+    volume_ratio: float = 1.8
+    range_atr: float = 1.5
+    confirm_bars: int = 3
+    stopping_close_position: float = 0.6
+    cooldown: int = 20
+
+
+@dataclass
 class SignalConfig:
-    buy_threshold: float = 2.0     # 买入信号分数门槛
-    sell_threshold: float = 2.0    # 卖出信号分数门槛
-    confirm_margin: float = 1.5    # 买/卖分差确认倍数
-    bear_accum_mult: float = 0.6   # 空头背景+吸筹阶段权重
-    bear_mult: float = 0.35        # 空头背景权重（书中熊市禁Spring）
-    dist_mult: float = 0.6         # 派发阶段买入权重
+    diagnostic_scores: bool = True  # 分数只展示，不生成交易动作
+    entry_sc: bool = True
+    entry_spring: bool = True
+    entry_tests: bool = True
+    entry_lps: bool = True
+    entry_breakouts: bool = False  # 原文默认等待SOS/JOC后成功测试；开启为积极研究模式
 
 
 @dataclass
@@ -70,15 +105,18 @@ class TradeRuleConfig:
     max_hold_days: int = 20
     commission: float = 0.001
     initial_cash: float = 100000.0
+    slippage: float = 0.0005
 
 
 @dataclass
 class StrategyConfig:
     zigzag: ZigzagConfig = field(default_factory=ZigzagConfig)
+    support: SupportConfig = field(default_factory=SupportConfig)
     volume: VolumeConfig = field(default_factory=VolumeConfig)
     spring: SpringConfig = field(default_factory=SpringConfig)
     supply_demand: SupplyDemandConfig = field(default_factory=SupplyDemandConfig)
     signal: SignalConfig = field(default_factory=SignalConfig)
+    climax: ClimaxConfig = field(default_factory=ClimaxConfig)
     trade: TradeRuleConfig = field(default_factory=TradeRuleConfig)
 
     @classmethod
@@ -109,9 +147,15 @@ class StrategyConfig:
         import copy
         cfg = copy.deepcopy(self)
         for key, value in flat.items():
-            for group_name in ("zigzag", "volume", "spring", "supply_demand", "signal", "trade"):
+            for group_name in ("zigzag", "support", "volume", "spring", "supply_demand", "signal", "climax", "trade"):
                 target = getattr(cfg, group_name)
-                if hasattr(target, key):
-                    setattr(target, key, value)
+                group_key = key.split('_', 1)
+                if hasattr(target, key) or (len(group_key) == 2
+                                            and group_key[0] == group_name
+                                            and hasattr(target, group_key[1])):
+                    real = key if hasattr(target, key) else group_key[1]
+                    setattr(target, real, value)
                     break
+            else:
+                raise ValueError(f"未知策略参数: {key}（可用：裸参数名或 分组_参数名）")
         return cfg

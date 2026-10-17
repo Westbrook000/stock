@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""画单标的K线：合并支撑带 + Zigzag拐点 +（可选）Wyckoff事件标记。
+"""画单标的K线：day0水平支撑/阻力线 + Zigzag拐点 +（可选）Wyckoff事件标记。
 
 用法:
-    python3 scripts/plot_zones.py --code 515450 --kind etf                 # 全历史支撑带+Zigzag
+    python3 scripts/plot_zones.py --code 515450 --kind etf                 # 全历史水平线+Zigzag
     python3 scripts/plot_zones.py --code 515450 --kind etf --since 2025-06-01 --events
 """
 import argparse
+import yaml
+import os
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/stock-day0-matplotlib")
 import sys
 from pathlib import Path
 
@@ -24,7 +27,7 @@ from wyckoff.config import DATA_DIR, StrategyConfig   # noqa: E402
 from wyckoff.data_store import load_symbol            # noqa: E402
 
 MARKS = {"SPRING": ("^", "#e67e22"), "TEST": ("P", "#8e44ad"), "ST": ("o", "#16a085"),
-         "SC": ("s", "#2c3e50"), "SOW": ("v", "#c0392b"), "UT": ("v", "#d35400"),
+         "SPRING_FAIL": ("x", "#7f0000"), "SC": ("s", "#2c3e50"), "SC_CANDIDATE": (".", "#999999"), "SC_FAIL": ("x", "#7f0000"), "SOW": ("v", "#c0392b"), "UT": ("v", "#d35400"),
          "JOC": ("D", "#e74c3c"), "SOS": ("*", "#f39c12"), "LPS": ("p", "#1abc9c")}
 PALETTE = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#d62728", "#8c564b", "#e377c2",
            "#17becf", "#bcbd22", "#7f7f7f", "#aec7e8", "#98df8a", "#ffbb78", "#c5b0d5"]
@@ -56,7 +59,7 @@ def main():
         overrides = {}
         for kv in args.set:
             k, v = kv.split("=", 1)
-            overrides[k] = float(v) if any(ch in v for ch in ".e") else int(v)
+            overrides[k] = yaml.safe_load(v)
         cfg = cfg.with_overrides(**overrides)
     res = run_analysis(df, cfg, code=args.code)
 
@@ -83,22 +86,32 @@ def main():
     ax.bar(x[up], np.maximum((c - o)[up], 1e-6), 0.7, bottom=o[up], color="#c0392b")
     ax.bar(x[~up], np.maximum((o - c)[~up], 1e-6), 0.7, bottom=c[~up], color="#27ae60")
 
-    # 支撑带：从拐点形成画到破位（未破位画到最右），每条一个颜色 + 右侧标注
-    bands = [lv for lv in res.levels if lv.kind == "support" and lv.created_idx <= idx[-1]]
-    for i, lv in enumerate(bands):
-        col = PALETTE[i % len(PALETTE)]
-        i0 = max(0, int(np.searchsorted(idx, lv.created_idx)))
-        i1 = n - 1 if lv.broken_idx is None else min(n - 1, int(np.searchsorted(idx, lv.broken_idx)))
-        if i1 <= i0:
+    # Current/as-of snapshot, projected back to the earliest member pivot as requested.
+    # Dotted before this exact cluster became known; solid from known_from onward.
+    # Cluster envelopes are explanatory graphics; trading still uses the median line.
+    lines = res.snapshot_levels
+    last_label_y = -np.inf
+    label_gap = .014*(h.max()-l.min())
+    for i, lv in enumerate(sorted(lines, key=lambda z:z.price)):
+        start = max(0, int(np.searchsorted(idx, lv.first_pivot_idx)))
+        known = max(start, min(n-1, int(np.searchsorted(idx, lv.known_from))))
+        col = tuple(.75*v for v in plt.cm.turbo(.06+.88*i/max(len(lines)-1,1))[:3])
+        if start >= n:
             continue
-        width = (lv.top - lv.bottom) / ((lv.top + lv.bottom) / 2)
-        ax.fill_between(x[i0:i1 + 1], lv.bottom, lv.top, color=col, alpha=0.17, zorder=0)
-        ax.hlines([lv.bottom, lv.top], i0, i1, color=col, linewidth=0.8, alpha=0.8, zorder=1)
-        tag = f"Z{i+1} {lv.bottom:.3f}~{lv.top:.3f}[{width*100:.1f}%×{lv.touches}]"
-        if lv.broken_idx is not None:
-            tag += " 破"
-        ax.text(i1 + n * 0.004, (lv.bottom + lv.top) / 2, tag, fontsize=7.5, color=col,
-                va="center", ha="left")
+        ax.fill_between([start,n-1], lv.bottom, lv.top, color=col, alpha=.09, zorder=0)
+        for price, width in [(lv.bottom,.7),(lv.top,.7),(lv.price,1.3)]:
+            if known>start:
+                ax.hlines(price,start,known,color=col,linewidth=width,linestyle=':',alpha=.6)
+            ax.hlines(price,known,n-1,color=col,linewidth=width,alpha=.9)
+        role = '支撑' if lv.price<=c[-1] else '阻力'
+        tag = f'R{i+1} {role} {lv.bottom:.3f}–{lv.top:.3f} (n={lv.peak_count})' + (' 待确认' if lv.provisional else '')
+        label_y = max(lv.price,last_label_y+label_gap)
+        last_label_y = label_y
+        ax.plot([n-1,n+n*.006],[lv.price,label_y],color=col,linewidth=.5,alpha=.65)
+        ax.text(n+n*.008,label_y,tag,fontsize=7,color=col,va='center')
+        first_price = next(p.price for p in res.pivots if p.price_idx==lv.first_pivot_idx)
+        if idx[0]<=lv.first_pivot_idx<=idx[-1]:
+            ax.plot(start,first_price,'o',color=col,markersize=4,zorder=5)
 
     # Zigzag 折线 + 拐点三角
     piv = [pv for pv in res.pivots if idx[0] <= pv.price_idx <= idx[-1]]
@@ -106,20 +119,23 @@ def main():
         pos = {p_.price_idx: int(np.searchsorted(idx, p_.price_idx)) for p_ in piv}
         px = [pos[p_.price_idx] for p_ in piv]
         py = [p_.price for p_ in piv]
-        ax.plot(px, py, color="#3b5bdb", linewidth=1.0, alpha=0.75, zorder=3)
+        ax.plot(px, py, color="#666666", linewidth=0.8, alpha=0.6, zorder=3)
         for p_ in piv:
             j = pos[p_.price_idx]
             ax.plot(j, p_.price, marker="^" if p_.kind == "low" else "v", markersize=5,
-                    color="#3b5bdb", zorder=4)
+                    color="#666666", markerfacecolor="#666666" if p_.confirmed else "white", zorder=4)
 
     if args.events:
+        failed_springs = {e.meta.get("spring_idx") for e in res.events
+                          if e.etype == "SPRING_FAIL" and e.confirm_idx <= idx[-1]}
         for e in events:
             j = int(np.searchsorted(idx, e.confirm_idx))
             if j >= n or idx[j] != e.confirm_idx:
                 continue
             sym, col = MARKS.get(e.etype, ("x", "#888"))
             ax.plot(j, e.price, marker=sym, color=col, markersize=9 if e.etype == "SPRING" else 6,
-                    markerfacecolor="none" if e.failed_idx is not None else col,
+                    markerfacecolor="none" if (e.failed_idx is not None
+                                    or (e.etype == "SPRING" and e.idx in failed_springs)) else col,
                     markeredgewidth=1.4, zorder=5)
         ax.legend(handles=[plt.Line2D([], [], marker=v[0], color=v[1], linestyle="", label=k)
                            for k, v in MARKS.items()], loc="upper left", fontsize=8, ncol=5)
@@ -129,16 +145,31 @@ def main():
     ax.set_xticks(x[::step])
     ax.set_xticklabels([d.strftime("%Y-%m-%d") for d in dts], rotation=45, fontsize=8)
     ax.set_xlim(-1, n * 1.13)
-    thr = (f"自适应3×ATR%[{cfg.zigzag.min_threshold:.0%}~{cfg.zigzag.max_threshold:.0%}]"
-           if cfg.zigzag.adaptive else f"{cfg.zigzag.threshold:.0%}")
-    ax.set_title(f"{res.code} {res.name} {'全历史' if not args.since else f'{args.since}起'} · "
-                 f"支撑带(只向下合并·全局宽度≤{cfg.zigzag.zone_max_width:.0%}) "
-                 f"+ Zigzag({thr}/depth{cfg.zigzag.depth})   共{len(bands)}条带 / {len(piv)}个拐点")
+    ax.set_title(f"{res.code} {res.name} · day0 / ZigZag 0.2.2 · "
+                 f"{f'merge_percent={cfg.support.merge_percent:g}%' if cfg.support.merge_distance is None else f'merge_distance={cfg.support.merge_distance:g}'} · "
+                 f"{len(lines)}个支撑阻力区域 · {'ATR自适应' if cfg.zigzag.adaptive else '固定'}ZigZag阈值")
+    fig.text(.02,.015,'同色上下界=簇内拐点最小/最大价，中线=中位数；起点=最早成员拐点。点线为回溯或待确认展示；空心拐点/待确认区域含原版首尾端点，仅作绘图。',
+             fontsize=8,color='#666666')
     ax.grid(alpha=0.2)
-    out = args.out or str(DATA_DIR / f"{args.code}_zones_full.png")
-    fig.tight_layout()
+    out = args.out or str(DATA_DIR / f"{args.code}_day0_regions_full.png")
+    fig.tight_layout(rect=[0,.04,1,1])
     fig.savefig(out, dpi=130)
-    print("保存:", out)
+    import json
+    rows = [{'line_id':lv.line_id,'price':lv.price,'bottom':lv.bottom,'top':lv.top,
+             'count':lv.peak_count,'first_pivot_date':str(res.features.date.iloc[lv.first_pivot_idx].date()),
+             'known_from_date':str(res.features.date.iloc[lv.known_from].date()) if lv.known_from<len(res.features) else None,
+             'provisional':lv.provisional,
+             'pivot_indices':list(lv.pivot_indices)} for lv in sorted(lines,key=lambda z:z.price)]
+    last_threshold = float(np.clip(cfg.zigzag.atr_mult*res.features.atr.iloc[-1]/res.features.close.iloc[-1],
+                                  cfg.zigzag.min_threshold,cfg.zigzag.max_threshold)) if cfg.zigzag.adaptive else cfg.zigzag.threshold
+    details = {'code':res.code,'merge_percent':cfg.support.merge_percent,'merge_distance':cfg.support.merge_distance,
+               'min_bars_between_peaks':cfg.zigzag.min_bars_between_peaks,'peaks':cfg.zigzag.peaks,'lookback_bars':cfg.support.lookback_bars,
+               'zigzag_adaptive':cfg.zigzag.adaptive,'last_zigzag_threshold':last_threshold,
+               'confirmed_pivots':sum(p.confirmed for p in res.pivots),'chart_pivots':len(res.pivots),'regions':rows,
+               'plot_semantics':'current snapshot extended to earliest member pivot; dotted before knowledge'}
+    Path(out).with_suffix('.json').write_text(json.dumps(details,ensure_ascii=False,indent=2),encoding='utf-8')
+    print('保存:',out)
+    print(f'确认拐点 {sum(p.confirmed for p in res.pivots)} / 绘图拐点 {len(res.pivots)} / 区域 {len(lines)} / 最新K线阈值={last_threshold:.2%}')
 
 
 if __name__ == "__main__":

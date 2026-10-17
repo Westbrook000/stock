@@ -16,11 +16,14 @@ PHASES = ("markdown", "accumulation", "markup", "distribution")
 
 # 事件 → 各阶段证据权重
 EVIDENCE: Dict[str, Dict[str, float]] = {
+    "SC_CANDIDATE": {"accumulation": 1.0},
+    "SC_FAIL": {"markdown": 2.0},
     "SC":   {"accumulation": 3.0, "markdown": 0.5},
     "PS":   {"accumulation": 1.5, "markdown": 0.3},
     "AR":   {"accumulation": 1.5},
     "ST":   {"accumulation": 2.0},
     "SPRING": {"accumulation": 2.0, "markup": 0.8},
+    "SPRING_FAIL": {"markdown": 2.0},
     "TEST": {"accumulation": 1.5, "markup": 2.5},
     "SOS":  {"markup": 2.5, "accumulation": 0.5},
     "JOC":  {"markup": 3.0},
@@ -55,9 +58,9 @@ def phase_series(n: int, events: List[Event], trend: np.ndarray, pos60: np.ndarr
 
         for e in by_confirm.get(t, []):
             weights = EVIDENCE.get(e.etype, {})
-            w = e.quality if e.failed_idx is not None and e.etype == "SPRING" else 1.0
-            if e.etype == "SPRING" and e.failed_idx is not None:
-                weights = {"markdown": 2.0}
+            w = 1.0
+            if e.etype == "ST" and e.kind == "breakout_test":
+                weights = {"markup": 2.0}
             for ph, v in weights.items():
                 scores[PHASES.index(ph)] += v * w
 

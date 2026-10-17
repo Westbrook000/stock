@@ -77,4 +77,7 @@ def load_latest_scan() -> Optional[List[Dict]]:
     p = SIGNALS_DIR / "latest.json"
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    from .analysis.engine import STRATEGY_VERSION
+    rows = json.loads(p.read_text(encoding="utf-8"))
+    current = [r for r in rows if r.get('strategy_version') == STRATEGY_VERSION]
+    return current or None

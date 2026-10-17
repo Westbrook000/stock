@@ -27,6 +27,7 @@ class Zone:
     returns: int = 0        # 被回测次数
     last_touch_idx: int = -1
     broken_idx: Optional[int] = None
+    known_from: Optional[int] = None
 
     @property
     def active(self) -> bool:
@@ -77,7 +78,7 @@ def detect_zones(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: n
                                body_avg, atr, base_max_body_atr, zone_width_atr_max)
                 if z:
                     zones.append(Zone("D", z["top"], z["bottom"], z["start"], z["top"],
-                                      abs(chg), vr, z["bars"], last_touch_idx=-1))
+                                      abs(chg), vr, z["bars"], last_touch_idx=-1, known_from=t))
             else:
                 if chg > -min_impulse_change or vr < impulse_vol_ratio or close[t] >= close[t - lookback_impulse]:
                     continue
@@ -85,7 +86,7 @@ def detect_zones(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: n
                                body_avg, atr, base_max_body_atr, zone_width_atr_max)
                 if z:
                     zones.append(Zone("S", z["top"], z["bottom"], z["start"], z["bottom"],
-                                      abs(chg), vr, z["bars"], last_touch_idx=-1))
+                                      abs(chg), vr, z["bars"], last_touch_idx=-1, known_from=t))
     return zones
 
 
@@ -143,7 +144,7 @@ def zone_state_series(high, low, close, volume, zones: List[Zone]) -> dict:
     for t in range(n):
         best_d = best_s = None
         for z in zones:
-            if z.created_idx > t:
+            if (z.known_from if z.known_from is not None else z.created_idx) > t:
                 continue
             if not z.active:
                 continue

@@ -100,7 +100,7 @@ function renderSymbol(d) {
     <b>${d.code} ${d.name}</b> <span class="muted">${d.kind}</span> ·
     ${l.date} 收盘 ${l.close} → <b class="${l.action==='BUY'?'up':l.action==='SELL'?'down':''}">${{BUY:'买入',SELL:'卖出',HOLD:'观望'}[l.action]||l.action}</b>
     <span class="badge">阶段 ${phaseZh(l.phase)}</span>
-    <span class="badge">买${l.buy_score} / 卖${l.sell_score}</span>
+    <span class="badge">诊断分 买${l.buy_score} / 卖${l.sell_score}（不控制交易）</span>
     ${l.stop?`<span class="badge">止损 ${l.stop}</span>`:''}
     ${l.targets&&l.targets.length?`<span class="badge">目标 ${l.targets.join(' / ')}</span>`:''}
     <div class="small muted">${l.reason||''}</div>`;
@@ -109,20 +109,24 @@ function renderSymbol(d) {
   if (!chart || chart.getDom() !== dom) chart = echarts.init(dom);
   const evByType = {};
   d.events.forEach(e => {
-    const isBuy = BUY_EV.has(e.type) && !e.failed;
+    const isBuy = e.entry_allowed && !e.failed;
     (evByType[e.type] ||= []).push({ value: [e.bar, e.price], failed: e.failed, buy: isBuy });
   });
   const series = [{
     type: 'candlestick', data: d.candles,
     itemStyle: { color:'#e15b5b', color0:'#3d9b7a', borderColor:'#e15b5b', borderColor0:'#3d9b7a' },
-    markLine: { symbol:'none', data:(d.supports||[]).slice(0,6).map(p=>({yAxis:p, lineStyle:{color:'#8a8ac0',type:'dashed'}})), label:{show:false} },
-    markArea: { silent:true, data: (d.zones||[]).map(z => [
-      { yAxis: z.top, itemStyle:{ color: z.type==='D'?'rgba(61,155,122,.16)':'rgba(225,91,91,.16)' } },
-      { yAxis: z.bottom, xAxis: z.broken ? d.dates[indexOfDate(d, z.broken)] : undefined }
-    ]).concat((d.support_zones||[]).map(([b,t]) => [
-      { yAxis: t, itemStyle:{ color:'rgba(122,131,201,.14)' } },
-      { yAxis: b }
-    ])) }
+    markLine: { symbol:'none', silent:true, label:{show:false}, data:(d.level_regions||[]).flatMap((l,i) => {
+      const color=`hsl(${(i*137.508)%360},65%,42%)`;
+      return [l.bottom,l.price,l.top].flatMap(p=>[
+        [{coord:[l.start,p],lineStyle:{color,type:'dotted',opacity:.5}},{coord:[l.known,p]}],
+        [{coord:[l.known,p],lineStyle:{color,type:'solid',opacity:.85}},{coord:[d.dates.length-1,p]}]
+      ]);
+    }) },
+    markArea: {silent:true,label:{show:false},data:(d.level_regions||[]).map((l,i)=>[
+      {coord:[l.start,l.bottom],itemStyle:{color:`hsla(${(i*137.508)%360},65%,42%,.08)`}},
+      {coord:[d.dates.length-1,l.top]}
+    ])}
+
   }];
 
   Object.entries(evByType).forEach(([type, pts]) => {
@@ -156,14 +160,15 @@ function renderSymbol(d) {
     `<tr><td>${e.date}</td><td><b>${e.type}</b>${e.kind?'('+zhKind(e.kind)+')':''}</td>
      <td>${e.price.toFixed(2)}</td><td>${e.quality.toFixed(2)}</td>
      <td>${e.failed?'<span class="down">已失败</span>':'有效'}</td></tr>`).join('');
-  $('#sym-zones tbody').innerHTML = d.zones.slice(-12).reverse().map(z =>
-    `<tr><td>${z.created}</td><td>${z.type==='D'?'<span class="up">需求</span>':'<span class="down">供给</span>'}</td>
-     <td>${z.bottom.toFixed(2)} ~ ${z.top.toFixed(2)}</td><td>${z.broken?('失效 '+z.broken):'有效'}</td></tr>`).join('');
+  $('#sym-zones tbody').innerHTML = [
+    ...(d.support_lines||[]).map(p=>({p,side:'支撑'})),
+    ...(d.resistance_lines||[]).map(p=>({p,side:'阻力'}))
+  ].sort((a,b)=>b.p-a.p).map(l=>`<tr><td>${l.side}</td><td>${l.p.toFixed(4)}</td></tr>`).join('');
   $('#sym-signals tbody').innerHTML = (d.signals||[]).slice(-30).reverse().map(s =>
     `<tr><td>${s.date}</td><td class="${s.action==='BUY'?'up':s.action==='SELL'?'down':''}">${s.action}</td>
      <td class="small">${s.reason}</td><td>${s.buy.toFixed(1)}/${s.sell.toFixed(1)}</td></tr>`).join('');
 }
-function zhKind(k){return {ideal:'理想',needs_test:'需测试',shock:'震仓',tested:'已测试',top:'顶部',bottom:'底部'}[k]||k;}
+function zhKind(k){return {ideal:'理想',absorption:'吸收',confirmed:'已确认',panic:'候选',sc_test:'SC测试',spring_test:'Spring测试',breakout_test:'突破测试',needs_test:'需测试',shock:'震仓',tested:'已测试',top:'顶部',bottom:'底部'}[k]||k;}
 function indexOfDate(d, dateStr){ const i = d.dates.indexOf(dateStr); return i >= 0 ? i : 0; }
 
 // ---------- 回测 ----------

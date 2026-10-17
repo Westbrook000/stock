@@ -1,0 +1,5 @@
+# Local numerical runtime for the in-project day0 Ward port.
+scikit-learn==1.5.2
+scipy==1.13.1
+joblib==1.4.2
+threadpoolctl==3.5.0

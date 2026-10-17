@@ -14,7 +14,7 @@ from wyckoff.backtest.optimizer import grid_search      # noqa: E402
 from wyckoff.scanner import build_universe              # noqa: E402
 
 GRID = {
-    "buy_threshold": [1.4, 1.8, 2.2],
+    "merge_percent": [0.3, 0.5, 0.8],
     "recover_window": [2, 3, 5],
     "stop_loss": [0.05, 0.08],
 }
@@ -29,7 +29,7 @@ def main():
     args = p.parse_args()
 
     codes = build_universe(("stock", "etf"), sample=args.sample)
-    print(f"网格 {len(GRID['buy_threshold']) * len(GRID['recover_window']) * len(GRID['stop_loss'])} 组"
+    print(f"网格 {len(GRID['merge_percent']) * len(GRID['recover_window']) * len(GRID['stop_loss'])} 组"
           f" × {len(codes)} 标的")
 
     def cb(ci, total, cfg, summary):
@@ -39,7 +39,7 @@ def main():
 
     df = grid_search(GRID, codes, workers=args.workers, start=args.since,
                      tag=args.tag, progress_cb=cb)
-    cols = ["buy_threshold", "recover_window", "stop_loss", "total_trades",
+    cols = ["merge_percent", "recover_window", "stop_loss", "total_trades",
             "avg_win_rate", "avg_profit_factor", "avg_total_ret", "median_total_ret",
             "avg_max_dd", "avg_trades_per_year"]
     print()

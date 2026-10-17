@@ -1,0 +1,18 @@
+diff --git a/pricelevels/_abstract.py b/pricelevels/_abstract.py
+index 4ed2643..3c42d40 100644
+--- a/pricelevels/_abstract.py
++++ b/pricelevels/_abstract.py
+@@ -1,5 +1,4 @@
+ import numpy as np
+ import pandas as pd
+-from zigzag import peak_valley_pivots
+-
++
+ from .exceptions import InvalidParameterException, InvalidArgumentException
+@@ -63,4 +62,5 @@
+         super().__init__(merge_distance, merge_percent, level_selector)
+-
++
+     def _find_potential_level_prices(self, X):
++        from zigzag import peak_valley_pivots
+         pivots = peak_valley_pivots(X, self._peak_percent_delta, -self._peak_percent_delta)

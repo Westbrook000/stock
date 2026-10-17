@@ -4,9 +4,10 @@
 用法:
     python3 scripts/run_scan.py --sample 60       # 抽样验证
     python3 scripts/run_scan.py --all             # 全量（股票+ETF）
-    python3 scripts/run_scan.py --all --set buy_threshold=1.6   # 带参数覆盖
+    python3 scripts/run_scan.py --all --set merge_percent=0.5   # 带参数覆盖
 """
 import argparse
+import yaml
 import sys
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def main():
     overrides = {}
     for kv in args.set:
         k, v = kv.split("=", 1)
-        overrides[k] = float(v)
+        overrides[k] = yaml.safe_load(v)
 
     kinds = ("stock", "etf") if args.kind == "both" else (args.kind,)
     sample = 0 if args.all else (args.sample or 50)

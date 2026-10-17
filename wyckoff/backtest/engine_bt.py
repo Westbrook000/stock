@@ -1,12 +1,16 @@
-"""backtrader 数据与策略：引擎预计算信号以附加线注入，杜绝未来数据。"""
+"""保留旧版 Backtrader 接口兼容性。
+
+当前回测入口 runner 使用 daily.simulate_daily 撮合和统计；此处旧 Strategy 不参与研究回测。
+"""
 from __future__ import annotations
 
 import backtrader as bt
 import pandas as pd
+from .daily import simulate_daily, prepare_daily
 
 
 ENT_CODES = {"": 0, "spring": 1, "test": 2, "lps": 3, "st": 4,
-             "demand_zone": 5, "sos": 6, "joc": 7}
+             "demand_zone": 5, "sos": 6, "joc": 7, "st_spring": 8, "st_sc": 9, "st_breakout": 10, "sc": 11}
 ENT_NAMES = {v: k for k, v in ENT_CODES.items()}
 
 
@@ -98,7 +102,7 @@ class WyckoffStrategy(bt.Strategy):
                 self.entry_idx = len(self)
                 if self.stop_level and self.entry_price:
                     # 止损相对成交价保护最大幅度
-                    self.stop_level = min(self.stop_level, self.entry_price * (1 - self.p.stop_pct))
+                    self.stop_level = max(self.stop_level, self.entry_price * (1 - self.p.stop_pct))
                 self.trades.append(dict(dt=self.data.datetime.date(0), direction="buy",
                                         price=order.executed.price,
                                         reason=self._pending[1] if self._pending else "",

@@ -1,37 +1,57 @@
 zigzag:
-  threshold: 0.05
-  depth: 15
-  zone_max_width: 0.05
-  adaptive: true
+  peak_percent_delta: 5.0  # day0百分数单位，5.0代表5%
+  min_bars_between_peaks: 0  # 原版默认0，不过滤；可设5等非负整数
+  peaks: All  # All / High / Low
+  adaptive: true  # 自适应扩展；以下min/max_threshold使用小数比例
   atr_mult: 3.0
   min_threshold: 0.02
   max_threshold: 0.08
+support:
+  lookback_bars: 0
+  merge_distance: null  # 使用百分比模式；绝对距离模式需同时将merge_percent设为null
+  merge_percent: 0.5
+  level_selector: median  # median / mean
 volume:
   ma_window: 20
   high_vol_ratio: 1.5
   low_vol_ratio: 0.7
 spring:
-  lookback: 60
   recover_window: 5
-  recover_frac: 0.6
-  recover_margin: 0.002
+  recover_margin_atr: 0.05
   vol_confirm_ratio: 1.8
   test_window: 30
+  spring_window: 3
+  ideal_range_atr: 1.2
+  absorption_range_atr: 1.8
+  test_volume_ratio: 0.7
+  test_range_ratio: 0.6
+  test_range_atr: 1.2
+  test_tolerance_atr: 0.5
+  min_test_tolerance: 0.003
+  max_test_tolerance: 0.02
 supply_demand:
   min_impulse_change: 0.03
   impulse_vol_ratio: 1.5
   base_max_body_atr: 1.0
   zone_width_atr_max: 3.0
 signal:
-  buy_threshold: 1.4
-  sell_threshold: 2.0
-  confirm_margin: 1.5
-  bear_accum_mult: 0.6
-  bear_mult: 0.35
-  dist_mult: 0.6
+  diagnostic_scores: true
+  entry_sc: true
+  entry_spring: true
+  entry_tests: true
+  entry_lps: true
+  entry_breakouts: false
+climax:
+  lookback: 20
+  volume_ratio: 1.8
+  range_atr: 1.5
+  confirm_bars: 3
+  stopping_close_position: 0.6
+  cooldown: 20
 trade:
-  take_profit: 0.15
-  stop_loss: 0.08
+  take_profit: 0.2
+  stop_loss: 0.04
   max_hold_days: 20
   commission: 0.001
   initial_cash: 100000.0
+  slippage: 0.0005

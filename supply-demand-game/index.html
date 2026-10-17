@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>供需交易员 · 实战模拟游戏</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="css/game.css">
+</head>
+<body data-phase="menu">
+<header>
+  <h1>供需交易员 <small>《供需交易法》实战模拟</small></h1>
+  <div id="phase-label"></div>
+  <div class="right"><span id="ep-title"></span><span id="hud-xp"></span>
+    <button id="btn-back-menu" class="ghost">选关</button></div>
+</header>
+
+<main>
+  <canvas id="kline" width="1060" height="560"></canvas>
+
+  <aside id="side">
+    <div id="say">欢迎来到供需市场。这里不考记忆，只考决策——每一根K线都是市场给你的反馈。</div>
+
+    <section class="panel" data-panel="menu">
+      <h2>选择关卡</h2>
+      <p class="muted">真实A股/ETF历史行情切片。绿色=需求区关卡（练买入），红色=供给区（练做空）。「陈旧」标签提示新鲜度已被消耗。</p>
+      <div id="levels"></div>
+    </section>
+
+    <section class="panel hidden" data-panel="observe">
+      <h2>① 观察</h2>
+      <p>按 <kbd>空格</kbd> 逐根回看历史，或滚轮缩放。悬停K线查看<b>静态(订单积累)/动态(订单消耗)</b>分类。</p>
+      <button id="btn-to-identify" class="primary">开始识别区域 →</button>
+    </section>
+
+    <section class="panel hidden" data-panel="identify">
+      <h2>② 识别区域</h2>
+      <p>在图上<b>拖拽框选静态基带</b>（1~3根小实体K线，不含暴力出线）：</p>
+      <div id="sel-info" class="muted">未选择</div>
+      <label>类型
+        <select id="zone-type"><option value="">—</option>
+          <option value="D">需求区（暴涨离开→将来回踩买）</option>
+          <option value="S">供给区（暴跌离开→将来回抽卖）</option>
+        </select>
+      </label>
+      <button id="btn-confirm-zone" class="primary">确认</button>
+      <button id="btn-reveal" class="hidden ghost">看答案（-1星）</button>
+    </section>
+
+    <section class="panel hidden" data-panel="score">
+      <h2>③ 概率增强评分（满分10）</h2>
+      <p id="score-hint" class="muted"></p>
+      <label>新鲜度 <select id="s-fresh"><option>3</option><option>1.5</option><option>0</option></select></label>
+      <label>力度 <select id="s-strong"><option>2</option><option>1</option><option>0</option></select></label>
+      <label>滞留时间 <select id="s-dwell"><option>2</option><option>1</option></select></label>
+      <label>盈亏比 <select id="s-rr"><option>3</option><option>1.5</option><option>0</option></select></label>
+      <button id="btn-submit-score" class="primary">提交评分</button>
+      <div id="score-report"></div>
+    </section>
+
+    <section class="panel hidden" data-panel="decide">
+      <h2>④ L.T.S.D 决策</h2>
+      <div id="ltsd-info"></div>
+      <label>动作 <select id="d-action">
+        <option value="">—</option><option value="buy">做多</option>
+        <option value="sell">做空</option><option value="wait">等待（空仓）</option>
+      </select></label>
+      <label>克线画法 <select id="ke-styles">
+        <option value="bodyBottom">实体底（推荐：价优但成交率低）</option>
+        <option value="bodyTop">实体顶（标准）</option>
+        <option value="wick">影线极端（成交率高但风险最大）</option>
+      </select></label>
+      <div id="entry-label"></div>
+      <label><input type="checkbox" id="stop-manual"> 手动放止损</label>
+      <input type="range" id="stop-slider" disabled style="width:100%">
+      <div id="stop-label"></div>
+      <div>目标：<label><input type="checkbox" class="t-check" value="2" checked>2R(平半)</label>
+        <label><input type="checkbox" class="t-check" value="3">3R</label>
+        <label><input type="checkbox" class="t-check" value="4">4R</label>
+        <span id="t2-label" class="muted"></span></div>
+      <label>推保护 <select id="d-plan">
+        <option value="none">不推保护</option>
+        <option value="p1">计划1：2R保本·3R全走（高盈亏比）</option>
+        <option value="p2">计划2：1R保本·2R全走（高胜率）</option>
+      </select></label>
+      <button id="btn-submit-decision" class="primary">下单</button>
+      <div id="decision-errors"></div>
+    </section>
+
+    <section class="panel hidden" data-panel="simulate">
+      <h2>⑤ 实盘演绎</h2>
+      <p>行情按真实历史推进。看你的挂单是否成交、止损是否被影线扫到。</p>
+      <button id="btn-next-bar" class="primary">下一根K线 (空格)</button>
+      <button id="btn-autoplay">▶ 自动播放</button>
+    </section>
+
+    <section class="panel hidden" data-panel="settle">
+      <h2>⑥ 结算</h2>
+      <div id="settle-panel"></div>
+    </section>
+  </aside>
+</main>
+<script type="module" src="js/ui/main.js"></script>
+</body>
+</html>

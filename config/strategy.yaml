@@ -1,0 +1,37 @@
+zigzag:
+  threshold: 0.05
+  depth: 15
+  zone_max_width: 0.05
+  adaptive: true
+  atr_mult: 3.0
+  min_threshold: 0.02
+  max_threshold: 0.08
+volume:
+  ma_window: 20
+  high_vol_ratio: 1.5
+  low_vol_ratio: 0.7
+spring:
+  lookback: 60
+  recover_window: 5
+  recover_frac: 0.6
+  recover_margin: 0.002
+  vol_confirm_ratio: 1.8
+  test_window: 30
+supply_demand:
+  min_impulse_change: 0.03
+  impulse_vol_ratio: 1.5
+  base_max_body_atr: 1.0
+  zone_width_atr_max: 3.0
+signal:
+  buy_threshold: 1.4
+  sell_threshold: 2.0
+  confirm_margin: 1.5
+  bear_accum_mult: 0.6
+  bear_mult: 0.35
+  dist_mult: 0.6
+trade:
+  take_profit: 0.15
+  stop_loss: 0.08
+  max_hold_days: 20
+  commission: 0.001
+  initial_cash: 100000.0

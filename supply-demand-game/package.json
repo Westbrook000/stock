@@ -1,0 +1,11 @@
+{
+  "name": "supply-demand-game",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "供需交易法交互式学习游戏（测试驱动）",
+  "scripts": {
+    "test": "node --test tests/",
+    "serve": "python3 -m http.server 8400"
+  }
+}

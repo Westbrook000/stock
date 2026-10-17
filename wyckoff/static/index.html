@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>威科夫分析服务</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/echarts.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>威科夫 · A股/ETF 分析服务</h1>
+  <nav>
+    <button class="tab active" data-view="scan">信号榜单</button>
+    <button class="tab" data-view="symbol">个股分析</button>
+    <button class="tab" data-view="backtest">回测调参</button>
+    <button class="tab" data-view="data">数据任务</button>
+  </nav>
+</header>
+
+<main>
+<!-- ============ 榜单 ============ -->
+<section id="view-scan" class="view active">
+  <div class="toolbar">
+    <select id="scan-filter">
+      <option value="all">全部标的</option>
+      <option value="buy">仅BUY</option>
+      <option value="watch">高分观察(≥1)</option>
+      <option value="etf">仅ETF</option>
+      <option value="stock">仅股票</option>
+    </select>
+    <button id="btn-full-scan" class="primary">全量扫描</button>
+    <span id="scan-status" class="muted"></span>
+  </div>
+  <table id="scan-table">
+    <thead><tr>
+      <th>代码</th><th>名称</th><th>类型</th><th>收盘</th><th>建议</th>
+      <th>买分</th><th>卖分</th><th>阶段</th><th>趋势</th><th>入场</th><th>理由</th><th>日期</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<!-- ============ 个股 ============ -->
+<section id="view-symbol" class="view">
+  <div class="toolbar">
+    <input id="sym-input" placeholder="代码/名称，如 600108 或 510300">
+    <button id="btn-go" class="primary">分析</button>
+    <label>周期(根) <select id="sym-bars">
+      <option>250</option><option selected>500</option><option>1000</option>
+    </select></label>
+    <span id="sym-status" class="muted"></span>
+  </div>
+  <div id="sym-head" class="card hidden"></div>
+  <div class="grid2">
+    <div id="chart-kline" class="chart"></div>
+    <div class="side">
+      <h3>威科夫事件（近段）</h3>
+      <table id="sym-events" class="mini"><tbody></tbody></table>
+      <h3>供需区</h3>
+      <table id="sym-zones" class="mini"><tbody></tbody></table>
+      <h3>触发信号</h3>
+      <table id="sym-signals" class="mini"><tbody></tbody></table>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 回测 ============ -->
+<section id="view-backtest" class="view">
+  <div class="card">
+    <h3>单标的回测</h3>
+    <div class="toolbar">
+      <input id="bt-code" placeholder="代码" size="10">
+      <select id="bt-kind"><option value="stock">股票</option><option value="etf">ETF</option></select>
+      <input id="bt-since" placeholder="起始 2015-01-01" size="12">
+      <button id="btn-bt" class="primary">运行</button>
+      <span id="bt-status" class="muted"></span>
+    </div>
+    <div id="bt-result"></div>
+  </div>
+  <div class="card">
+    <h3>批量回测</h3>
+    <div class="toolbar">
+      <select id="bb-kind"><option value="both">股票+ETF</option><option value="stock">股票</option><option value="etf">ETF</option></select>
+      抽样 <input id="bb-sample" type="number" value="100" style="width:70px">
+      起始 <input id="bb-since" value="2015-01-01" size="11">
+      参数覆盖(JSON) <input id="bb-params" placeholder='{"buy_threshold":1.6}' size="24">
+      <button id="btn-bb" class="primary">批量回测</button>
+      <span id="bb-status" class="muted"></span>
+    </div>
+    <div id="bb-result"></div>
+  </div>
+  <div class="card">
+    <h3>参数网格（策略可调性实验）</h3>
+    <div class="toolbar">
+      <select id="g-kind"><option value="both">股票+ETF</option><option value="stock">股票</option><option value="etf">ETF</option></select>
+      抽样 <input id="g-sample" type="number" value="60" style="width:70px">
+      <button id="btn-grid" class="primary">网格搜索</button>
+      <span id="g-status" class="muted"></span>
+    </div>
+    <textarea id="g-defs" rows="4" style="width:100%">buy_threshold=1.4,1.8,2.2
+stop_loss=0.05,0.07
+take_profit=0.12,0.15,0.20</textarea>
+    <div id="g-result"></div>
+  </div>
+</section>
+
+<!-- ============ 数据 ============ -->
+<section id="view-data" class="view">
+  <div class="toolbar">
+    <button id="btn-upd-stocks" class="primary">更新A股数据</button>
+    <button id="btn-upd-etfs">补全/重试ETF</button>
+    <span class="muted">更新为增量下载（新浪源，直连绕代理）</span>
+  </div>
+  <table id="jobs-table">
+    <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>创建</th><th>结果/错误</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

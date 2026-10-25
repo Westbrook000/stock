@@ -1,5 +1,4 @@
 import hashlib
-from dataclasses import replace
 from functools import lru_cache
 from typing import List, Optional
 
@@ -14,11 +13,16 @@ from .rules.catalog import load_rule_catalog
 
 
 BOOK_PATTERNS = {
-    "w_bottom": "W底", "spring": "破底翻", "w_bottom_spring": "W底破底翻",
+    "w_bottom": "W底", "spring": "破底翻",
     "bull_flag": "下飘旗形上涨中继", "inverse_head_shoulders": "头肩底", "triangle_bottom": "收敛三角形底部",
-    "m_top": "M头", "false_breakout": "假突破", "false_breakout_head_shoulders": "假突破（头肩顶）",
+    "m_top": "M头", "false_breakout": "假突破",
     "bear_flag": "上飘旗形下跌中继", "head_shoulders": "头肩顶", "triangle_top": "收敛三角形头部",
 }
+LEGACY_PATTERN_LABELS = {
+    "w_bottom_spring": "W底破底翻",
+    "false_breakout_head_shoulders": "假突破（头肩顶）",
+}
+PATTERN_LABELS = {**BOOK_PATTERNS, **LEGACY_PATTERN_LABELS}
 
 
 @lru_cache(maxsize=1)
@@ -199,10 +203,6 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
                 distance=head_level-neck_level
                 _add(found, frame, code, kind, timeframe, "head_shoulders", seq, close[-1],
                      hs_neck, max(hi1, hi2, hi3), [neck_level-distance,neck_level-2*distance], i4, direction="bearish")
-                broke=[k for k in range(i4+1,len(frame)) if close[k]<_at(hs_neck,k)]
-                if broke and any(close[k]>_at(hs_neck,k) for k in range(broke[0]+1,len(frame))):
-                    _add_reclaim_event(found,frame,code,kind,timeframe,"false_breakout_head_shoulders",seq,
-                        hs_neck, min(lo1,lo2), [max(hi1,hi3)], broke[0], bullish=True)
             if (abs(hi1 - hi3) <= max(hi2 - min(lo1, lo2), 1e-9) * 0.75
                     and _passes_duration_balance("m_top", seq)):
                 neck = _line((i1, lo1), (i3, lo2)); target = min(lo1, lo2) - (max(hi1, hi2, hi3) - min(lo1, lo2))
@@ -238,7 +238,6 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
                  max(a.price,c.price), [b.price-(max(a.price,c.price)-b.price)], c.index, direction="bearish")
     box_events = _detect_box_reclaims(frame, code, kind, timeframe, pivots)
     found.extend(box_events)
-    found.extend(_nested_w_bottom_springs(found, box_events, frame))
     # Continuation flag candidates: prior impulse followed by bounded counter-trend range and breakout.
     found.extend(_detect_flags(frame, code, kind, timeframe))
     # Remove duplicate same-type event identities while retaining distinct book labels.
@@ -360,7 +359,7 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
     for n,p in enumerate(seq,1):
         points["pivot_%d_index"%n]=p.index
         points["pivot_%d"%n]=p.price
-    if ptype in ("w_bottom", "w_bottom_spring"):
+    if ptype == "w_bottom":
         lows = [p.price for p in seq if p.kind == "low"]
         if len(lows) >= 2:
             points["first_low"], points["second_low"] = lows[0], lows[1]
@@ -493,76 +492,6 @@ def _detect_box_reclaims(frame, code, kind, tf, pivots):
                    "box_last_touch": str(dates.iloc[last].date()),
                    "box_width_atr": width / max(float(atr_values[last]), 1e-9)},
         )
-    return found
-
-
-def _nested_w_bottom_springs(patterns, box_events, frame):
-    """Join a verified inner spring box to an overlapping outer W candidate."""
-    found = []
-    for event in box_events:
-        if event.pattern_type != "spring":
-            continue
-        box_indices = [event.key_points.get("pivot_%d_index" % n)
-                       for n in range(1, 5)]
-        if any(not isinstance(index, int) for index in box_indices):
-            continue
-        for parent in patterns:
-            if parent.pattern_type != "w_bottom":
-                continue
-            parent_invalidation = next((item for item in parent.evidence
-                                        if item.get("code") == "structure_invalidation"), None)
-            if parent.state == "invalidated" and parent_invalidation is None:
-                continue
-            # The W pattern's low pivots are explicitly labeled by its topology.
-            topology = next((item.get("value") for item in parent.evidence
-                             if item.get("code") == "pivot_topology"), [])
-            low_indices = [index for index, pivot_type in zip(
-                [parent.key_points.get("pivot_%d_index" % n) for n in range(1, 6)], topology
-            ) if pivot_type == "low" and isinstance(index, int)]
-            if len(low_indices) < 2:
-                continue
-            outer_start, outer_end = min(low_indices), max(low_indices)
-            box_start, box_end = min(box_indices), max(box_indices)
-            if not (outer_start <= box_start <= outer_end <= box_end):
-                continue
-            event_evidence = {item.get("code"): item.get("value") for item in event.evidence}
-            break_index = event_evidence.get("break_index")
-            if not isinstance(break_index, int) or break_index < outer_end:
-                continue
-            identity = "%s|%s|w_bottom_spring" % (parent.pattern_id, event.pattern_id)
-            pid = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
-            points = dict(parent.key_points)
-            points.update({"inner_box_lower": event_evidence.get("box_lower"),
-                           "inner_box_upper": event_evidence.get("box_upper"),
-                           "inner_break_index": break_index})
-            revived_from_spring = parent.state == "invalidated" and parent_invalidation is not None
-            evidence = [
-                {**item, "code": "outer_w_invalidation"}
-                if revived_from_spring and item.get("code") == "structure_invalidation" else item
-                for item in parent.evidence
-            ]
-            evidence.extend({"code": "inner_spring_" + str(item.get("code")),
-                             "value": item.get("value")}
-                            for item in event.evidence
-                            if item.get("code") in {"box_lower", "box_upper", "box_first_touch",
-                                                     "box_last_touch", "break_index", "confirmation_index",
-                                                     "close_reclaim"})
-            evidence.append({"code": "outer_w_pattern_id", "value": parent.pattern_id})
-            evidence.append({"code": "inner_spring_pattern_id", "value": event.pattern_id})
-            composite_state = ("confirmed" if event.state == "followthrough_confirmed" else event.state)
-            composite = replace(
-                parent, pattern_id="%s:%s" % (parent.code, pid),
-                pattern_type="w_bottom_spring", key_points=points,
-                evidence=evidence, flags=sorted(set(parent.flags + event.flags +
-                                                    ["manual_review_required", "nested_event"])),
-                parent_id=parent.pattern_id, targets=list(parent.targets),
-                state=composite_state if revived_from_spring else parent.state,
-                confirmed_at=event.confirmed_at if revived_from_spring else parent.confirmed_at,
-                confirmation_date=event.confirmation_date if revived_from_spring else parent.confirmation_date,
-                invalidation=event.invalidation if revived_from_spring else parent.invalidation,
-                last_observed_date=str(pd.to_datetime(frame.date.iloc[-1]).date()),
-            )
-            found.append(composite)
     return found
 
 

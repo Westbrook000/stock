@@ -16,7 +16,7 @@ from pathlib import Path
 from .backtest import run_backtest
 from .market import (InstrumentFile, aggregate_weekly, default_china_calendar,
                      discover_instruments, load_daily_bars)
-from .patterns import BOOK_PATTERNS, current_pattern_snapshot, detect_patterns
+from .patterns import BOOK_PATTERNS, PATTERN_LABELS, current_pattern_snapshot, detect_patterns
 from .decision import rank_scan_results, synthesize_decision
 from .plans import build_trade_plan
 from .store import connect, get_pattern, save_pattern, save_patterns
@@ -391,7 +391,7 @@ def _scan_worker(job_id, params):
                     continue
                 pattern_rows=[]
                 for p in all_patterns:
-                    label=BOOK_PATTERNS.get(p.pattern_type,p.pattern_type)
+                    label=PATTERN_LABELS.get(p.pattern_type,p.pattern_type)
                     payload=p.to_dict(); payload["display_label"]=label+ ("，未确认" if p.state=="forming" else ("，价格确认，量能未核验" if p.state=="confirmed" and not p.volume_verified else "，已失效" if p.state=="invalidated" else "，目标已达" if p.state=="target_reached" else "，箱体后续边界已确认（历史）" if p.state=="followthrough_confirmed" else "，已确认")) + ("，待人工复核" if "manual_review_required" in p.flags else "")
                     pending_patterns.append(payload)
                     pattern_rows.append({"pattern_id":p.pattern_id,"pattern_type":p.pattern_type,"direction":p.direction,

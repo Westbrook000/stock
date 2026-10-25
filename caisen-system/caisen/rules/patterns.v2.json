@@ -1,5 +1,5 @@
 {
-  "rule_set_version": "caisen-rules-v5",
+  "rule_set_version": "caisen-rules-v6",
   "patterns": [
     {
       "rule_id": "w_bottom",
@@ -64,7 +64,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "spring",
@@ -111,62 +111,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
-    },
-    {
-      "rule_id": "w_bottom_spring",
-      "name": "破底翻（W底）",
-      "aliases": [
-        "W底破底翻"
-      ],
-      "direction": "bullish",
-      "audit_status": "included",
-      "topology": "外层W底包含内层整理区下破收复；外层与内层结构分别保存。",
-      "lifecycle": {
-        "forming": [
-          "外层W底候选形成。",
-          "外层结构内出现整理区下破并收复。"
-        ],
-        "confirmed_by": "内层收复事件成立后，仍须由外层收盘突破冻结颈线确认W底。",
-        "invalidated_by": "外层底部结构破坏，或内层关键箱体无法收复/再次失守。"
-      },
-      "volume": {
-        "required": [],
-        "supporting": []
-      },
-      "targets": [
-        {
-          "formula_id": "neckline_height_projection",
-          "description": "仅在外层W底确认后按其颈线高度等幅投影。",
-          "available_after": "confirmed"
-        }
-      ],
-      "engineering_parameters": [
-        {
-          "name": "nested_event_matching",
-          "status": "manual_review_required",
-          "value": {
-            "candidate_rule": "spring box overlaps outer W lows; break occurs at or after second outer low",
-            "confirmation_inherits": "outer W state",
-            "automatic_trade_plan": false
-          }
-        }
-      ],
-      "source_refs": [
-        {
-          "printed_page": 6,
-          "pdf_page": 21,
-          "figure": "W底内含破底翻结构示意",
-          "source_status": "verified"
-        },
-        {
-          "printed_page": 8,
-          "pdf_page": 23,
-          "figure": "行情例图",
-          "source_status": "verified"
-        }
-      ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "bull_flag",
@@ -248,7 +193,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "bear_flag",
@@ -330,7 +275,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "m_top",
@@ -388,7 +333,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "false_breakout",
@@ -435,7 +380,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "head_shoulders",
@@ -488,51 +433,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
-    },
-    {
-      "rule_id": "false_breakout_head_shoulders",
-      "name": "假突破（头肩顶）",
-      "aliases": [
-        "头肩顶假突破"
-      ],
-      "direction": "bearish",
-      "audit_status": "included",
-      "topology": "头肩顶结构基础上出现颈线假突破/回收事件，保留头肩几何和假突破事件序列。",
-      "lifecycle": {
-        "forming": [
-          "头肩顶候选形成并观察颈线附近的越界与收回事件。"
-        ],
-        "confirmed_by": "原书所述头肩几何与颈线假突破/回收序列均出现后，人工复核事件顺序。",
-        "invalidated_by": "结构关键高点被突破，或颈线与假突破关键边界失效。"
-      },
-      "volume": {
-        "required": [],
-        "supporting": []
-      },
-      "targets": [
-        {
-          "formula_id": "head_neckline_projection",
-          "description": "仅在复合形态复核成立后按头肩结构高度投影。",
-          "available_after": "confirmed"
-        }
-      ],
-      "engineering_parameters": [
-        {
-          "name": "composite_event_matching",
-          "status": "manual_review_required",
-          "value": null
-        }
-      ],
-      "source_refs": [
-        {
-          "printed_page": 67,
-          "pdf_page": 82,
-          "figure": "头肩顶假突破颈线回收操作示例",
-          "source_status": "verified"
-        }
-      ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "inverse_head_shoulders",
@@ -585,7 +486,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "triangle_top",
@@ -650,7 +551,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     },
     {
       "rule_id": "triangle_bottom",
@@ -715,7 +616,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v5"
+      "rule_set_version": "caisen-rules-v6"
     }
   ]
 }

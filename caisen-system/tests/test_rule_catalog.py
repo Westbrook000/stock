@@ -5,15 +5,25 @@ from pathlib import Path
 
 import pytest
 
-from caisen.patterns import BOOK_PATTERNS
+from caisen.patterns import BOOK_PATTERNS, LEGACY_PATTERN_LABELS
 from caisen.rules.catalog import RuleCatalogError, load_rule_catalog, validate_rule_catalog
 
 
-def test_catalog_covers_all_book_pattern_ids_with_verified_sources():
+ACTIVE_PATTERN_IDS = {
+    "w_bottom", "spring", "bull_flag", "bear_flag", "m_top", "false_breakout",
+    "head_shoulders", "inverse_head_shoulders", "triangle_top", "triangle_bottom",
+}
+RETIRED_PATTERN_IDS = {"w_bottom_spring", "false_breakout_head_shoulders"}
+
+
+def test_catalog_covers_exactly_ten_active_pattern_ids_with_verified_sources():
     catalog = load_rule_catalog()
 
     rules = {item["rule_id"]: item for item in catalog["patterns"]}
+    assert set(rules) == ACTIVE_PATTERN_IDS
     assert set(rules) == set(BOOK_PATTERNS)
+    assert len(rules) == 10
+    assert catalog["rule_set_version"] == "caisen-rules-v6"
     assert len(rules) == len(catalog["patterns"])
     for rule in rules.values():
         assert rule["rule_set_version"] == catalog["rule_set_version"]
@@ -42,7 +52,8 @@ def test_duplicate_rule_id_reports_rule_and_field_path():
     with pytest.raises(RuleCatalogError) as error:
         validate_rule_catalog(invalid)
 
-    assert any("patterns[12].rule_id" in item for item in error.value.errors)
+    duplicate_index = len(catalog["patterns"])
+    assert any(f"patterns[{duplicate_index}].rule_id" in item for item in error.value.errors)
 
 
 def test_missing_lifecycle_field_reports_rule_and_field_path():
@@ -82,7 +93,14 @@ def test_active_catalog_entries_match_included_source_audit_rows():
             included_ids.add(match.group(1))
 
     catalog_ids = {item["rule_id"] for item in load_rule_catalog()["patterns"]}
-    assert catalog_ids == included_ids
+    assert catalog_ids == included_ids - RETIRED_PATTERN_IDS
+
+
+def test_retired_composite_patterns_remain_audited_but_are_not_active():
+    catalog_ids = {item["rule_id"] for item in load_rule_catalog()["patterns"]}
+    assert RETIRED_PATTERN_IDS.isdisjoint(catalog_ids)
+    assert RETIRED_PATTERN_IDS.issubset(BOOK_PATTERNS.keys()) is False
+    assert RETIRED_PATTERN_IDS.issubset(LEGACY_PATTERN_LABELS.keys())
 
 
 def test_rule_cards_document_every_active_rule_id():

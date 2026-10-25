@@ -106,7 +106,7 @@ class PatternTests(unittest.TestCase):
         self.assertTrue(all(len(items) == 1 for items in by_type.values()))
         self.assertTrue(snapshot)
         self.assertTrue(any(pattern.state == "invalidated" for pattern in snapshot))
-        self.assertTrue(all(pattern.source_rule_version == "caisen-rules-v5" for pattern in snapshot))
+        self.assertTrue(all(pattern.source_rule_version == "caisen-rules-v6" for pattern in snapshot))
         self.assertTrue(all(pattern.last_observed_date == str(frame.date.iloc[-1].date()) for pattern in snapshot))
 
     def test_current_snapshot_keeps_latest_invalidated_event_for_history(self):
@@ -404,7 +404,7 @@ class PatternTests(unittest.TestCase):
         pattern = next(p for p in bottoms if p.key_points.get("second_low", 0) < p.key_points.get("first_low", 0))
         self.assertLess(pattern.key_points["second_low"], pattern.key_points["first_low"])
         self.assertIsNotNone(pattern.neckline)
-        self.assertEqual(pattern.rule_version, "caisen-v14")
+        self.assertEqual(pattern.rule_version, "caisen-v15")
 
     def test_w_bottom_exposes_geometry_diagnostics_without_changing_candidate_state(self):
         frame = swing_frame([12, 8, 11, 8.2, 12.5])
@@ -493,13 +493,13 @@ class PatternTests(unittest.TestCase):
             patterns = detect_patterns(frame, code="fixture", kind="stock", timeframe="1d")
         self.assertFalse(any(pattern.pattern_type == "triangle_top" for pattern in patterns))
 
-    def test_false_breakout_head_shoulders_requires_a_neckline_break_and_reclaim(self):
+    def test_retired_false_breakout_head_shoulders_is_not_emitted(self):
         spec = [(5, "high", 10), (10, "low", 8.5), (15, "high", 13),
                 (20, "low", 8.5), (25, "high", 10.2)]
         frame, pivots = pivot_fixture(spec, {26: 7.5, 27: 9.0})
         with patch("caisen.patterns.detect_pivots", return_value=pivots):
             patterns = detect_patterns(frame, code="fixture", kind="stock", timeframe="1d")
-        self.assertTrue(any(pattern.pattern_type == "false_breakout_head_shoulders" for pattern in patterns))
+        self.assertFalse(any(pattern.pattern_type == "false_breakout_head_shoulders" for pattern in patterns))
 
         no_reclaim_frame, no_reclaim_pivots = pivot_fixture(spec)
         with patch("caisen.patterns.detect_pivots", return_value=no_reclaim_pivots):
@@ -729,7 +729,7 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(evidence["box_upper"], 10.05)
         self.assertEqual(spring[0].targets, [])
 
-    def test_box_spring_nested_inside_outer_w_bottom_creates_composite_candidate(self):
+    def test_box_spring_nested_inside_outer_w_bottom_does_not_emit_retired_composite(self):
         close = [8.8, 8.5, 8.0, 8.6, 9.2, 9.8, 9.3, 8.7, 8.1, 8.8, 9.3, 9.7,
                  9.2, 8.8, 8.2, 9.0, 9.9, 9.4, 9.8, 9.4, 7.7, 7.9, 8.4, 9.2, 10.3]
         frame = pd.DataFrame({
@@ -746,15 +746,7 @@ class PatternTests(unittest.TestCase):
             patterns = detect_patterns(frame, code="fixture", kind="stock", timeframe="1d")
 
         composite = [pattern for pattern in patterns if pattern.pattern_type == "w_bottom_spring"]
-        self.assertEqual(len(composite), 1)
-        self.assertEqual(composite[0].state, "confirmed")
-        parent = next(pattern for pattern in patterns if pattern.pattern_id == composite[0].parent_id)
-        self.assertEqual(parent.state, "invalidated")
-        self.assertIsNotNone(composite[0].parent_id)
-        self.assertIn("manual_review_required", composite[0].flags)
-        composite_evidence = {item["code"] for item in composite[0].evidence}
-        self.assertIn("outer_w_invalidation", composite_evidence)
-        self.assertNotIn("structure_invalidation", composite_evidence)
+        self.assertEqual(composite, [])
 
     def test_prior_consolidation_box_breakout_and_reclaim_creates_false_breakout_candidate(self):
         close = [4.9, 4.8, 5.0, 4.9, 4.85, 5.02, 4.9, 4.85, 5.0, 4.9, 4.95,

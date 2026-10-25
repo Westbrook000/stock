@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from .patterns import BOOK_PATTERNS
+from .patterns import PATTERN_LABELS
 from .plans import build_trade_plan
 
 
@@ -20,7 +20,7 @@ def _to_dict(pattern):
 
 
 def _label(pattern):
-    name = BOOK_PATTERNS.get(_value(pattern, "pattern_type"), _value(pattern, "pattern_type", "形态"))
+    name = PATTERN_LABELS.get(_value(pattern, "pattern_type"), _value(pattern, "pattern_type", "形态"))
     state = _value(pattern, "state")
     if state == "forming":
         label = name + "，未确认"

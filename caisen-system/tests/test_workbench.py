@@ -83,6 +83,28 @@ def test_scan_filters_use_chinese_category_labels_and_explain_weekly_preview():
     assert "周线只有在交易日历核实完整周后才参与正式判断" in html
 
 
+def test_scan_results_filter_after_completion_without_resubmitting_the_scan():
+    from pathlib import Path
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="scanResultFilters"' in html
+    assert 'id="scanActionFilter"' in html
+    assert 'id="scanShapeFilter"' in html
+    assert 'id="buyOnlyBtn"' in html
+    assert 'id="resetScanFilters"' in html
+    assert "全部十招" in html
+    assert "全部 12 招" not in html
+    assert "CaisenScanFilters.filterScanRows(scanRows" in js
+    assert "筛选后 ${visibleScanRows.length} / ${scanRows.length}" in js
+    assert "没有标的符合当前筛选" in js
+    assert "pattern_type:$('scanPattern')" not in js
+    assert "/static/scan-filters.js" in html
+    filtering = js.split("function applyScanFilters", 1)[1].split("function renderScan", 1)[0]
+    assert "fetch(" not in filtering
+
+
 def test_pattern_card_distinguishes_engine_and_source_rule_versions():
     from pathlib import Path
     js = (Path(__file__).parents[1] / "caisen" / "static" / "app.js").read_text(encoding="utf-8")

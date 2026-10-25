@@ -433,6 +433,7 @@ market-data ──────────────────────�
 - Dependencies：Tasks 1、3、4。
 - Files likely touched：`caisen/static/index.html`、`caisen/static/app.js`、`caisen/static/app.css`、`tests/test_workbench.py`。
 - Estimated scope：Medium。
+- Status：Complete. 2026-10-25 isolated browser acceptance on port 8302 with a temporary SQLite database: 3/3 scan completion; buy-only returns 0 with a clear empty state; WAIT + active W bottom returns 1 row; that row navigates to detail and displays “W底，未确认”. The user's 8301 service and its in-progress refresh were left untouched.
 
 **Task 6：更新新校准题与复核报告，不覆盖历史轮次**
 

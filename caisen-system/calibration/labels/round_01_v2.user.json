@@ -1,0 +1,82 @@
+{
+  "1": {
+    "code": "000157",
+    "name": "中联重科",
+    "asof": "2026-10-16",
+    "pattern": "BF-",
+    "state": "confirmed",
+    "note": ""
+  },
+  "2": {
+    "code": "001269",
+    "name": "欧晶科技",
+    "asof": "2026-10-16",
+    "pattern": "FB",
+    "state": "confirmed",
+    "note": ""
+  },
+  "3": {
+    "code": "688330",
+    "name": "宏力达",
+    "asof": "2026-10-16",
+    "pattern": "W",
+    "state": "forming",
+    "note": ""
+  },
+  "4": {
+    "code": "603203",
+    "name": "快克智能",
+    "asof": "2026-10-16",
+    "pattern": "N",
+    "state": "",
+    "note": ""
+  },
+  "5": {
+    "code": "600436",
+    "name": "XD片仔癀",
+    "asof": "2026-10-16",
+    "pattern": "N",
+    "state": "",
+    "note": ""
+  },
+  "6": {
+    "code": "688411",
+    "name": "海博思创",
+    "asof": "2026-10-16",
+    "pattern": "HS",
+    "state": "confirmed",
+    "note": ""
+  },
+  "7": {
+    "code": "600909",
+    "name": "华安证券",
+    "asof": "2026-10-16",
+    "pattern": "N",
+    "state": "",
+    "note": ""
+  },
+  "8": {
+    "code": "600446",
+    "name": "金证股份",
+    "asof": "2026-10-16",
+    "pattern": "BF-",
+    "state": "confirmed",
+    "note": ""
+  },
+  "9": {
+    "code": "600279",
+    "name": "重庆港",
+    "asof": "2026-10-16",
+    "pattern": "FB",
+    "state": "confirmed",
+    "note": ""
+  },
+  "10": {
+    "code": "688216",
+    "name": "气派科技",
+    "asof": "2026-10-16",
+    "pattern": "HS",
+    "state": "forming",
+    "note": ""
+  }
+}

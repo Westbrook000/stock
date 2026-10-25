@@ -1,0 +1,2738 @@
+{
+  "label_source": "round_01_v2.user.json",
+  "data_basis": "current_local_snapshot_truncated_to_user_asof",
+  "rule_version": "caisen-v4",
+  "source_rule_version": "caisen-rules-v2",
+  "superseded_by": "round_01_v5.machine-review.json",
+  "interpretation": "manual_review_required_not_accuracy_or_return_validation",
+  "summary": {
+    "total": 10,
+    "pattern_agreement": 5,
+    "state_agreement": 2,
+    "disagreements": [
+      {
+        "case_id": "1",
+        "code": "000157",
+        "field": "state",
+        "user": "confirmed",
+        "machine": [
+          "target_reached"
+        ]
+      },
+      {
+        "case_id": "2",
+        "code": "001269",
+        "field": "pattern_type",
+        "user": "false_breakout",
+        "machine": [
+          "bear_flag",
+          "false_breakout_head_shoulders",
+          "inverse_head_shoulders",
+          "m_top",
+          "w_bottom",
+          "w_bottom_spring"
+        ]
+      },
+      {
+        "case_id": "4",
+        "code": "603203",
+        "field": "pattern_type",
+        "user": null,
+        "machine": [
+          "inverse_head_shoulders",
+          "m_top",
+          "w_bottom"
+        ]
+      },
+      {
+        "case_id": "5",
+        "code": "600436",
+        "field": "pattern_type",
+        "user": null,
+        "machine": [
+          "bear_flag",
+          "head_shoulders",
+          "inverse_head_shoulders",
+          "m_top",
+          "spring",
+          "triangle_bottom",
+          "w_bottom",
+          "w_bottom_spring"
+        ]
+      },
+      {
+        "case_id": "6",
+        "code": "688411",
+        "field": "state",
+        "user": "confirmed",
+        "machine": [
+          "target_reached"
+        ]
+      },
+      {
+        "case_id": "7",
+        "code": "600909",
+        "field": "pattern_type",
+        "user": null,
+        "machine": [
+          "false_breakout",
+          "inverse_head_shoulders",
+          "m_top",
+          "spring",
+          "w_bottom",
+          "w_bottom_spring"
+        ]
+      },
+      {
+        "case_id": "9",
+        "code": "600279",
+        "field": "state",
+        "user": "confirmed",
+        "machine": [
+          "target_reached"
+        ]
+      },
+      {
+        "case_id": "10",
+        "code": "688216",
+        "field": "pattern_type",
+        "user": "head_shoulders",
+        "machine": [
+          "bear_flag",
+          "inverse_head_shoulders",
+          "m_top",
+          "triangle_top",
+          "w_bottom",
+          "w_bottom_spring"
+        ]
+      }
+    ],
+    "interpretation": "calibration_disagreements_only"
+  },
+  "cases": [
+    {
+      "case_id": "1",
+      "code": "000157",
+      "name": "中联重科",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "bear_flag",
+        "state": "confirmed",
+        "display": "上飘旗形下跌中继"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-07-14",
+          "confirmed_at": 6163,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 7.75
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6163
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            }
+          ]
+        },
+        {
+          "pattern_type": "m_top",
+          "state": "confirmed",
+          "formed_at": "2026-07-07",
+          "confirmed_at": 6141,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 6.75
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6141
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-31"
+            }
+          ]
+        },
+        {
+          "pattern_type": "false_breakout",
+          "state": "target_reached",
+          "formed_at": "2026-06-22",
+          "confirmed_at": 6121,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 7.6
+            },
+            {
+              "code": "break_index",
+              "value": 6118
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6121
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-03"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 6143,
+                "price": 6.66,
+                "date": "2026-09-02"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "false_breakout",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "target_reached",
+          "formed_at": "2026-02-26",
+          "confirmed_at": 6048,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 11.407999999999987
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6048
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 6049,
+                "price": 9.337999999999987,
+                "date": "2026-04-17"
+              }
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": false,
+                "impulse_size": 2.0700000000000003,
+                "correction_ratio": 0.42028985507246336,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-04-16"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "2",
+      "code": "001269",
+      "name": "欧晶科技",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "false_breakout",
+        "state": "confirmed",
+        "display": "假突破"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "m_top",
+          "state": "confirmed",
+          "formed_at": "2026-09-09",
+          "confirmed_at": 973,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 18.21
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 973
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-14"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom",
+          "state": "confirmed",
+          "formed_at": "2026-06-09",
+          "confirmed_at": 962,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 16.929374999999993
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 962
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-21"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "confirmed",
+          "formed_at": "2026-06-09",
+          "confirmed_at": 962,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 16.929374999999993
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 962
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-21"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom_spring",
+          "state": "target_reached",
+          "formed_at": "2026-03-24",
+          "confirmed_at": 866,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 22.21
+            },
+            {
+              "code": "break_index",
+              "value": 864
+            },
+            {
+              "code": "confirmation_index",
+              "value": 866
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-05-07"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 890,
+                "price": 29.61333333333333,
+                "date": "2026-06-10"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "false_breakout_head_shoulders",
+          "state": "confirmed",
+          "formed_at": "2026-01-26",
+          "confirmed_at": 925,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 18.934727272727272
+            },
+            {
+              "code": "break_index",
+              "value": 912
+            },
+            {
+              "code": "confirmation_index",
+              "value": 925
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-30"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "false_breakout_head_shoulders",
+                "head_shoulders",
+                "m_top"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "false_breakout_head_shoulders",
+                "head_shoulders",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "target_reached",
+          "formed_at": "2025-11-27",
+          "confirmed_at": 807,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 30.10285714285711
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 807
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 808,
+                "price": 25.932857142857113,
+                "date": "2026-02-02"
+              }
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": false,
+                "impulse_size": 4.169999999999998,
+                "correction_ratio": 0.4892086330935252,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-01-30"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "3",
+      "code": "688330",
+      "name": "宏力达",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "w_bottom",
+        "state": "forming",
+        "display": "W底，未确认"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "m_top",
+          "state": "confirmed",
+          "formed_at": "2026-08-31",
+          "confirmed_at": 1452,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 34.56
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1452
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-13"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-08-19",
+          "confirmed_at": 1438,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 40.5
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1438
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-15"
+            }
+          ]
+        },
+        {
+          "pattern_type": "head_shoulders",
+          "state": "confirmed",
+          "formed_at": "2026-08-13",
+          "confirmed_at": 1449,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 37.208823529411774
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1449
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "triangle_top",
+          "state": "confirmed",
+          "formed_at": "2026-06-12",
+          "confirmed_at": 1449,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 36.485000000000014
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1449
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top",
+                "triangle_top"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top",
+                "triangle_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "forming",
+          "formed_at": "2026-06-08",
+          "confirmed_at": 1438,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 40.56109090909091
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1438
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-15"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "target_reached",
+          "formed_at": "2025-09-23",
+          "confirmed_at": 1255,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 49.852000000000025
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1255
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 1256,
+                "price": 38.062000000000026,
+                "date": "2025-12-16"
+              }
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": false,
+                "impulse_size": 11.79,
+                "correction_ratio": 0.38931297709923635,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2025-12-15"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "4",
+      "code": "603203",
+      "name": "快克智能",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": null,
+        "state": "none",
+        "display": "无明显形态 / 结构未完成 / 信息不足"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "m_top",
+          "state": "confirmed",
+          "formed_at": "2026-08-28",
+          "confirmed_at": 2406,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 40.54
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2406
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom",
+          "state": "confirmed",
+          "formed_at": "2026-06-15",
+          "confirmed_at": 2381,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 9.843142857142993
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2381
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-26"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "confirmed",
+          "formed_at": "2026-06-15",
+          "confirmed_at": 2381,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 9.843142857142993
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2381
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-26"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "5",
+      "code": "600436",
+      "name": "XD片仔癀",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": null,
+        "state": "none",
+        "display": "无明显形态 / 结构未完成 / 信息不足"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-07-27",
+          "confirmed_at": 5603,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 141.77
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5603
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "spring",
+                "w_bottom"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "triangle_bottom",
+          "state": "forming",
+          "formed_at": "2026-06-29",
+          "confirmed_at": 5603,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 124.05588235294135
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5603
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "triangle_bottom",
+                "w_bottom"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "m_top",
+          "state": "confirmed",
+          "formed_at": "2026-05-29",
+          "confirmed_at": 5568,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 189.04100000000017
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5568
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-12"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "head_shoulders",
+          "state": "target_reached",
+          "formed_at": "2026-05-29",
+          "confirmed_at": 5568,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 189.04100000000017
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5568
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 5570,
+                "price": 131.1140000000001,
+                "date": "2026-08-14"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-12"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "spring",
+          "state": "target_reached",
+          "formed_at": "2026-05-27",
+          "confirmed_at": 5546,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 117.71
+            },
+            {
+              "code": "break_index",
+              "value": 5522
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5546
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-13"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 5548,
+                "price": 127.1,
+                "date": "2026-07-15"
+              }
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom_spring",
+          "state": "confirmed",
+          "formed_at": "2026-04-29",
+          "confirmed_at": 5545,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 114.1
+            },
+            {
+              "code": "break_index",
+              "value": 5537
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5545
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-10"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "forming",
+          "formed_at": "2026-04-29",
+          "confirmed_at": 5603,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 154.53365384615392
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5603
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-08"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "target_reached",
+          "formed_at": "2025-11-14",
+          "confirmed_at": 5415,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 216.70800000000008
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5415
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 5416,
+                "price": 200.5680000000001,
+                "date": "2025-12-24"
+              }
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": false,
+                "impulse_size": 16.139999999999986,
+                "correction_ratio": 0.42688971499380374,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2025-12-23"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "6",
+      "code": "688411",
+      "name": "海博思创",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "head_shoulders",
+        "state": "confirmed",
+        "display": "头肩顶"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-07-20",
+          "confirmed_at": 406,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 217.48
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 406
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-30"
+            }
+          ]
+        },
+        {
+          "pattern_type": "m_top",
+          "state": "forming",
+          "formed_at": "2026-06-01",
+          "confirmed_at": 375,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 45.32307692307688
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 375
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-17"
+            }
+          ]
+        },
+        {
+          "pattern_type": "head_shoulders",
+          "state": "target_reached",
+          "formed_at": "2026-03-27",
+          "confirmed_at": 349,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 275.72
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 349
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 392,
+                "price": 172.38,
+                "date": "2026-09-09"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-10"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "head_shoulders",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "forming",
+          "formed_at": "2026-03-18",
+          "confirmed_at": 331,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 327.8676190476191
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 331
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-06-15"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "spring",
+          "state": "target_reached",
+          "formed_at": "2026-01-27",
+          "confirmed_at": 285,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 214.89
+            },
+            {
+              "code": "break_index",
+              "value": 284
+            },
+            {
+              "code": "confirmation_index",
+              "value": 285
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-04-07"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 318,
+                "price": 298.26,
+                "date": "2026-05-27"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "spring",
+                "w_bottom"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "spring",
+                "w_bottom"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "forming",
+          "formed_at": "2025-03-12",
+          "confirmed_at": 68,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 100.59375000000003
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 68
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": true,
+                "impulse_size": 29.99000000000001,
+                "correction_ratio": 0.46382127375791904,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2025-05-15"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "7",
+      "code": "600909",
+      "name": "华安证券",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": null,
+        "state": "none",
+        "display": "无明显形态 / 结构未完成 / 信息不足"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "m_top",
+          "state": "target_reached",
+          "formed_at": "2026-06-26",
+          "confirmed_at": 2317,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 10.84
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2317
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 2323,
+                "price": 8.91,
+                "date": "2026-07-13"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-03"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-06-09",
+          "confirmed_at": 2383,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 12.77
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2383
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-13"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom_spring",
+          "state": "target_reached",
+          "formed_at": "2026-01-19",
+          "confirmed_at": 2287,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 6.79
+            },
+            {
+              "code": "break_index",
+              "value": 2259
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2287
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-05-21"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 2308,
+                "price": 9.456666666666667,
+                "date": "2026-06-22"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "spring",
+          "state": "target_reached",
+          "formed_at": "2026-01-19",
+          "confirmed_at": 2287,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 6.86
+            },
+            {
+              "code": "break_index",
+              "value": 2219
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2287
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-05-21"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 2291,
+                "price": 7.74,
+                "date": "2026-05-27"
+              }
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "target_reached",
+          "formed_at": "2026-01-19",
+          "confirmed_at": 2305,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 8.442666666666668
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2305
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 2310,
+                "price": 10.824399999999999,
+                "date": "2026-06-24"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-06-16"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "false_breakout",
+          "state": "target_reached",
+          "formed_at": "2026-01-07",
+          "confirmed_at": 2292,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 7.74
+            },
+            {
+              "code": "break_index",
+              "value": 2291
+            },
+            {
+              "code": "confirmation_index",
+              "value": 2292
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-05-28"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 2299,
+                "price": 6.86,
+                "date": "2026-06-08"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "false_breakout",
+                "m_top"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "false_breakout",
+                "m_top"
+              ]
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "8",
+      "code": "600446",
+      "name": "金证股份",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "bear_flag",
+        "state": "confirmed",
+        "display": "上飘旗形下跌中继"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "m_top",
+          "state": "forming",
+          "formed_at": "2026-09-30",
+          "confirmed_at": 5344,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 9.98
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5344
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-15"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-09-28",
+          "confirmed_at": 5342,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 10.87
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5342
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-13"
+            }
+          ]
+        },
+        {
+          "pattern_type": "triangle_bottom",
+          "state": "forming",
+          "formed_at": "2026-07-13",
+          "confirmed_at": 5342,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 10.738823529411775
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5342
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-13"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "triangle_bottom",
+                "w_bottom"
+              ]
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "triangle_bottom",
+                "w_bottom"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom_spring",
+          "state": "confirmed",
+          "formed_at": "2026-06-30",
+          "confirmed_at": 5292,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 9.87
+            },
+            {
+              "code": "break_index",
+              "value": 5291
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5292
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-27"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "forming",
+          "formed_at": "2026-06-30",
+          "confirmed_at": 5311,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 14.806666666666672
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5311
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-21"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "confirmed",
+          "formed_at": "2025-08-27",
+          "confirmed_at": 5192,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 15.198888888888884
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 5192
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": false,
+                "impulse_size": 8.64,
+                "correction_ratio": 0.16319444444444445,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-03-02"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "9",
+      "code": "600279",
+      "name": "重庆港",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "false_breakout",
+        "state": "confirmed",
+        "display": "假突破"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "bear_flag",
+          "state": "confirmed",
+          "formed_at": "2026-06-08",
+          "confirmed_at": 6207,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 4.800571428571416
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6207
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": true,
+                "impulse_size": 2.4,
+                "correction_ratio": 0.4291666666666666,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-15"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom",
+          "state": "forming",
+          "formed_at": "2026-05-28",
+          "confirmed_at": 6153,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 5.97
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6153
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-07-01"
+            }
+          ]
+        },
+        {
+          "pattern_type": "m_top",
+          "state": "forming",
+          "formed_at": "2026-05-19",
+          "confirmed_at": 6208,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 0.09380952380951157
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6208
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-16"
+            }
+          ]
+        },
+        {
+          "pattern_type": "spring",
+          "state": "target_reached",
+          "formed_at": "2026-05-18",
+          "confirmed_at": 6132,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 4.81
+            },
+            {
+              "code": "break_index",
+              "value": 6128
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6132
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-06-01"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 6133,
+                "price": 5.08,
+                "date": "2026-06-02"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "spring",
+                "w_bottom"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "false_breakout",
+          "state": "target_reached",
+          "formed_at": "2026-05-12",
+          "confirmed_at": 6138,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 5.24
+            },
+            {
+              "code": "break_index",
+              "value": 6133
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6138
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-06-09"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 6139,
+                "price": 4.81,
+                "date": "2026-06-10"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "false_breakout",
+                "m_top"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom_spring",
+          "state": "target_reached",
+          "formed_at": "2026-03-23",
+          "confirmed_at": 6132,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 4.78
+            },
+            {
+              "code": "break_index",
+              "value": 6128
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6132
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-06-01"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 6135,
+                "price": 5.76,
+                "date": "2026-06-04"
+              }
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "target_reached",
+          "formed_at": "2026-03-23",
+          "confirmed_at": 6133,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 5.112800000000004
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 6133
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 6136,
+                "price": 5.810400000000003,
+                "date": "2026-06-05"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-06-02"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    },
+    {
+      "case_id": "10",
+      "code": "688216",
+      "name": "气派科技",
+      "asof": "2026-10-16",
+      "user_label": {
+        "pattern_type": "head_shoulders",
+        "state": "forming",
+        "display": "头肩顶，未确认"
+      },
+      "machine_snapshot": [
+        {
+          "pattern_type": "w_bottom",
+          "state": "target_reached",
+          "formed_at": "2026-07-21",
+          "confirmed_at": 1270,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 34.04
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1270
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 1276,
+                "price": 42.045,
+                "date": "2026-09-23"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-09-15"
+            }
+          ]
+        },
+        {
+          "pattern_type": "triangle_top",
+          "state": "confirmed",
+          "formed_at": "2026-07-02",
+          "confirmed_at": 1285,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 34.09840000000003
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1285
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-10-14"
+            }
+          ]
+        },
+        {
+          "pattern_type": "w_bottom_spring",
+          "state": "confirmed",
+          "formed_at": "2026-06-15",
+          "confirmed_at": 1241,
+          "evidence": [
+            {
+              "code": "reclaim_level",
+              "value": 28.3
+            },
+            {
+              "code": "break_index",
+              "value": 1235
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1241
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-05"
+            },
+            {
+              "code": "close_reclaim",
+              "value": true
+            },
+            {
+              "code": "manual_review",
+              "value": "visual confirmation required"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "inverse_head_shoulders",
+          "state": "target_reached",
+          "formed_at": "2026-06-15",
+          "confirmed_at": 1257,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "low",
+                "high",
+                "low",
+                "high",
+                "low"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 14.68787878787873
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1257
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 1271,
+                "price": 39.07969696969688,
+                "date": "2026-09-16"
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-08-27"
+            },
+            {
+              "code": "competing_topology_labels",
+              "value": [
+                "inverse_head_shoulders",
+                "w_bottom",
+                "w_bottom_spring"
+              ]
+            }
+          ]
+        },
+        {
+          "pattern_type": "bear_flag",
+          "state": "target_reached",
+          "formed_at": "2025-11-11",
+          "confirmed_at": 1086,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 21.907999999999948
+            },
+            {
+              "code": "close_confirmation",
+              "value": true
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1086
+            },
+            {
+              "code": "target_reached",
+              "value": {
+                "index": 1087,
+                "price": 21.26,
+                "date": "2025-12-15"
+              }
+            },
+            {
+              "code": "manual_review",
+              "value": {
+                "measured_target_locked": true,
+                "impulse_size": 4.239999999999998,
+                "correction_ratio": 0.42924528301886733,
+                "manual_review_required": false
+              }
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2025-12-12"
+            }
+          ]
+        },
+        {
+          "pattern_type": "m_top",
+          "state": "forming",
+          "formed_at": "2025-08-13",
+          "confirmed_at": 1120,
+          "evidence": [
+            {
+              "code": "pivot_topology",
+              "value": [
+                "high",
+                "low",
+                "high",
+                "low",
+                "high"
+              ]
+            },
+            {
+              "code": "neckline",
+              "value": 12.663235294117662
+            },
+            {
+              "code": "close_confirmation",
+              "value": false
+            },
+            {
+              "code": "confirmation_index",
+              "value": 1120
+            },
+            {
+              "code": "confirmed_date",
+              "value": "2026-02-02"
+            }
+          ]
+        }
+      ],
+      "data_error": null
+    }
+  ]
+}

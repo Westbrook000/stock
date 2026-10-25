@@ -1,0 +1,9 @@
+{
+  "10": {
+    "pattern": "N",
+    "state": "none",
+    "clarified_at": "2026-10-25",
+    "supersedes": "round_01_v2.user.json case 10: HS forming",
+    "note": "用户明确：首个测幅目标无效视为规则不成立；该图截至标注日没有任何成立中的蔡森书本形态。"
+  }
+}

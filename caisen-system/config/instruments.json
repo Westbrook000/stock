@@ -1,0 +1,5 @@
+{
+  "format_version": 1,
+  "instructions": "Only entries bound to the exact CSV SHA256 can authorize verified data quality. Validate adjustment basis, volume units, actions, category, tick, lot, settlement and price-limit rules before adding an instrument.",
+  "instruments": {}
+}

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>蔡森量价形态识别｜算法与项目流程</title>
+<style>
+:root{--paper:#f3f0e9;--ink:#17222b;--muted:#5d696f;--rule:#c9c6bc;--red:#b44032;--green:#177b62;--gold:#b98a3d;--panel:#e8e4db;--white:#fbfaf7}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#20292f;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}body{display:grid;place-items:center;overflow:hidden}
+.deck{position:relative;width:min(100vw,177.78vh);height:min(56.25vw,100vh);background:var(--paper);overflow:hidden;box-shadow:0 20px 80px #0006}.slide{position:absolute;inset:0;padding:5.2% 6.2% 4.2%;display:none;flex-direction:column}.slide.active{display:flex}.topline{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--rule);padding-bottom:13px;font-size:12px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}.topline strong{color:var(--red);font-weight:700}.foot{margin-top:auto;border-top:1px solid var(--rule);padding-top:10px;display:flex;justify-content:space-between;color:var(--muted);font-size:11px}.eyebrow{margin:34px 0 10px;color:var(--red);font-size:14px;letter-spacing:.12em;font-weight:700}.title{font-size:clamp(34px,5vw,64px);line-height:1.06;letter-spacing:-.045em;margin:0 0 14px;max-width:980px}.subtitle{font-size:19px;color:var(--muted);line-height:1.5;max-width:790px}.display{font-size:clamp(48px,7vw,92px);font-weight:750;line-height:.98;letter-spacing:-.06em;margin:35px 0 25px}.lede{font-size:21px;line-height:1.6;max-width:760px}.cover{background:var(--paper)}.covergrid{display:grid;grid-template-columns:1.2fr .8fr;align-items:center;gap:3%;height:100%}.cover-note{border-left:3px solid var(--red);padding:12px 0 12px 18px;font-size:16px;line-height:1.65;color:var(--muted);max-width:650px}.stamp{font-size:12px;letter-spacing:.12em;color:var(--muted);margin-top:40px}.chart-art{width:100%;max-height:430px}.section-title{font-size:clamp(26px,3.3vw,42px);line-height:1.1;letter-spacing:-.035em;margin:29px 0 10px}.section-sub{color:var(--muted);font-size:15px;margin:0 0 24px}.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:28px 0 20px}.flow-item{position:relative;border-top:3px solid var(--ink);padding:14px 10px 0 0}.flow-item:not(:last-child):after{content:"→";position:absolute;right:-9px;top:24px;color:var(--red);font-size:20px}.num{font-size:12px;color:var(--red);font-weight:800;letter-spacing:.1em}.flow-item h3{font-size:17px;margin:8px 0}.flow-item p{font-size:13px;line-height:1.5;color:var(--muted);margin:0}.callout{background:var(--ink);color:var(--paper);padding:17px 20px;font-size:15px;line-height:1.6;margin-top:auto}.callout b{color:#e4b765}.two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:15px}.rulebox{border-top:1px solid var(--rule);padding:12px 0}.rulebox h3{margin:0 0 7px;font-size:18px}.rulebox p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}.smallcaps{font-size:11px;color:var(--red);font-weight:700;letter-spacing:.1em}.pair-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:32px;row-gap:0;margin-top:4px}.pair{border-top:1px solid var(--rule);display:grid;grid-template-columns:1fr 34px 1fr;align-items:center;min-height:54px;font-size:15px}.pair .bull{color:var(--green);font-weight:700}.pair .bear{color:var(--red);font-weight:700}.pair .versus{text-align:center;color:#9d9a90}.pill{display:inline-block;border:1px solid var(--rule);padding:5px 9px;font-size:12px;color:var(--muted);margin:4px 5px 0 0}.state-row{display:grid;grid-template-columns:repeat(4,1fr);gap:15px;align-items:stretch;margin:24px 0 20px}.state{border-top:3px solid var(--gold);padding:12px 12px 0 0}.state:nth-child(2){border-color:var(--green)}.state:nth-child(3){border-color:var(--red)}.state:nth-child(4){border-color:#7a8387}.state strong{display:block;font-size:18px;margin-bottom:7px}.state span{font-size:13px;color:var(--muted);line-height:1.5}.formula{display:flex;gap:22px;align-items:stretch;margin-top:10px}.formula div{flex:1;border-left:2px solid var(--rule);padding:6px 12px;color:var(--muted);font-size:13px;line-height:1.5}.formula b{display:block;color:var(--ink);font-size:15px;margin-bottom:5px}.decision-grid{display:grid;grid-template-columns:.88fr 1.12fr;gap:34px;margin-top:19px}.gates{display:grid;grid-template-columns:1fr 1fr;gap:12px}.gate{background:var(--panel);padding:14px}.gate strong{display:block;font-size:24px;color:var(--red);margin-bottom:5px}.gate span{color:var(--muted);font-size:12px}.ranklist{margin:0;padding:0;list-style:none;counter-reset:rank}.ranklist li{counter-increment:rank;border-top:1px solid var(--rule);padding:10px 0 10px 34px;position:relative;font-size:14px}.ranklist li:before{content:counter(rank,decimal-leading-zero);position:absolute;left:0;color:var(--red);font-weight:700;font-size:12px}.actionline{display:flex;gap:8px;flex-wrap:wrap;margin-top:11px}.actionline span{padding:7px 10px;background:var(--panel);font-size:12px}.actionline .buy{background:#dceae4;color:#105f4d}.actionline .sell{background:#f0ddd7;color:#9a3328}.timeline{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin:33px 0 20px}.step{padding:0 13px 0 0;position:relative}.step:not(:last-child):after{content:"";height:1px;background:var(--rule);position:absolute;top:8px;left:22px;right:4px;z-index:0}.dot{width:17px;height:17px;background:var(--red);border:4px solid var(--paper);outline:1px solid var(--red);border-radius:50%;position:relative;z-index:1}.step b{display:block;margin:13px 0 6px;font-size:15px}.step p{font-size:12px;color:var(--muted);line-height:1.5;margin:0}.statusgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin:25px 0 20px}.stat{border-top:2px solid var(--ink);padding-top:10px}.stat strong{display:block;font-size:35px;letter-spacing:-.04em}.stat span{font-size:12px;color:var(--muted)}.limits{display:grid;grid-template-columns:1fr 1fr;gap:28px}.limits p{font-size:13px;line-height:1.6;color:var(--muted);margin:8px 0}.sources{font-size:10px;color:var(--muted);line-height:1.45}.controls{position:absolute;z-index:10;bottom:14px;right:18px;display:flex;align-items:center;gap:8px;color:#eee;font-size:12px}.controls button{border:1px solid #819099;background:#29343a;color:white;padding:6px 10px;cursor:pointer}.controls button:hover,.controls button:focus{background:var(--red)}.progress{width:90px;height:3px;background:#576168}.progress i{height:100%;display:block;background:#d76a59;width:14.2%;transition:width .2s}.hint{position:absolute;bottom:14px;left:20px;color:#d6d9d9;font-size:11px}
+@media(max-width:800px){.slide{padding:4% 5%}.topline{font-size:9px;padding-bottom:6px}.eyebrow{margin:15px 0 6px;font-size:10px}.section-title{margin:13px 0 6px}.section-sub{font-size:11px;margin-bottom:8px}.flow{gap:6px;margin:12px 0}.flow-item{padding-top:7px}.flow-item h3{font-size:11px;margin:5px 0}.flow-item p,.rulebox p,.state span,.formula div,.step p,.limits p{font-size:9px}.flow-item:not(:last-child):after{font-size:13px;top:16px}.callout{font-size:10px;padding:9px 11px}.two-col{gap:14px;margin-top:7px}.rulebox{padding:7px 0}.rulebox h3{font-size:12px;margin-bottom:4px}.pair{min-height:34px;font-size:10px;grid-template-columns:1fr 20px 1fr}.state-row{gap:8px;margin:12px 0}.state{padding-top:7px}.state strong{font-size:12px;margin-bottom:4px}.formula{gap:10px}.formula div{padding:4px 7px}.formula b{font-size:10px;margin-bottom:3px}.decision-grid{gap:16px;margin-top:8px}.gate{padding:8px}.gate strong{font-size:17px}.gate span{font-size:9px}.ranklist li{padding:6px 0 6px 26px;font-size:10px}.actionline{margin-top:5px}.actionline span{font-size:9px;padding:5px}.timeline{margin:15px 0}.step{padding-right:7px}.step b{font-size:10px;margin:7px 0 4px}.dot{width:12px;height:12px}.step:not(:last-child):after{top:6px;left:15px}.statusgrid{gap:10px;margin:12px 0}.stat strong{font-size:22px}.stat span{font-size:9px}.limits{gap:14px}.foot{font-size:8px;padding-top:5px}.sources{font-size:8px}.controls{bottom:3px;right:6px;gap:4px;font-size:9px}.controls button{padding:4px 6px}.hint{bottom:5px;left:8px;font-size:8px}.display{margin:16px 0;font-size:50px}.lede{font-size:13px}.cover-note{font-size:11px;padding-left:11px}.stamp{font-size:9px;margin-top:20px}}
+@media print{html,body{height:auto;overflow:visible;background:white}.deck{width:100%;height:auto;overflow:visible;box-shadow:none}.slide{position:relative;display:flex!important;width:100vw;height:56.25vw;page-break-after:always}.controls,.hint{display:none}}
+</style>
+</head>
+<body>
+<main class="deck" aria-label="蔡森量价形态识别算法与项目流程演示稿">
+  <section class="slide cover active" data-title="概览">
+    <div class="topline"><span>CAISEN · VOLUME / PRICE STRUCTURE</span><strong>算法与项目流程</strong></div>
+    <div class="covergrid">
+      <div>
+        <div class="eyebrow">当前实现说明 · 2026.10</div>
+        <h1 class="display">形态如何<br>变成决策</h1>
+        <p class="lede">从价格拐点和结构几何出发，再核对突破、量价质量与交易空间。</p>
+        <div class="cover-note"><b>先说明算法性质：</b>当前不是 AI 图像模型，也不预测涨跌概率；它是可解释的 OHLC 规则识别器，扫描原书 12 招并输出复核依据。</div>
+        <div class="stamp">蔡森量价结构研究系统　/　本地独立运行　/　不连接券商</div>
+      </div>
+      <svg class="chart-art" viewBox="0 0 500 410" role="img" aria-label="示意K线与W底颈线">
+        <path d="M34 317 L90 317 L90 280 L146 280 L146 235 L202 235 L202 250 L258 250 L258 164 L314 164 L314 196 L370 196 L370 116 L426 116" fill="none" stroke="#b44032" stroke-width="3"/>
+        <path d="M32 215 L452 115" fill="none" stroke="#17222b" stroke-width="1.5" stroke-dasharray="7 7"/>
+        <g stroke-width="2">
+          <line x1="65" y1="120" x2="65" y2="250" stroke="#177b62"/><rect x="55" y="155" width="20" height="55" fill="#177b62"/>
+          <line x1="115" y1="195" x2="115" y2="320" stroke="#b44032"/><rect x="105" y="220" width="20" height="60" fill="#b44032"/>
+          <line x1="165" y1="180" x2="165" y2="300" stroke="#177b62"/><rect x="155" y="205" width="20" height="55" fill="#177b62"/>
+          <line x1="215" y1="100" x2="215" y2="245" stroke="#177b62"/><rect x="205" y="140" width="20" height="80" fill="#177b62"/>
+          <line x1="265" y1="140" x2="265" y2="285" stroke="#b44032"/><rect x="255" y="175" width="20" height="65" fill="#b44032"/>
+          <line x1="315" y1="125" x2="315" y2="265" stroke="#177b62"/><rect x="305" y="150" width="20" height="72" fill="#177b62"/>
+          <line x1="365" y1="72" x2="365" y2="205" stroke="#177b62"/><rect x="355" y="95" width="20" height="70" fill="#177b62"/>
+          <line x1="415" y1="48" x2="415" y2="160" stroke="#b44032"/><rect x="405" y="78" width="20" height="45" fill="#b44032"/>
+        </g>
+        <circle cx="115" cy="320" r="7" fill="#b44032"/><circle cx="265" cy="285" r="7" fill="#b44032"/><circle cx="215" cy="100" r="5" fill="#17222b"/>
+        <text x="84" y="356" font-size="13" fill="#5d696f">低点</text><text x="236" y="322" font-size="13" fill="#5d696f">第二低点</text><text x="185" y="83" font-size="13" fill="#5d696f">颈线突破</text>
+      </svg>
+    </div>
+    <div class="foot"><span>算法说明基于当前仓库实现与规则卡</span><span>01 / 07</span></div>
+  </section>
+
+  <section class="slide" data-title="识别算法">
+    <div class="topline"><span>01 / RECOGNITION</span><strong>形态识别</strong></div>
+    <h2 class="section-title">算法按因果顺序逐步筛选结构</h2>
+    <p class="section-sub">输入 OHLCV 后，不直接“看图猜形态”，而是提取可复核的拐点、边界和状态。</p>
+    <div class="flow">
+      <div class="flow-item"><span class="num">01 · 行情</span><h3>清洗与分段</h3><p>统一日期和 OHLCV；检查异常行、跳空断点和数据来源。结构不跨数据断点。</p></div>
+      <div class="flow-item"><span class="num">02 · 拐点</span><h3>ATR 摆动点</h3><p>14期 ATR；局部高低点需右侧 2 根 K 线确认，并以 2ATR / 3ATR 两组尺度过滤噪声。</p></div>
+      <div class="flow-item"><span class="num">03 · 几何</span><h3>匹配拓扑</h3><p>检查 3 点、5 点高低点次序；估计水平/斜颈线、旗形通道和三角边界。</p></div>
+      <div class="flow-item"><span class="num">04 · 确认</span><h3>收盘越线</h3><p>候选结构先标“未确认”；普通 W/M 不再自动派生破底翻/假突破，须有真实越界与收复证据。</p></div>
+      <div class="flow-item"><span class="num">05 · 计划</span><h3>交易空间</h3><p>检查结构状态、人工复核标记、数据质量、固定止损和首目标空间。</p></div>
+    </div>
+    <div class="two-col">
+      <div class="rulebox"><span class="smallcaps">因果纪律</span><h3>拐点有“发生日”与“可知日”</h3><p>峰谷发生在图上的那天，但程序要等后续 2 根 K 线才确认它是拐点。回放按当时可见数据计算，降低未来数据泄漏。</p></div>
+      <div class="rulebox"><span class="smallcaps">计算边界</span><h3>因果回放窗口</h3><p>形态详情最多分析 500 根日K、520 根周K；旗形搜索完整窗口并要求五个已确认摆动点、受限回撤和通道边界。</p></div>
+    </div>
+    <div class="foot"><span>实现依据：caisen/pivots.py · patterns.py · market.py</span><span>02 / 07</span></div>
+  </section>
+
+  <section class="slide" data-title="12招规则库">
+    <div class="topline"><span>02 / RULE CATALOG</span><strong>12 招规则库</strong></div>
+    <h2 class="section-title">12 个规则名，共用几何识别骨架</h2>
+    <p class="section-sub">每个识别结果都保留锚点、颈线、突破日期、失效位与目标；不同规则可共享拐点；竞争标签会标记待人工复核，并阻止其直接成为买入计划。</p>
+    <div class="pair-grid">
+      <div class="pair"><span class="bull">W 底</span><span class="versus">↔</span><span class="bear">M 头</span></div>
+      <div class="pair"><span class="bull">破底翻</span><span class="versus">↔</span><span class="bear">假突破</span></div>
+      <div class="pair"><span class="bull">W 底破底翻</span><span class="versus">↔</span><span class="bear">假突破（头肩顶）</span></div>
+      <div class="pair"><span class="bull">下飘旗形上涨中继</span><span class="versus">↔</span><span class="bear">上飘旗形下跌中继</span></div>
+      <div class="pair"><span class="bull">头肩底</span><span class="versus">↔</span><span class="bear">头肩顶</span></div>
+      <div class="pair"><span class="bull">收敛三角形底部</span><span class="versus">↔</span><span class="bear">收敛三角形头部</span></div>
+    </div>
+    <div class="two-col" style="margin-top:25px">
+      <div class="rulebox"><span class="smallcaps">W / M 结构</span><h3>比较低点 / 高点，再找颈线</h3><p>允许双底不等高，也允许斜颈线。突破前只显示“W底，未确认”；趋势方向需结合突破和失效判断。</p></div>
+      <div class="rulebox"><span class="smallcaps">三角 / 旗形</span><h3>检查收敛与前序推动波</h3><p>三角形检查边界斜率、触点与交点位置；旗形检查先前推动波、逆向整理和后续突破条件。</p></div>
+    </div>
+    <div class="callout"><b>请这样理解覆盖范围：</b>12 招规则卡均有名称与识别入口；程序当前以标准几何结构为自动识别范围，复合形态、缺少可验证证据的变体需要人工复核。原书图例并不都能转换成无歧义的数值条件。</div>
+    <div class="foot"><span>结构定义以原书规则审计与 docs/rule-cards.md 为准</span><span>03 / 07</span></div>
+  </section>
+
+  <section class="slide" data-title="状态与量价">
+    <div class="topline"><span>03 / EVENT LIFECYCLE</span><strong>确认与失效</strong></div>
+    <h2 class="section-title">“形态出现”与“允许介入”是两件事</h2>
+    <p class="section-sub">识别器给结构状态；交易计划再做风险与空间筛选。</p>
+    <div class="state-row">
+      <div class="state"><strong>形成中</strong><span>锚点与拓扑满足部分规则，尚未收盘突破。界面显示“W底，未确认”。</span></div>
+      <div class="state"><strong>价格确认</strong><span>收盘价首次穿越当时冻结的颈线/边界，保存确认日期和突破量比。</span></div>
+      <div class="state"><strong>失效</strong><span>价格重新越回失效线，或数据分段变化使结构不能继续追踪。</span></div>
+      <div class="state"><strong>人工复核</strong><span>程序保留结构证据；人可以接受、判误报、修正关键点并写备注。</span></div>
+    </div>
+    <div class="formula">
+      <div><b>W 底测幅</b>颈线中间值 − 底部中间值 = 第一段距离；第一目标为颈线 + 距离。</div>
+      <div><b>破底翻</b>先破整理区下沿，再收复回区间；箱体上沿可作首个已知目标。</div>
+      <div><b>中继结构</b>旗形须突破前波高/低才解锁波段目标；三角突破位置也要符合规则区间。</div>
+      <div><b>量价证据</b>程序记录突破日量比；复权与成交量单位未验证时会标“量能未核验”。</div>
+    </div>
+    <div class="callout"><b>当前工程事实（v13）：</b>“量能未核验”时仍展示价格形态和证据，但计划标记“等待”，不会进入可考虑买入候选；待来源、量能单位与企业行动口径绑定并核验后，才重新评估交易计划。</div>
+    <div class="foot"><span>量比 = 突破日成交量 / 前 20 根可比日均量</span><span>04 / 07</span></div>
+  </section>
+
+  <section class="slide" data-title="买卖决策">
+    <div class="topline"><span>04 / DECISION ENGINE</span><strong>从形态到行动提示</strong></div>
+    <h2 class="section-title">通过结构风险与目标空间，才排进买入候选</h2>
+    <p class="section-sub">先定结构失效位，再按当前参考价测算；风险太大或首目标空间太小就等待。</p>
+    <div class="decision-grid">
+      <div>
+        <div class="gates">
+          <div class="gate"><strong>≤ 7%</strong><span>参考买入价到结构止损的计划风险上限</span></div>
+          <div class="gate"><strong>≥ 2R</strong><span>首个有效目标扣费后风险回报门槛；当前零费用基线</span></div>
+          <div class="gate"><strong>结构止损</strong><span>形态失效位减去 0.5 ATR 或两个报价单位缓冲</span></div>
+          <div class="gate"><strong>次日复核</strong><span>只尝试下一有效交易日；开盘价越界或超最高买入价则放弃</span></div>
+        </div>
+        <div class="actionline"><span class="buy">可考虑买入</span><span>等待 / 数据不足</span><span>持有观察</span><span class="sell">如持有可考虑卖出</span></div>
+      </div>
+      <div>
+        <div class="smallcaps" style="margin-bottom:7px">扫描排序（逐项透明，不是概率）</div>
+        <ol class="ranklist"><li>先排通过所有买入硬条件的标的</li><li>同向已确认周期数更多者靠前</li><li>首目标 R 倍数更高者靠前（上限封顶）</li><li>计划风险更低、确认更新者靠前</li><li>最后按代码和品类稳定排序</li></ol>
+      </div>
+    </div>
+    <div class="callout"><b>周期独立：</b>日线和周线各自识别；正式方向冲突时转为“等待”。2020–2026 周线使用上交所官方年度休市公告；2000–2019 年第三方日历及 2027 年以后的日期仍只作预览。空头标签只提示已有持仓复核，不代表做空或自动卖出。</div>
+    <div class="foot"><span>当前费用参数：佣金 0、最低收费 0、滑点 0；仅为用户要求的模拟基线</span><span>05 / 07</span></div>
+  </section>
+
+  <section class="slide" data-title="使用流程">
+    <div class="topline"><span>05 / PRODUCT FLOW</span><strong>项目功能与使用流程</strong></div>
+    <h2 class="section-title">从全量扫描，到一只标的的证据复核</h2>
+    <p class="section-sub">工作台把“找候选、看结构、复核数据、模拟执行”串成闭环，不自动连接券商。</p>
+    <div class="timeline">
+      <div class="step"><div class="dot"></div><b>全量扫描</b><p>按股票/ETF、品类、形态、周期与确认日期筛选。</p></div>
+      <div class="step"><div class="dot"></div><b>买入优先</b><p>一标的一行；候选靠前，显示状态、价格、告警与迷你K线。</p></div>
+      <div class="step"><div class="dot"></div><b>进入详情</b><p>点击行或缩略图，载入最新日线/周线结论与形态图。</p></div>
+      <div class="step"><div class="dot"></div><b>看计划证据</b><p>检查颈线、关键点、确认日、止损、目标和 R 倍数。</p></div>
+      <div class="step"><div class="dot"></div><b>回放 / 标注</b><p>按截止日重放；接受、判误报或修正形态关键点。</p></div>
+      <div class="step"><div class="dot"></div><b>模拟执行</b><p>Backtrader 按下一开盘模拟；零费用；不发真实委托。</p></div>
+    </div>
+    <div class="two-col" style="margin-top:24px">
+      <div class="rulebox"><span class="smallcaps">数据入口</span><h3>当前本地行情文件</h3><p>扫描本地 CSV，保留文件哈希、数据版本、截止日期和质量告警；可主动触发单标的/全市场更新。当前行情快照不代表完整历史市场。</p></div>
+      <div class="rulebox"><span class="smallcaps">服务接口</span><h3>独立本地 API 与页面</h3><p>FastAPI 提供分析、扫描任务、详情、人工复核和 Backtrader 接口；默认打开 127.0.0.1:8301。</p></div>
+    </div>
+    <div class="foot"><span>页面入口：市场扫描 · 形态详情 · 历史回放 · 人工复核</span><span>06 / 07</span></div>
+  </section>
+
+  <section class="slide" data-title="现状与边界">
+    <div class="topline"><span>06 / STATUS & LIMITS</span><strong>当前进度与下一步</strong></div>
+    <h2 class="section-title">系统可以运行；形态质量和盈利价值仍待验证</h2>
+    <p class="section-sub">以下为当前本地数据和 2026-10-25 分析规则 v13 开发验收记录。</p>
+    <div class="statusgrid">
+      <div class="stat"><strong>5,294</strong><span>本地标的：3,655 股票 + 1,639 ETF</span></div>
+      <div class="stat"><strong>10 例</strong><span>首轮用户开发标签；已用于校准，不是独立准确率样本</span></div>
+      <div class="stat"><strong>0</strong><span>全量扫描文件级失败；每个标的仍有质量告警</span></div>
+      <div class="stat"><strong>138</strong><span>pytest 全部通过；Backtrader 零费用功能验收保留</span></div>
+    </div>
+    <div class="limits">
+      <div><div class="smallcaps">当前已知限制</div><p>大多数本地标的行情截至 2026-10-16；000001 股票和 510300 ETF 已真实更新到 2026-10-23。复权口径、成交量单位、企业行动和退市历史尚未验证。2020–2026 周线使用上交所官方休市公告；2000–2019 年第三方日历及 2027 年后日期仍仅作预览。</p><p>量能或企业行动来源未核验时，v13 仅显示形态研究候选，交易计划返回等待；普通 W/M 不直接触发破底翻/假突破，复合结构需要人工复核。买入候选排序是规则优先级，不是上涨概率。</p></div>
+      <div><div class="smallcaps">仍待完成的验证</div><p>用户明确 N 表示截至标注日十二招均无形态。当前沿用 v12 的几何与因果生命周期规则；v13 将未核验量能作为交易计划等待门槛。W/M 时长比与头肩肩部容差是开发工程初值，十例标签曾参与调整，不能作为独立准确率证据；688216 的原始标签与后续“无效目标不成立”澄清分开留档。</p><p>本轮 v13 全量扫描 5,294 个标的、文件失败 0 个、买入候选 0 个。240 例盲评、冻结留出集和行情前向观察尚未完成。策略效果验证按当前约定暂缓；功能通过不等于策略盈利有效。</p></div>
+    </div>
+    <div class="foot"><span class="sources">依据：patterns.py · pivots.py · plans.py · decision.py · market.py · api.py · static/app.js · SPEC-pattern-engine.md · README.md</span><span>07 / 07</span></div>
+  </section>
+  <div class="hint">← → 翻页　·　Home / End 跳转　·　F 全屏</div>
+  <div class="controls"><button id="prev" aria-label="上一页">←</button><span id="counter">01 / 07</span><div class="progress"><i id="bar"></i></div><button id="next" aria-label="下一页">→</button></div>
+</main>
+<script>
+const slides=[...document.querySelectorAll('.slide')];let index=0;function show(next){index=(next+slides.length)%slides.length;slides.forEach((s,i)=>s.classList.toggle('active',i===index));document.querySelector('#counter').textContent=`${String(index+1).padStart(2,'0')} / ${String(slides.length).padStart(2,'0')}`;document.querySelector('#bar').style.width=`${(index+1)/slides.length*100}%`;document.title=`${slides[index].dataset.title} · 蔡森量价形态识别`}document.querySelector('#prev').onclick=()=>show(index-1);document.querySelector('#next').onclick=()=>show(index+1);document.addEventListener('keydown',e=>{if(['ArrowRight','PageDown',' '].includes(e.key)){e.preventDefault();show(index+1)}if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();show(index-1)}if(e.key==='Home')show(0);if(e.key==='End')show(slides.length-1);if(e.key.toLowerCase()==='f'){if(!document.fullscreenElement)document.querySelector('.deck').requestFullscreen?.();else document.exitFullscreen?.()}});let touchX=null;document.addEventListener('touchstart',e=>touchX=e.changedTouches[0].clientX,{passive:true});document.addEventListener('touchend',e=>{if(touchX===null)return;const dx=e.changedTouches[0].clientX-touchX;if(Math.abs(dx)>50)show(index+(dx<0?1:-1));touchX=null},{passive:true});
+</script>
+</body>
+</html>

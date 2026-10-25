@@ -1,0 +1,7 @@
+fastapi>=0.100
+uvicorn[standard]>=0.23
+pandas>=1.5
+numpy>=1.23
+backtrader>=1.9.78
+akshare>=1.18,<2
+exchange-calendars==4.5.6

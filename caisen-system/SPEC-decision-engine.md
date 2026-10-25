@@ -18,11 +18,12 @@ No broker order is sent. The engine has no position ledger in this module; it mu
 
 ## Buy plan
 
+- Only `w_bottom`, `inverse_head_shoulders`, `bull_flag`, and `triangle_bottom` can create buy plans. The other six active structures remain visible as context or risk alerts but never enter buy ranking.
 - The stop is derived from the pattern's frozen structural invalidation level and a documented buffer. Do not move the stop to satisfy a risk cap.
 - Maximum structural risk defaults to 7% from reference entry; first unlocked target must offer at least 2R. Fees, commission and slippage are zero for the user's requested acceptance baseline.
 - The plan returns reference entry, stop, risk percentage, first target, R multiple, maximum allowed entry and explicit rejection reason codes.
 - If no first target is unlocked, the reward-space test fails; a conditional second-wave target cannot substitute for it.
-- A forming pattern never becomes a buy candidate. Price-confirmed patterns with unverified volume remain visible for research, but their trade plan is `WAIT` with `volume_data_unverified`; unverifiable volume/corporate-action provenance cannot produce a `CONSIDER_BUY` result.
+- A forming member of the four-shape buy list remains visible with its formed label and returns `WAIT` until its own frozen neckline or structure boundary is closed through. A forming bullish pattern with an existing position may retain `HOLD` position semantics. Price-confirmed buy-list patterns with unverified volume remain visible for research, but their trade plan is `WAIT` with `volume_data_unverified`; unverifiable volume/corporate-action provenance cannot produce a `CONSIDER_BUY` result.
 
 ## Multi-timeframe synthesis
 

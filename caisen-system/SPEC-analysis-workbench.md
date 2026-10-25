@@ -8,6 +8,7 @@ Status: approved for implementation under the user's explicit full-build instruc
 2. Completed results are merged to one row per instrument, sorted by decision-engine keys. `CONSIDER_BUY` rows passing the 7% risk / 2R gates appear first. The sort keys and reason are visible; the ordering is a screening priority, never a probability.
 3. Each row shows code/name, action, current pattern/state, latest close/date, data warning, and a compact recent candlestick thumbnail.
 4. Clicking a row or thumbnail opens the detail view for that code and loads its latest analysis without a second search. Detail shows the buy/sell/wait decision, daily and weekly evidence, current shape labels such as `W底，未确认`, chart anchors/boundaries, confirmation/invalidity, stop/targets, quality/provenance, rule/data versions and reasons.
+5. After the scan completes, the user can filter the returned rows by action and any of the ten active shapes. A prominent “可考虑买入” quick filter and combined action/shape filters operate client-side; default remains the full buy-first result order and changing filters does not resubmit the scan.
 
 ## Scan contract
 
@@ -16,6 +17,7 @@ Status: approved for implementation under the user's explicit full-build instruc
 - A failed/unavailable file stays visible as `INSUFFICIENT_DATA` with a reason; it is not silently omitted.
 - Progress is monotonic and reports discovered/scanned/total, warning/failure counts and the current data snapshot timestamp when available.
 - Stable deterministic ordering is preserved for ties. Filters may narrow the result but never change source universe metadata.
+- Post-scan filters preserve the server result order and inventory/failure totals. Counts reflect filtered rows, reset returns to the full scan, and a zero-result filter explains that no row matched without implying that the scan failed.
 - No official calendar means weekly status is visibly insufficient/preview-only; daily decisions remain independent.
 
 ## Detail and navigation

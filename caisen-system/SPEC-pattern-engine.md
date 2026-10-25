@@ -8,10 +8,11 @@ Turn validated daily or calendar-complete weekly bars into explainable, causal p
 
 ## Inputs and boundaries
 
+- The active `caisen-rules-v6` catalog contains exactly ten rules. The source audit keeps all twelve book candidates, but `w_bottom_spring` and `false_breakout_head_shoulders` are retired from current recognition. Their old IDs remain displayable in legacy reports only.
 - Consume normalized `MarketDataResult` or a DataFrame carrying the same provenance/quality attributes. Respect `segment_id`; never construct a pattern across a data break.
 - Daily and weekly bars are analyzed independently. Formal weekly analysis receives only calendar-complete bars; provisional weekly data may be shown as preview and cannot generate a formal pattern.
 - Candidate output must distinguish pivot extreme date from pivot confirmation date. A pivot is knowable only after the configured right-side bars have elapsed.
-- Only rules present in `caisen/rules/patterns.v2.json` can become active recognitions. The catalog is authoritative; unsupported source-audit candidates are never emitted as recognized rules. A spring/fake-breakout event requires a prior consolidation box with four alternating boundary touches, then a close beyond the frozen boundary and a close back inside. The current box geometry numbers are versioned engineering starts and remain manually reviewed; they are not attributed to the book. A W-bottom-spring candidate requires that inner box event to overlap an outer W, and its lifecycle follows the outer W. Flags use five confirmed swing points and search the full 500-bar analysis window; older results retain their v1 version.
+- Only rules present in `caisen/rules/patterns.v2.json` can become active recognitions. The catalog is authoritative; unsupported or retired source-audit candidates are never emitted as recognized rules. A spring/fake-breakout event requires a prior consolidation box with four alternating boundary touches, then a close beyond the frozen boundary and a close back inside. The current box geometry numbers are versioned engineering starts and remain manually reviewed; they are not attributed to the book. Flags use five confirmed swing points and search the full 500-bar analysis window; older results retain their recorded rule version.
 - No probability, buy/sell action, or claim of empirical accuracy is produced.
 
 ## Lifecycle contract
@@ -49,7 +50,7 @@ Incomplete adjustment, volume, registry, or calendar provenance is attached to e
 
 ## Recognition scope
 
-Use the 12 source-audited rule IDs and their catalog-defined topology. Standard supported shapes are automatic; compound/ambiguous variants are returned with `manual_review_required` only if the catalog includes that recognition, otherwise omitted with a support reason in diagnostics. The engine must not infer a compound head-and-shoulders false breakout from a generic neckline reclaim unless its structural prerequisites are present.
+Use only the ten active rule IDs in the versioned catalog and their catalog-defined topology. Standard supported shapes are automatic; compound/ambiguous variants are returned with `manual_review_required` only if the catalog includes that recognition, otherwise omitted with a support reason in diagnostics. The two retired composite IDs may appear when reading legacy v14 records but never in new v15 analyses. The engine must not infer a compound head-and-shoulders false breakout from a generic neckline reclaim.
 
 ## Verification
 
@@ -58,7 +59,7 @@ Use the 12 source-audited rule IDs and their catalog-defined topology. Standard 
 3. ATR/pivot causality: append extreme future volatility and prove earlier pivot thresholds and known dates do not change; a missing ATR at a candidate pivot must not be backfilled from later rows.
 4. Segmentation: no event anchors, confirmation, retest or target can cross a data break.
 5. Daily and weekly independence; no incomplete weekly preview creates a formal event.
-6. User's ten submitted examples are loaded as calibration labels, not as proof of strategy performance. `N` means no active candidate from any of the 12 book patterns at the labeled cutoff; terminal historical shapes do not count. Apply explicit user corrections from the separate clarification file without overwriting the original answer file. Keep user labels separate from machine self-evaluation; report disagreements for review.
+6. User's ten submitted examples are loaded as calibration labels, not as proof of strategy performance. `N` means no active candidate from any of the ten rules in the label's rule version at the labeled cutoff; terminal historical shapes do not count. Apply explicit user corrections from the separate clarification file without overwriting the original answer file. Keep user labels separate from machine self-evaluation; report disagreements for review.
 7. A head-and-shoulders candidate with a non-positive projected target is rejected just like other pattern families; no pattern candidate or plan is emitted.
 8. Run pattern tests and the full Caisen test suite.
 

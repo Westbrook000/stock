@@ -13,16 +13,19 @@ import pandas as pd
 from .market import aggregate_weekly, default_china_calendar, discover_instruments, load_daily_bars
 
 
+CALIBRATION_PACK_VERSION = "caisen-calibration-v2"
+CALIBRATION_ROUND = "round_03_v15"
+
 _LABELS = (
-    ("W", "W底"), ("S", "破底翻"), ("WS", "W底破底翻"),
+    ("W", "W底"), ("S", "破底翻"),
     ("BF+", "下飘旗形上涨中继"), ("IHS", "头肩底"), ("TB", "收敛三角形底部"),
-    ("M", "M头"), ("FB", "假突破"), ("FBHS", "假突破（头肩顶）"),
+    ("M", "M头"), ("FB", "假突破"),
     ("BF-", "上飘旗形下跌中继"), ("HS", "头肩顶"), ("TT", "收敛三角形头部"),
     ("N", "没有任何书本形态"),
 )
 
 
-def render_review_html(cases, seed=0):
+def render_review_html(cases, seed=0, engine_version="caisen-v15", source_rule_version="caisen-rules-v6"):
     """Render an answer-ready HTML chart questionnaire without machine predictions."""
     payload = []
     for case in cases:
@@ -48,7 +51,19 @@ def render_review_html(cases, seed=0):
         '<span><b>%s</b> %s</span>' % (html.escape(code), html.escape(name))
         for code, name in _LABELS
     )
-    return _HTML.replace("__SEED__", str(int(seed))).replace("__LEGEND__", legend).replace("__CASES__", serialized)
+    answer_metadata = {
+        "calibration_round": CALIBRATION_ROUND,
+        "calibration_pack_version": CALIBRATION_PACK_VERSION,
+        "engine_version": str(engine_version),
+        "source_rule_version": str(source_rule_version),
+        "active_pattern_codes": [code for code, _name in _LABELS if code != "N"],
+    }
+    metadata_json = json.dumps(answer_metadata, ensure_ascii=False, separators=(",", ":"))
+    metadata_json = metadata_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return (_HTML.replace("__SEED__", str(int(seed)))
+            .replace("__LEGEND__", legend)
+            .replace("__CASES__", serialized)
+            .replace("__ANSWER_METADATA__", metadata_json))
 
 
 def stratified_quotas(count, seed=0):
@@ -143,13 +158,14 @@ _HTML = r'''<!doctype html>
 <div class="legend">__LEGEND__</div><p class="foot">行情来自当前本地 CSV；抽样不依赖机器提名，因此可能发现漏识别，但本轮小样本不能估计总体准确率。当前快照回放不代表当时的未复权行情。</p>
 <div class="toolbar"><button id="download">下载标注 JSON</button><button class="secondary" id="save">保存到此浏览器</button><button class="secondary" id="clear">清空作答</button><span id="status" class="foot"></span></div></header><div id="cases"></div></main>
 <script type="application/json" id="case-data">__CASES__</script><script>
-const cases=JSON.parse(document.getElementById('case-data').textContent),key='caisen-blind-review-v1-'+__SEED__,root=document.getElementById('cases');
+const cases=JSON.parse(document.getElementById('case-data').textContent),key='caisen-blind-review-v2-'+__SEED__,root=document.getElementById('cases');
 const labels=__LABEL_CODES__;
+const answerMetadata=__ANSWER_METADATA__;
 document.getElementById('count').textContent=cases.length;
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function card(c,i){let id='case-'+i;return `<section class="case" id="${id}"><div class="casehead"><h2>第 ${i+1} 题 · ${esc(c.code)} ${esc(c.name)}</h2><span>${c.kind==='stock'?'股票':'ETF'} · ${c.timeframe==='1d'?'日线':'周线'} 截至 ${esc(c.asof)} · ${c.bars.length} 根</span></div><svg class="chart" viewBox="0 0 1000 390" role="img" aria-label="${esc(c.code)} K线和成交量"></svg><p class="prompt">形态类别（单选；复合结构请在备注补充次级形态）</p><div class="options">${labels.map(([v,n])=>`<label class="option"><input type="radio" name="p${i}" value="${esc(v)}"><span><b>${esc(v)}</b> ${esc(n)}</span></label>`).join('')}</div><label class="state-row">确认状态<select name="s${i}"><option value="">请选择</option><option value="forming">形成中 / 未确认</option><option value="confirmed">已确认</option><option value="none">无形态（N）</option></select></label><textarea class="note" placeholder="可选：关键高低点、颈线、确认/失效依据或复合形态"></textarea></section>`}
 function draw(svg,bars){if(!bars.length){svg.innerHTML='<text x="30" y="40">无可用行情</text>';return}const W=1000,H=390,L=60,R=24,T=18,PH=250,VH=75,base=T+PH+18,lo=Math.min(...bars.map(x=>x.low)),hi=Math.max(...bars.map(x=>x.high)),pad=(hi-lo)*.05||1,min=lo-pad,max=hi+pad,mv=Math.max(...bars.map(x=>x.volume))||1,step=(W-L-R)/bars.length,cw=Math.max(1,step*.58);let out=[];out.push(`<text x="5" y="20" font-size="13">收盘价</text><text x="5" y="${base+VH-4}" font-size="13">成交量</text>`);for(let k=0;k<5;k++){let val=max-(max-min)*k/4,y=T+PH*k/4;out.push(`<line x1="${L}" y1="${y}" x2="${W-R}" y2="${y}" stroke="#e4e9ef"/><text x="4" y="${y+4}" font-size="11" fill="#657487">${val.toFixed(2)}</text>`)}bars.forEach((b,j)=>{let x=L+j*step+step/2,py=p=>T+(max-p)/(max-min)*PH,up=b.close>=b.open,color=up?'#d34a4a':'#16866c',y1=py(b.high),y2=py(b.low),yo=py(b.open),yc=py(b.close),vh=b.volume/mv*VH;out.push(`<line x1="${x}" y1="${y1}" x2="${x}" y2="${y2}" stroke="${color}"/><rect x="${x-cw/2}" y="${Math.min(yo,yc)}" width="${cw}" height="${Math.max(1,Math.abs(yc-yo))}" fill="${color}"/><rect x="${x-cw/2}" y="${base+VH-vh}" width="${cw}" height="${Math.max(1,vh)}" fill="${color}" opacity=".55"/>`)});for(let j=0;j<5;j++){let i=Math.round(j*(bars.length-1)/4),x=L+i*step;out.push(`<text x="${x}" y="${H-5}" text-anchor="middle" font-size="11" fill="#657487">${bars[i].date}</text>`)}svg.innerHTML=out.join('')}
-function answer(){const out={};cases.forEach((c,i)=>{const choice=document.querySelector(`input[name="p${i}"]:checked`),state=document.querySelector(`[name="s${i}"]`).value;out[c.case_id]={code:c.code,name:c.name,asof:c.asof,pattern:choice?.value||'',state:choice?.value==='N'?'none':state,note:document.querySelector(`#case-${i} .note`).value}});return out}
+function answer(){const out={_meta:answerMetadata};cases.forEach((c,i)=>{const choice=document.querySelector(`input[name="p${i}"]:checked`),state=document.querySelector(`[name="s${i}"]`).value;out[c.case_id]={code:c.code,name:c.name,asof:c.asof,kind:c.kind,timeframe:c.timeframe,pattern:choice?.value||'',state:choice?.value==='N'?'none':state,note:document.querySelector(`#case-${i} .note`).value}});return out}
 function save(){localStorage.setItem(key,JSON.stringify(answer()));document.getElementById('status').textContent='已保存';return answer()}
 document.getElementById('download').onclick=()=>{const answers=answer(),incomplete=cases.filter((c,i)=>!answers[c.case_id].pattern||(answers[c.case_id].pattern!=='N'&&!answers[c.case_id].state));if(incomplete.length){alert('还有 '+incomplete.length+' 题未完成，补齐形态和确认状态后再导出。');return}const blob=new Blob([JSON.stringify(save(),null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='caisen-blind-labels-'+__SEED__+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
 document.getElementById('save').onclick=save;document.getElementById('clear').onclick=()=>{localStorage.removeItem(key);location.reload()};

@@ -44,6 +44,23 @@ def test_review_html_shows_price_volume_but_hides_machine_labels_and_exports_ans
     assert "blind-001" in html
 
 
+def test_new_review_pack_only_exposes_active_ten_patterns_and_versions_answers():
+    html = render_review_html([
+        {"case_id": "blind-001", "code": "000001", "kind": "stock", "timeframe": "1d",
+         "asof": "2026-10-23", "bars": []}
+    ], seed=42)
+
+    assert '"calibration_round":"round_03_v15"' in html
+    assert '"calibration_pack_version":"caisen-calibration-v2"' in html
+    assert '"engine_version":"caisen-v15"' in html
+    assert '"source_rule_version":"caisen-rules-v6"' in html
+    assert '"active_pattern_codes":["W","S","BF+","IHS","TB","M","FB","BF-","HS","TT"]' in html
+    assert "W底破底翻" not in html
+    assert "假突破（头肩顶）" not in html
+    assert '"WS"' not in html
+    assert '"FBHS"' not in html
+
+
 def test_review_html_escapes_untrusted_case_metadata():
     html = render_review_html([
         {

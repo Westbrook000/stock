@@ -13,9 +13,9 @@ from caisen.calibration_pack import build_blind_cases, render_review_html
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--count", type=int, default=20, help="number of charts to sample (default: 20)")
-    parser.add_argument("--seed", type=int, default=20261025, help="fixed random seed for reproducible sampling")
-    parser.add_argument("--output", type=Path, default=PROJECT / "calibration" / "round_02.html")
+    parser.add_argument("--count", type=int, default=10, help="number of charts to sample (default: 10)")
+    parser.add_argument("--seed", type=int, default=20261026, help="fixed random seed for reproducible sampling")
+    parser.add_argument("--output", type=Path, default=PROJECT / "calibration" / "round_03_v15.html")
     args = parser.parse_args(argv)
     cases = build_blind_cases(ROOT, count=args.count, seed=args.seed)
     args.output.parent.mkdir(parents=True, exist_ok=True)

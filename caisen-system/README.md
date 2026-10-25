@@ -21,18 +21,18 @@
 从当前本地 CSV 生成可复现的盲标复核页，不触发联网更新：
 
 ```sh
-.venv/bin/python caisen-system/scripts/create_blind_calibration_round.py --count 10 --seed 20261025
+.venv/bin/python caisen-system/scripts/create_blind_calibration_round.py --count 10 --seed 20261026
 ```
 
-默认写入 `caisen-system/calibration/round_02.html`。页面按股票/ETF、日/周线分层抽样，不展示系统形态提名；完成题目后下载 JSON。将答案保存到 `caisen-system/calibration/labels/round_02.user.json`，再运行：
+默认写入 `caisen-system/calibration/round_03_v15.html`。新问卷只列当前活动十招及 N，导出答案会携带校准轮次、引擎与规则集版本；页面按股票/ETF、日/周线分层抽样，不展示系统形态提名。完成后可保存为 `caisen-system/calibration/labels/round_03_v15.user.json`，再运行：
 
 ```sh
 .venv/bin/python caisen-system/scripts/evaluate_calibration_labels.py \
-  --labels caisen-system/calibration/labels/round_02.user.json \
-  --output caisen-system/calibration/reports/round_02.machine-review.json
+  --labels caisen-system/calibration/labels/round_03_v15.user.json \
+  --output caisen-system/calibration/reports/round_03_v15.machine-review.json
 ```
 
-评估器按答案中的品种和周期重放截至日期的行情。样本不以机器提名为筛选条件，因此可发现漏识别；小样本不能估计总体准确率或策略收益。
+评估器按答案中的品种和周期重放截至日期的行情，报告分别记录标注版本与本次评估版本。round_01/round_02、旧答案与 `round_01_v14` 历史报告不覆盖。样本不以机器提名为筛选条件，因此可发现漏识别；小样本不能估计总体准确率或策略收益。
 
 详情页“更新当前行情”会显式请求单个股票/ETF；市场扫描页“更新全部行情”逐只刷新当前本地库存。更新使用 AkShare，股票拉取前复权日线；ETF 按代码前缀映射沪市 `sh`、深市 `sz`，保存原始日线。对超时、连接中断、HTTP 408/425/429/5xx 最多重试三次，间隔 0.5/1 秒；校验失败不重试，结果与清单记录尝试次数。旧 CSV 原文会先按哈希归档，行情和元数据分步原子提交；元数据提交失败会回滚已替换的行情文件。刷新任务显示成功/失败计数，并记录新旧哈希。2026-10-25 已通过详情页分别真实更新 000001 与 510300：股票从 8,453 根增至 8,458 根，ETF 从 3,495 根增至 3,500 根；两者最新日期都从 2026-10-16 推进到 2026-10-23。两个旧文件的快照和哈希都已核验，保存在 `../data/market_data_versions/snapshots/`。刷新成功不代表企业行动、复权因子或成交量单位已验证。全市场刷新可能被上游限流；分析和扫描本身仍保持离线。
 

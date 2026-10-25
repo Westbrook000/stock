@@ -21,6 +21,12 @@ TERMINAL_STATES = {"invalidated", "target_reached", "followthrough_confirmed"}
 
 def evaluate(labels_path, output_path, clarifications_path=None, root=ROOT):
     labels = load_labels(labels_path, clarifications_path=clarifications_path)
+    label_metadata = ({
+        "calibration_round": labels[0].get("calibration_round"),
+        "calibration_pack_version": labels[0].get("calibration_pack_version"),
+        "label_engine_version": labels[0].get("label_engine_version"),
+        "label_source_rule_version": labels[0].get("label_source_rule_version"),
+    } if labels else {})
     cases = []
     machine = []
     for label in labels:
@@ -66,6 +72,8 @@ def evaluate(labels_path, output_path, clarifications_path=None, root=ROOT):
         "data_basis": "current_local_snapshot_truncated_to_user_asof",
         "rule_version": RULE_VERSION,
         "source_rule_version": load_rule_catalog()["rule_set_version"],
+        "label_metadata": label_metadata,
+        "version_comparison": "label provenance and evaluation rules are stored separately; reports are not pooled across rounds or rule versions",
         "interpretation": "manual_review_required_not_accuracy_or_return_validation",
         "summary": report,
         "cases": cases,
@@ -80,7 +88,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels", type=Path, default=PROJECT / "calibration" / "labels" / "round_01_v2.user.json")
     parser.add_argument("--clarifications", type=Path)
-    parser.add_argument("--output", type=Path, default=PROJECT / "calibration" / "reports" / "round_01_v14.machine-review.json")
+    parser.add_argument("--output", type=Path, default=PROJECT / "calibration" / "reports" / "round_01_v15.machine-review.json")
     args = parser.parse_args()
     labels_file = args.labels
     clarifications_file = args.clarifications

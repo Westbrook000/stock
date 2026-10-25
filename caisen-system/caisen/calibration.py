@@ -34,8 +34,21 @@ def load_labels(path, clarifications_path=None):
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("calibration answers must be an object keyed by case ID")
+    metadata = payload.get("_meta", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("calibration _meta must be an object")
+    metadata = dict(metadata)
+    if not metadata and Path(path).name == "round_01_v2.user.json":
+        metadata.update({
+            "calibration_round": "round_01_v2",
+            "calibration_pack_version": "legacy-v1",
+            "engine_version": "caisen-v14",
+            "source_rule_version": "caisen-rules-v5",
+        })
     labels = []
     for case_id, raw in payload.items():
+        if case_id == "_meta":
+            continue
         if not isinstance(raw, dict):
             raise ValueError("case %s must be an object" % case_id)
         code = raw.get("pattern")
@@ -64,6 +77,10 @@ def load_labels(path, clarifications_path=None):
             "display_label": display,
             "note": raw.get("note", ""),
             "label_source": "user",
+            "calibration_round": metadata.get("calibration_round", "legacy_unversioned"),
+            "calibration_pack_version": metadata.get("calibration_pack_version"),
+            "label_engine_version": metadata.get("engine_version"),
+            "label_source_rule_version": metadata.get("source_rule_version"),
         })
     if clarifications_path is not None:
         clarifications = json.loads(Path(clarifications_path).read_text(encoding="utf-8"))
@@ -139,7 +156,7 @@ def compare_labels(labels, machine_patterns):
         "state_agreement": state_agreement,
         "state_total": state_total,
         "disagreements": disagreements,
-        "none_label_semantics": "截至标注日期，蔡森原书十二招均无成立中的形态；仅已终止的历史形态不构成当前候选。",
+        "none_label_semantics": "截至标注日期，当前活动十招均无成立中的形态；仅已终止的历史形态不构成当前候选。旧轮退役复合形态标签仍按其记录的旧规则版本读取。",
         "state_comparison_semantics": "用户的 confirmed 表示形态曾满足价格确认条件；目标已达、后续确认或确认后失效仍按已确认比较。forming 只匹配截止日仍处于形成中的候选。",
         "interpretation": "calibration_disagreements_only",
     }

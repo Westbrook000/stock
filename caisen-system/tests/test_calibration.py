@@ -1,5 +1,8 @@
 import json
+import importlib.util
 from pathlib import Path
+
+import pandas as pd
 
 from caisen.calibration import load_labels, compare_labels
 
@@ -50,7 +53,7 @@ def test_comparison_reports_machine_disagreements_without_claiming_accuracy():
     assert report["state_agreement"] == 0
     assert report["state_total"] == 1
     assert report["disagreements"][0]["field"] == "state"
-    assert "十二招均无成立中的形态" in report["none_label_semantics"]
+    assert "当前活动十招均无成立中的形态" in report["none_label_semantics"]
     assert report["interpretation"] == "calibration_disagreements_only"
 
 
@@ -105,6 +108,54 @@ def test_imported_round_two_has_ten_user_labels_and_forming_examples():
     assert labels[2]["display_label"] == "W底，未确认"
 
 
+def test_round_one_metadata_is_resolved_without_changing_the_source_labels():
+    path = Path(__file__).parents[1] / "calibration" / "labels" / "round_01_v2.user.json"
+
+    labels = load_labels(path)
+
+    assert all(label["calibration_round"] == "round_01_v2" for label in labels)
+    assert all(label["label_engine_version"] == "caisen-v14" for label in labels)
+    assert all(label["label_source_rule_version"] == "caisen-rules-v5" for label in labels)
+
+
+def test_historical_v14_report_keeps_its_original_rule_versions():
+    path = Path(__file__).parents[1] / "calibration" / "reports" / "round_01_v14.machine-review.json"
+    report = json.loads(path.read_text(encoding="utf-8"))
+
+    assert report["rule_version"] == "caisen-v14"
+    assert report["source_rule_version"] == "caisen-rules-v5"
+
+
+def test_new_evaluation_report_keeps_label_and_engine_versions_separate(tmp_path, monkeypatch):
+    script = Path(__file__).parents[1] / "scripts" / "evaluate_calibration_labels.py"
+    spec = importlib.util.spec_from_file_location("caisen_evaluator_test", script)
+    evaluator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluator)
+    labels_path = tmp_path / "answers.json"
+    labels_path.write_text(json.dumps({
+        "_meta": {"calibration_round": "round_02", "calibration_pack_version": "legacy-v1",
+                  "engine_version": "caisen-v14", "source_rule_version": "caisen-rules-v5"},
+        "case-1": {"code": "000001", "pattern": "W", "state": "forming", "asof": "2026-10-23"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(evaluator, "load_local_history", lambda code, kind, root: pd.DataFrame({
+        "date": [pd.Timestamp("2026-10-23")],
+    }))
+    monkeypatch.setattr(evaluator, "detect_patterns", lambda *args, **kwargs: [])
+    monkeypatch.setattr(evaluator, "current_pattern_snapshot", lambda patterns: [])
+    output = tmp_path / "round_02_v15.machine-review.json"
+
+    report = evaluator.evaluate(labels_path, output, root=tmp_path)
+
+    assert report["rule_version"] == "caisen-v15"
+    assert report["source_rule_version"] == "caisen-rules-v6"
+    assert report["label_metadata"] == {
+        "calibration_round": "round_02", "calibration_pack_version": "legacy-v1",
+        "label_engine_version": "caisen-v14", "label_source_rule_version": "caisen-rules-v5",
+    }
+    assert "not pooled across rounds" in report["version_comparison"]
+    assert json.loads(output.read_text(encoding="utf-8")) == report
+
+
 def test_round_labels_preserve_instrument_kind_and_timeframe(tmp_path):
     path = tmp_path / "answers.json"
     path.write_text(json.dumps({
@@ -116,6 +167,23 @@ def test_round_labels_preserve_instrument_kind_and_timeframe(tmp_path):
 
     assert label["kind"] == "etf"
     assert label["timeframe"] == "1w"
+
+
+def test_legacy_composite_labels_remain_readable_with_their_version_metadata(tmp_path):
+    path = tmp_path / "legacy-answers.json"
+    path.write_text(json.dumps({
+        "_meta": {"calibration_round": "round_02", "engine_version": "caisen-v14",
+                  "source_rule_version": "caisen-rules-v5"},
+        "legacy-ws": {"code": "000001", "pattern": "WS", "state": "forming"},
+        "legacy-fbhs": {"code": "000002", "pattern": "FBHS", "state": "confirmed"},
+    }), encoding="utf-8")
+
+    labels = load_labels(path)
+
+    assert [label["pattern_type"] for label in labels] == ["w_bottom_spring", "false_breakout_head_shoulders"]
+    assert all(label["label_engine_version"] == "caisen-v14" for label in labels)
+    assert all(label["label_source_rule_version"] == "caisen-rules-v5" for label in labels)
+    assert all(label["calibration_round"] == "round_02" for label in labels)
 
 
 def test_comparison_does_not_match_same_code_pattern_from_another_timeframe():

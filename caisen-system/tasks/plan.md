@@ -446,6 +446,7 @@ market-data ──────────────────────�
 - Dependencies：Task 1。
 - Files likely touched：`caisen/calibration.py`、`caisen/calibration_pack.py`、`tests/test_calibration.py`、`tests/test_calibration_pack.py`、新增版本化校准 HTML/报告。
 - Estimated scope：Medium。
+- Status：Implementation complete. Generated `calibration/round_03_v15.html` with only the active ten labels plus N and versioned answer metadata; legacy WS/FBHS remain readable. Existing `round_01_v14` remains `caisen-v14` / `caisen-rules-v5`; new `round_01_v15.machine-review.json` records v15/rules-v6 separately and labels the legacy round/version provenance. The new round's user-label comparison remains pending until answers are supplied.
 
 **Task 7：本地运行与端到端验收**
 

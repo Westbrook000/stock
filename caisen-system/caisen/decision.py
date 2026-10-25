@@ -18,6 +18,13 @@ def _value(pattern, field, default=None):
     return getattr(pattern, field, default)
 
 
+def _evidence_value(pattern, code):
+    for item in (_value(pattern, "evidence", []) or []):
+        if isinstance(item, dict) and item.get("code") == code:
+            return item.get("value")
+    return None
+
+
 def _to_dict(pattern):
     return pattern.to_dict() if hasattr(pattern, "to_dict") else dict(pattern)
 
@@ -73,6 +80,20 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
     conflict = bullish_present and bearish_present
     confirmed_timeframes = sum(bool(directions[tf]) for tf in timeframes)
 
+    waiting_for_breakout = any(
+        _value(pattern, "pattern_type") in BUY_CANDIDATE_PATTERN_TYPES
+        and _value(pattern, "direction") == "bullish"
+        and _value(pattern, "state") == "forming"
+        for pattern in active_patterns
+    )
+    bull_flag_target_locked = any(
+        _value(pattern, "pattern_type") == "bull_flag"
+        and _value(pattern, "direction") == "bullish"
+        and _value(pattern, "state") == "confirmed"
+        and _evidence_value(pattern, "measured_target_locked") is True
+        for pattern in active_patterns
+    )
+
     plans = []
     for tf in timeframes:
         price = prices_by_timeframe.get(tf)
@@ -82,6 +103,9 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
             if (_value(pattern, "pattern_type") not in BUY_CANDIDATE_PATTERN_TYPES
                     or _value(pattern, "direction") != "bullish"
                     or _value(pattern, "state") != "confirmed"):
+                continue
+            if (_value(pattern, "pattern_type") == "bull_flag"
+                    and _evidence_value(pattern, "measured_target_locked") is True):
                 continue
             if "manual_review_required" in (_value(pattern, "flags", []) or []):
                 continue
@@ -112,10 +136,22 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
     elif plans:
         action = "WAIT"
         reasons = sorted({reason for plan in plans for reason in plan.get("reason_codes", [])}) or ["buy_gates_not_met"]
+        if waiting_for_breakout:
+            reasons.append("pattern_waiting_for_breakout")
+        if bull_flag_target_locked:
+            reasons.append("bull_flag_target_locked")
+        reasons = list(dict.fromkeys(reasons))
     elif active_patterns:
         manual_review = any("manual_review_required" in (_value(p, "flags", []) or [])
                             for p in active_patterns)
-        action, reasons = "WAIT", ["pattern_requires_manual_review" if manual_review else "no_confirmed_actionable_pattern"]
+        reasons = ["pattern_requires_manual_review"] if manual_review else []
+        if waiting_for_breakout:
+            reasons.append("pattern_waiting_for_breakout")
+        if bull_flag_target_locked:
+            reasons.append("bull_flag_target_locked")
+        action = "WAIT"
+        if not reasons:
+            reasons = ["no_confirmed_actionable_pattern"]
     else:
         action, reasons = "WAIT", ["no_current_pattern"]
 
@@ -189,6 +225,8 @@ def _explain(action, reasons):
         "timeframe_direction_conflict": "日线与周线确认方向冲突，请分别复核。",
         "pattern_requires_manual_review": "多个候选形态共用结构点，需人工复核。",
         "no_confirmed_actionable_pattern": "当前没有通过确认与交易空间检查的形态。",
+        "pattern_waiting_for_breakout": "形态已成型，等待颈线或结构边界收盘突破。",
+        "bull_flag_target_locked": "旗形边界已突破，但前高尚未收盘突破，测幅目标未解锁。",
         "no_current_pattern": "当前周期没有识别到有效形态。",
         "confirmed_bearish_structure_sell_warning_if_held": "已确认顶部或空头结构；如有持仓，请复核退出计划。",
         "bullish_structure_exists_without_new_entry": "存在多头结构，但当前没有新的入场信号。",

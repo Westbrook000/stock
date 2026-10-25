@@ -104,6 +104,37 @@ def test_forming_pattern_waits_and_keeps_w_bottom_unconfirmed_label():
 
     assert result["action"] == "WAIT"
     assert result["patterns"][0]["display_label"] == "W底，未确认"
+    assert "pattern_waiting_for_breakout" in result["reason_codes"]
+    assert result["candidate_plans"] == []
+
+
+def test_each_buy_candidate_stays_visible_and_waits_before_its_confirmation_breakout():
+    for pattern_type in ("w_bottom", "inverse_head_shoulders", "bull_flag", "triangle_bottom"):
+        result = synthesize_decision(
+            "000001", "stock", {"1d": [pattern(pattern_type, state="forming")]},
+            {"1d": 10.0}, {"1d": "usable"},
+        )
+
+        assert result["action"] == "WAIT", pattern_type
+        assert result["reason_codes"] == ["pattern_waiting_for_breakout"], pattern_type
+        assert result["candidate_plans"] == [], pattern_type
+        assert result["patterns"][0]["state"] == "forming", pattern_type
+        assert "未确认" in result["patterns"][0]["display_label"], pattern_type
+
+
+def test_bull_flag_boundary_break_waits_until_prior_high_unlocks_target():
+    locked_flag = pattern(
+        "bull_flag", volume_verified=True, execution_rules_verified=True,
+        evidence=[{"code": "measured_target_locked", "value": True}],
+    )
+    result = synthesize_decision(
+        "000001", "stock", {"1d": [locked_flag]},
+        {"1d": 10.0}, {"1d": "usable"},
+    )
+
+    assert result["action"] == "WAIT"
+    assert result["candidate_plans"] == []
+    assert "bull_flag_target_locked" in result["reason_codes"]
 
 
 def test_confirmed_timeframe_conflict_waits_and_names_both_directions():

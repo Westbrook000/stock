@@ -459,6 +459,7 @@ market-data ──────────────────────�
 - Dependencies：Tasks 1–6。
 - Files likely touched：测试/验收报告/必要的静态版本号。
 - Estimated scope：Medium。
+- Status：Partial. Full Caisen suite (161 tests), Node filter tests (4), app/filter/new questionnaire JavaScript syntax checks all pass. On isolated port 8302 with temporary SQLite, a 3-symbol scan completed 3/3; buy-only zero-result state, WAIT + W-bottom intersection, ordering/counts, and navigation to a forming W-bottom detail all passed. A repeat full-market scan was stopped at 90/5,294 after about two minutes because this implementation processes symbols sequentially; the user's 8301 service and refresh task remained untouched. Current v15 full-market rerun is therefore not verified in this turn.
 
 ### Checkpoint 3：用户流程验收
 

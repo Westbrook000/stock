@@ -9,6 +9,14 @@ from caisen.pivots import detect_pivots
 from caisen.schemas import Pattern, Pivot
 
 
+def test_new_pattern_defaults_use_current_app_and_source_rule_versions():
+    pattern = Pattern("id", "000001", "stock", "1d", "w_bottom", "bullish",
+                      "forming", "2026-01-01", None)
+
+    assert pattern.rule_version == "caisen-v15"
+    assert pattern.source_rule_version == "caisen-rules-v6"
+
+
 def swing_frame(points, spacing=5):
     closes = []
     for left, right in zip(points, points[1:]):

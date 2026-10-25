@@ -37,6 +37,30 @@ def test_confirmed_bullish_plan_becomes_candidate_with_zero_cost_and_warnings():
     assert "probability" not in result
 
 
+def test_only_four_approved_bullish_shapes_can_create_buy_plans():
+    allowed = ("w_bottom", "inverse_head_shoulders", "bull_flag", "triangle_bottom")
+    excluded = ("spring", "bear_flag", "m_top", "false_breakout", "head_shoulders", "triangle_top")
+
+    for pattern_type in allowed:
+        candidate = pattern(pattern_type, volume_verified=True, execution_rules_verified=True)
+        result = synthesize_decision(
+            "000001", "stock", {"1d": [candidate], "1w": []},
+            {"1d": 10.0}, {"1d": "usable", "1w": "insufficient"},
+        )
+        assert result["selected_plan"]["decision"] == "CONSIDER_BUY", pattern_type
+
+    for pattern_type in excluded:
+        candidate = pattern(pattern_type, direction="bullish", volume_verified=True,
+                            execution_rules_verified=True)
+        result = synthesize_decision(
+            "000001", "stock", {"1d": [candidate], "1w": []},
+            {"1d": 10.0}, {"1d": "usable", "1w": "insufficient"},
+        )
+        assert result["action"] == "WAIT", pattern_type
+        assert result["candidate_plans"] == [], pattern_type
+        assert any(item["pattern_type"] == pattern_type for item in result["patterns"])
+
+
 def test_target_reached_shape_is_visible_but_not_actionable():
     result = synthesize_decision(
         "000001", "stock", {"1d": [pattern(state="target_reached")], "1w": []},

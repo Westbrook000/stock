@@ -7,6 +7,9 @@ from .plans import build_trade_plan
 
 
 _ACTION_ORDER = {"CONSIDER_BUY": 0, "WAIT": 1, "HOLD": 2, "SELL_IF_HELD": 3, "INSUFFICIENT_DATA": 4}
+BUY_CANDIDATE_PATTERN_TYPES = frozenset({
+    "w_bottom", "inverse_head_shoulders", "bull_flag", "triangle_bottom",
+})
 
 
 def _value(pattern, field, default=None):
@@ -76,7 +79,9 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         if price is None:
             continue
         for pattern in patterns_by_timeframe.get(tf, []):
-            if _value(pattern, "direction") != "bullish" or _value(pattern, "state") != "confirmed":
+            if (_value(pattern, "pattern_type") not in BUY_CANDIDATE_PATTERN_TYPES
+                    or _value(pattern, "direction") != "bullish"
+                    or _value(pattern, "state") != "confirmed"):
                 continue
             if "manual_review_required" in (_value(pattern, "flags", []) or []):
                 continue

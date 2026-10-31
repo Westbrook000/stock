@@ -1,6 +1,6 @@
 # Module Specification: decision-engine
 
-Status: approved for implementation under the user's 2026-10-24 instruction to continue the build automatically.
+Status: Base scope approved for implementation under the user's 2026-10-24 instruction to continue the build automatically. Amendment approved by the user on 2026-10-27; implementation authorized.
 
 ## User outcome
 
@@ -53,4 +53,4 @@ Expose every input key and rejection reason. Do not expose an opaque score or ca
 
 ## Limits
 
-These are screening rules, not proven investment advice or profitable strategy evidence. The user's ten labels inform pattern calibration only; they do not tune expected returns or ranking weights. Strategy-effectiveness testing remains deferred.
+These are screening rules, not proven investment advice or profitable strategy evidence. Human pattern calibration tools and labels are being retired; no accuracy estimate is claimed. Strategy-effectiveness testing remains deferred.

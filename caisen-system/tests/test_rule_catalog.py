@@ -23,7 +23,7 @@ def test_catalog_covers_exactly_ten_active_pattern_ids_with_verified_sources():
     assert set(rules) == ACTIVE_PATTERN_IDS
     assert set(rules) == set(BOOK_PATTERNS)
     assert len(rules) == 10
-    assert catalog["rule_set_version"] == "caisen-rules-v6"
+    assert catalog["rule_set_version"] == "caisen-rules-v7"
     assert len(rules) == len(catalog["patterns"])
     for rule in rules.values():
         assert rule["rule_set_version"] == catalog["rule_set_version"]

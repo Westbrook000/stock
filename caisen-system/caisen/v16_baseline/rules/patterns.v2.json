@@ -1,0 +1,622 @@
+{
+  "rule_set_version": "caisen-rules-v7",
+  "patterns": [
+    {
+      "rule_id": "w_bottom",
+      "name": "W底涨幅满足计算",
+      "aliases": [
+        "W底",
+        "双底"
+      ],
+      "direction": "bullish",
+      "audit_status": "included",
+      "topology": "两个摆动低点由一个中间反弹高点分隔，颈线可按结构锚点表示。",
+      "lifecycle": {
+        "forming": [
+          "出现两个低点和其间反弹高点；第二低点可先作为未确认候选。"
+        ],
+        "confirmed_by": "收盘突破按当时已知锚点冻结的颈线。",
+        "invalidated_by": "形成中跌破第二底结构，或确认后重新收盘跌回颈线下方。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "neckline_height_projection",
+          "description": "以颈线与双底代表高度的距离，从颈线突破位置等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "break_price": 18,
+              "neckline": 19,
+              "structure_extreme": 14
+            },
+            "expected_target": 23
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "pivot_tolerance",
+          "status": "engineering_initial",
+          "value": null
+        },
+        {
+          "name": "max_leg_duration_ratio",
+          "status": "fixed_engineering",
+          "value": 2.5,
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
+        },
+        {
+          "name": "max_trough_gap_ratio",
+          "status": "fixed_engineering",
+          "value": 0.15,
+          "rationale": "底部间距超过较高底部的15%时拒绝W底候选；固定工程阈值，不是原书参数或准确率结论。"
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 3,
+          "pdf_page": 18,
+          "figure": "计算方式与操作示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "spring",
+      "name": "破底翻",
+      "aliases": [
+        "破底翻多头买进信号"
+      ],
+      "direction": "bullish",
+      "audit_status": "included",
+      "topology": "既有整理区下缘被向下跌破，之后价格收复箱体下缘；箱体上缘仍是后续边界。",
+      "lifecycle": {
+        "forming": [
+          "先建立可定位的整理箱体。",
+          "价格向下越过箱体下缘但尚未收复。"
+        ],
+        "confirmed_by": "收盘重新回到原整理区内；突破箱体上缘作为更强的后续确认事件单独记录。",
+        "invalidated_by": "收复前继续破坏结构低点，或收复后再收盘跌破箱体下缘。",
+        "followthrough_confirmed_by": "收复后收盘突破箱体上缘；事件转入历史状态，不再作为当前候选。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [],
+      "engineering_parameters": [
+        {
+          "name": "box_detection",
+          "status": "engineering_initial",
+          "value": {
+            "alternating_boundary_touches": 4,
+            "minimum_span_bars": 10,
+            "boundary_tolerance": "max(0.5 ATR, 5% of midpoint)",
+            "maximum_width": "6 ATR",
+            "minimum_in_box_close_ratio": 0.8,
+            "reclaim_window_bars": 20
+          }
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 5,
+          "pdf_page": 20,
+          "figure": "破底翻整理区示例及操作方式",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "bull_flag",
+      "name": "下飘旗形上涨中继",
+      "aliases": [
+        "下飘旗形",
+        "波段涨幅满足计算"
+      ],
+      "direction": "bullish",
+      "audit_status": "included",
+      "topology": "上涨推动波之后出现逆势回档整理，随后向上突破旗面边界并越过前高。",
+      "lifecycle": {
+        "forming": [
+          "先有可识别的上涨推动波，之后形成逆势整理旗面。",
+          "向上越过旗面边界但尚未突破前高。"
+        ],
+        "confirmed_by": "收盘突破旗面向上边界确认结构；只有收盘突破前一推动波前高时才解锁等幅测幅目标。",
+        "invalidated_by": "收盘有效跌破旗面下缘或推动结构失效。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "first_wave_projection",
+          "description": "第一推动波涨幅从整理后的回档低点向上等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "first_wave_high": 35,
+              "first_wave_low": 20,
+              "retracement_point": 30
+            },
+            "expected_target": 45
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "confirmed_swing_points",
+          "status": "engineering_initial",
+          "value": 5
+        },
+        {
+          "name": "search_window_bars",
+          "status": "engineering_initial",
+          "value": 500
+        },
+        {
+          "name": "pivot_atr_multiple",
+          "status": "engineering_initial",
+          "value": 1.5
+        },
+        {
+          "name": "minimum_impulse_bars",
+          "status": "engineering_initial",
+          "value": 4
+        },
+        {
+          "name": "countertrend_correction_ratio",
+          "status": "engineering_initial",
+          "value": [
+            0.12,
+            0.5
+          ]
+        },
+        {
+          "name": "flag_range_max_vs_impulse",
+          "status": "engineering_initial",
+          "value": 0.6
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 15,
+          "pdf_page": 30,
+          "figure": "波段涨幅满足计算及突破前高操作示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "bear_flag",
+      "name": "上飘旗形下跌中继",
+      "aliases": [
+        "上飘旗形",
+        "波段跌幅满足计算"
+      ],
+      "direction": "bearish",
+      "audit_status": "included",
+      "topology": "下跌推动波之后出现逆势上飘整理，随后向下突破旗面边界并跌破前低。",
+      "lifecycle": {
+        "forming": [
+          "先有可识别的下跌推动波，之后形成逆势整理旗面。",
+          "向下越过旗面边界但尚未跌破前低。"
+        ],
+        "confirmed_by": "收盘突破旗面向下边界确认结构；只有收盘突破前一推动波前低时才解锁等幅测幅目标。",
+        "invalidated_by": "收盘有效站上旗面上缘或推动结构失效。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "first_wave_projection",
+          "description": "第一推动波跌幅从整理后的反弹高点向下等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "first_wave_high": 35,
+              "first_wave_low": 20,
+              "retracement_point": 30
+            },
+            "expected_target": 15
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "confirmed_swing_points",
+          "status": "engineering_initial",
+          "value": 5
+        },
+        {
+          "name": "search_window_bars",
+          "status": "engineering_initial",
+          "value": 500
+        },
+        {
+          "name": "pivot_atr_multiple",
+          "status": "engineering_initial",
+          "value": 1.5
+        },
+        {
+          "name": "minimum_impulse_bars",
+          "status": "engineering_initial",
+          "value": 4
+        },
+        {
+          "name": "countertrend_correction_ratio",
+          "status": "engineering_initial",
+          "value": [
+            0.12,
+            0.5
+          ]
+        },
+        {
+          "name": "flag_range_max_vs_impulse",
+          "status": "engineering_initial",
+          "value": 0.6
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 25,
+          "pdf_page": 40,
+          "figure": "上飘旗形形态及波段跌幅章节",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "m_top",
+      "name": "M头跌幅满足计算",
+      "aliases": [
+        "M头"
+      ],
+      "direction": "bearish",
+      "audit_status": "included",
+      "topology": "两个摆动高点由一个中间回落低点分隔，形成可定位颈线。",
+      "lifecycle": {
+        "forming": [
+          "出现两个顶部及其间回落低点。"
+        ],
+        "confirmed_by": "收盘跌破由结构锚点冻结的颈线。",
+        "invalidated_by": "形成中突破结构高点，或确认后重新收盘站回颈线上方。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "head_neckline_projection",
+          "description": "头部代表高度至颈线的距离从颈线跌破处向下等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "head": 105,
+              "neckline": 80,
+              "break_price": 80
+            },
+            "expected_target": 55
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "pivot_tolerance",
+          "status": "engineering_initial",
+          "value": null
+        },
+        {
+          "name": "max_leg_duration_ratio",
+          "status": "fixed_engineering",
+          "value": 2.5,
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 33,
+          "pdf_page": 48,
+          "figure": "M头跌幅计算与操作示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "false_breakout",
+      "name": "假突破",
+      "aliases": [
+        "整理区上破后收回"
+      ],
+      "direction": "bearish",
+      "audit_status": "included",
+      "topology": "既有整理区上缘被向上突破后，价格回落并收回整理区；下缘是后续延续边界。",
+      "lifecycle": {
+        "forming": [
+          "先建立整理箱体。",
+          "上破箱体上缘，等待价格是否收回箱体。"
+        ],
+        "confirmed_by": "收盘回到箱体内确认假突破事件；再跌破箱体下缘作为更完整的空头延续确认单独记录。",
+        "invalidated_by": "再次收盘站上原整理区上缘。",
+        "followthrough_confirmed_by": "收复后收盘跌破箱体下缘；事件转入历史状态，不再作为当前候选。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [],
+      "engineering_parameters": [
+        {
+          "name": "box_detection",
+          "status": "engineering_initial",
+          "value": {
+            "alternating_boundary_touches": 4,
+            "minimum_span_bars": 10,
+            "boundary_tolerance": "max(0.5 ATR, 5% of midpoint)",
+            "maximum_width": "6 ATR",
+            "minimum_in_box_close_ratio": 0.8,
+            "reclaim_window_bars": 20
+          }
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 41,
+          "pdf_page": 56,
+          "figure": "整理区上破收回及下缘跌破示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "head_shoulders",
+      "name": "头肩顶跌幅满足计算",
+      "aliases": [
+        "头肩顶"
+      ],
+      "direction": "bearish",
+      "audit_status": "included",
+      "topology": "左肩、较高的头、右肩及连接两处回落点的颈线组成顶部结构。",
+      "lifecycle": {
+        "forming": [
+          "左肩与更高的头部已出现，右肩仍在形成或尚未确认。"
+        ],
+        "confirmed_by": "收盘跌破按两个颈线锚点冻结的颈线。",
+        "invalidated_by": "形成中突破头部，或确认后重新收盘站回颈线上方。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "head_neckline_projection",
+          "description": "头部至颈线的垂直高度从颈线破位处向下等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "head": 105,
+              "neckline": 80,
+              "break_price": 80
+            },
+            "expected_target": 55
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "shoulder_tolerance",
+          "status": "fixed_engineering",
+          "value": 0.07,
+          "rationale": "双肩差相对头部至颈线高度的比例上限为7%；固定工程阈值，未经统计有效性验证。"
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 61,
+          "pdf_page": 76,
+          "figure": "头肩顶颈线操作示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "inverse_head_shoulders",
+      "name": "头肩底涨幅满足计算",
+      "aliases": [
+        "头肩底"
+      ],
+      "direction": "bullish",
+      "audit_status": "included",
+      "topology": "左肩、较低的头、右肩及连接两处反弹点的颈线组成底部结构。",
+      "lifecycle": {
+        "forming": [
+          "左肩与更低的头部已出现，右肩仍在形成或尚未确认。"
+        ],
+        "confirmed_by": "收盘突破按两个颈线锚点冻结的颈线。",
+        "invalidated_by": "形成中跌破头部，或确认后重新收盘跌回颈线下方。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "head_neckline_projection",
+          "description": "头部至颈线的垂直高度从颈线突破处向上等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "head": 60,
+              "neckline": 65,
+              "break_price": 65
+            },
+            "expected_target": 70
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "shoulder_tolerance",
+          "status": "fixed_engineering",
+          "value": 0.07,
+          "rationale": "双肩差相对头部至颈线高度的比例上限为7%；固定工程阈值，未经统计有效性验证。"
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 75,
+          "pdf_page": 90,
+          "figure": "头肩底颈线操作示意",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "triangle_top",
+      "name": "收敛三角形头部跌幅满足计算",
+      "aliases": [
+        "收敛三角形头部"
+      ],
+      "direction": "bearish",
+      "audit_status": "included",
+      "topology": "下降上边界与上升下边界收敛，形成交替触点；自起点至交点约 1/2–3/4 区间向下破位。",
+      "lifecycle": {
+        "forming": [
+          "上下边界向交点收敛并形成可核对的交替触点。",
+          "突破位置在起点至交点约 1/2–3/4 区间之前仍为待确认候选。"
+        ],
+        "confirmed_by": "在有效区间收盘跌破下边界。",
+        "invalidated_by": "价格重新收盘站回下边界上方，或边界/触点不再构成收敛结构。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "triangle_width_projection",
+          "description": "三角形起始宽度从有效破线位置向下等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "triangle_high": 80,
+              "triangle_low": 60,
+              "break_price": 65
+            },
+            "expected_target": 45
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "touchpoint_and_apex_estimation",
+          "status": "engineering_initial",
+          "value": null
+        },
+        {
+          "name": "max_leg_duration_ratio",
+          "status": "fixed_engineering",
+          "value": 2.5,
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 82,
+          "pdf_page": 97,
+          "figure": "1/2–3/4有效破位示意",
+          "source_status": "verified"
+        },
+        {
+          "printed_page": 83,
+          "pdf_page": 98,
+          "figure": "三角形跌幅计算示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    },
+    {
+      "rule_id": "triangle_bottom",
+      "name": "收敛三角形底部涨幅满足计算",
+      "aliases": [
+        "收敛三角形底部"
+      ],
+      "direction": "bullish",
+      "audit_status": "included",
+      "topology": "下降上边界与上升下边界收敛，形成交替触点；自起点至交点约 1/2–3/4 区间向上突破。",
+      "lifecycle": {
+        "forming": [
+          "上下边界向交点收敛并形成可核对的交替触点。",
+          "突破位置在起点至交点约 1/2–3/4 区间之前仍为待确认候选。"
+        ],
+        "confirmed_by": "在有效区间收盘突破上边界。",
+        "invalidated_by": "价格重新收盘跌回上边界下方，或边界/触点不再构成收敛结构。"
+      },
+      "volume": {
+        "required": [],
+        "supporting": []
+      },
+      "targets": [
+        {
+          "formula_id": "triangle_width_projection",
+          "description": "三角形起始宽度从有效破线位置向上等幅投影。",
+          "available_after": "confirmed",
+          "source_example": {
+            "inputs": {
+              "triangle_high": 55,
+              "triangle_low": 40,
+              "break_price": 50
+            },
+            "expected_target": 65
+          }
+        }
+      ],
+      "engineering_parameters": [
+        {
+          "name": "touchpoint_and_apex_estimation",
+          "status": "engineering_initial",
+          "value": null
+        },
+        {
+          "name": "max_leg_duration_ratio",
+          "status": "fixed_engineering",
+          "value": 2.5,
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
+        }
+      ],
+      "source_refs": [
+        {
+          "printed_page": 90,
+          "pdf_page": 105,
+          "figure": "1/2–3/4有效破位示意",
+          "source_status": "verified"
+        },
+        {
+          "printed_page": 91,
+          "pdf_page": 106,
+          "figure": "三角形涨幅计算示例",
+          "source_status": "verified"
+        }
+      ],
+      "rule_set_version": "caisen-rules-v7"
+    }
+  ]
+}

@@ -21,7 +21,7 @@
         <div class="eyebrow">当前实现说明 · 2026.10</div>
         <h1 class="display">形态如何<br>变成决策</h1>
         <p class="lede">从价格拐点和结构几何出发，再核对突破、量价质量与交易空间。</p>
-        <div class="cover-note"><b>先说明算法性质：</b>当前不是 AI 图像模型，也不预测涨跌概率；它是可解释的 OHLC 规则识别器，扫描原书 12 招并输出复核依据。</div>
+        <div class="cover-note"><b>先说明算法性质：</b>当前不是 AI 图像模型，也不预测涨跌概率；它是可解释的 OHLC 规则识别器，扫描活动十招并输出复核依据。</div>
         <div class="stamp">蔡森量价结构研究系统　/　本地独立运行　/　不连接券商</div>
       </div>
       <svg class="chart-art" viewBox="0 0 500 410" role="img" aria-label="示意K线与W底颈线">
@@ -53,23 +53,22 @@
       <div class="flow-item"><span class="num">02 · 拐点</span><h3>ATR 摆动点</h3><p>14期 ATR；局部高低点需右侧 2 根 K 线确认，并以 2ATR / 3ATR 两组尺度过滤噪声。</p></div>
       <div class="flow-item"><span class="num">03 · 几何</span><h3>匹配拓扑</h3><p>检查 3 点、5 点高低点次序；估计水平/斜颈线、旗形通道和三角边界。</p></div>
       <div class="flow-item"><span class="num">04 · 确认</span><h3>收盘越线</h3><p>候选结构先标“未确认”；普通 W/M 不再自动派生破底翻/假突破，须有真实越界与收复证据。</p></div>
-      <div class="flow-item"><span class="num">05 · 计划</span><h3>交易空间</h3><p>检查结构状态、人工复核标记、数据质量、固定止损和首目标空间。</p></div>
+      <div class="flow-item"><span class="num">05 · 计划</span><h3>交易空间</h3><p>检查结构状态、结构歧义标记、数据质量、固定止损和首目标空间。</p></div>
     </div>
     <div class="two-col">
-      <div class="rulebox"><span class="smallcaps">因果纪律</span><h3>拐点有“发生日”与“可知日”</h3><p>峰谷发生在图上的那天，但程序要等后续 2 根 K 线才确认它是拐点。回放按当时可见数据计算，降低未来数据泄漏。</p></div>
-      <div class="rulebox"><span class="smallcaps">计算边界</span><h3>因果回放窗口</h3><p>形态详情最多分析 500 根日K、520 根周K；旗形搜索完整窗口并要求五个已确认摆动点、受限回撤和通道边界。</p></div>
+      <div class="rulebox"><span class="smallcaps">因果纪律</span><h3>拐点有“发生日”与“可知日”</h3><p>峰谷发生在图上的那天，但程序要等后续 2 根 K 线才确认它是拐点。前缀因果性检查验证新增未来数据不会改写过去已知结构。</p></div>
+      <div class="rulebox"><span class="smallcaps">计算边界</span><h3>形态分析窗口</h3><p>形态详情最多分析 500 根日K、520 根周K；旗形搜索完整窗口并要求五个已确认摆动点、受限回撤和通道边界。</p></div>
     </div>
     <div class="foot"><span>实现依据：caisen/pivots.py · patterns.py · market.py</span><span>02 / 07</span></div>
   </section>
 
   <section class="slide" data-title="12招规则库">
-    <div class="topline"><span>02 / RULE CATALOG</span><strong>12 招规则库</strong></div>
+    <div class="topline"><span>02 / RULE CATALOG</span><strong>10 招活动规则</strong></div>
     <h2 class="section-title">12 个规则名，共用几何识别骨架</h2>
-    <p class="section-sub">每个识别结果都保留锚点、颈线、突破日期、失效位与目标；不同规则可共享拐点；竞争标签会标记待人工复核，并阻止其直接成为买入计划。</p>
+    <p class="section-sub">每个识别结果都保留锚点、颈线、突破日期、失效位与目标；不同规则可共享拐点；竞争标签会标记结构歧义，并阻止其直接成为买入计划。</p>
     <div class="pair-grid">
       <div class="pair"><span class="bull">W 底</span><span class="versus">↔</span><span class="bear">M 头</span></div>
       <div class="pair"><span class="bull">破底翻</span><span class="versus">↔</span><span class="bear">假突破</span></div>
-      <div class="pair"><span class="bull">W 底破底翻</span><span class="versus">↔</span><span class="bear">假突破（头肩顶）</span></div>
       <div class="pair"><span class="bull">下飘旗形上涨中继</span><span class="versus">↔</span><span class="bear">上飘旗形下跌中继</span></div>
       <div class="pair"><span class="bull">头肩底</span><span class="versus">↔</span><span class="bear">头肩顶</span></div>
       <div class="pair"><span class="bull">收敛三角形底部</span><span class="versus">↔</span><span class="bear">收敛三角形头部</span></div>
@@ -78,7 +77,7 @@
       <div class="rulebox"><span class="smallcaps">W / M 结构</span><h3>比较低点 / 高点，再找颈线</h3><p>允许双底不等高，也允许斜颈线。突破前只显示“W底，未确认”；趋势方向需结合突破和失效判断。</p></div>
       <div class="rulebox"><span class="smallcaps">三角 / 旗形</span><h3>检查收敛与前序推动波</h3><p>三角形检查边界斜率、触点与交点位置；旗形检查先前推动波、逆向整理和后续突破条件。</p></div>
     </div>
-    <div class="callout"><b>请这样理解覆盖范围：</b>12 招规则卡均有名称与识别入口；程序当前以标准几何结构为自动识别范围，复合形态、缺少可验证证据的变体需要人工复核。原书图例并不都能转换成无歧义的数值条件。</div>
+    <div class="callout"><b>请这样理解覆盖范围：</b>活动十招具有识别入口，原书十二招仅保留来源审计；程序当前以标准几何结构为自动识别范围，复合形态、缺少可验证证据的变体保留结构歧义提示。原书图例并不都能转换成无歧义的数值条件。</div>
     <div class="foot"><span>结构定义以原书规则审计与 docs/rule-cards.md 为准</span><span>03 / 07</span></div>
   </section>
 
@@ -90,7 +89,7 @@
       <div class="state"><strong>形成中</strong><span>锚点与拓扑满足部分规则，尚未收盘突破。界面显示“W底，未确认”。</span></div>
       <div class="state"><strong>价格确认</strong><span>收盘价首次穿越当时冻结的颈线/边界，保存确认日期和突破量比。</span></div>
       <div class="state"><strong>失效</strong><span>价格重新越回失效线，或数据分段变化使结构不能继续追踪。</span></div>
-      <div class="state"><strong>人工复核</strong><span>程序保留结构证据；人可以接受、判误报、修正关键点并写备注。</span></div>
+      <div class="state"><strong>结构歧义</strong><span>程序保留结构证据；存在竞争解释时返回等待。</span></div>
     </div>
     <div class="formula">
       <div><b>W 底测幅</b>颈线中间值 − 底部中间值 = 第一段距离；第一目标为颈线 + 距离。</div>
@@ -98,7 +97,7 @@
       <div><b>中继结构</b>旗形须突破前波高/低才解锁波段目标；三角突破位置也要符合规则区间。</div>
       <div><b>量价证据</b>程序记录突破日量比；复权与成交量单位未验证时会标“量能未核验”。</div>
     </div>
-    <div class="callout"><b>当前工程事实（v13）：</b>“量能未核验”时仍展示价格形态和证据，但计划标记“等待”，不会进入可考虑买入候选；待来源、量能单位与企业行动口径绑定并核验后，才重新评估交易计划。</div>
+    <div class="callout"><b>当前工程事实：</b>“量能未核验”时仍展示价格形态和证据，但计划标记“等待”，不会进入可考虑买入候选；待来源、量能单位与企业行动口径绑定并核验后，才重新评估交易计划。</div>
     <div class="foot"><span>量比 = 突破日成交量 / 前 20 根可比日均量</span><span>04 / 07</span></div>
   </section>
 
@@ -134,31 +133,21 @@
       <div class="step"><div class="dot"></div><b>买入优先</b><p>一标的一行；候选靠前，显示状态、价格、告警与迷你K线。</p></div>
       <div class="step"><div class="dot"></div><b>进入详情</b><p>点击行或缩略图，载入最新日线/周线结论与形态图。</p></div>
       <div class="step"><div class="dot"></div><b>看计划证据</b><p>检查颈线、关键点、确认日、止损、目标和 R 倍数。</p></div>
-      <div class="step"><div class="dot"></div><b>回放 / 标注</b><p>按截止日重放；接受、判误报或修正形态关键点。</p></div>
+      <div class="step"><div class="dot"></div><b>历史形态定位</b><p>选择已结束形态，在K线图上定位其结构与结束位置。</p></div>
       <div class="step"><div class="dot"></div><b>模拟执行</b><p>Backtrader 按下一开盘模拟；零费用；不发真实委托。</p></div>
     </div>
     <div class="two-col" style="margin-top:24px">
       <div class="rulebox"><span class="smallcaps">数据入口</span><h3>当前本地行情文件</h3><p>扫描本地 CSV，保留文件哈希、数据版本、截止日期和质量告警；可主动触发单标的/全市场更新。当前行情快照不代表完整历史市场。</p></div>
-      <div class="rulebox"><span class="smallcaps">服务接口</span><h3>独立本地 API 与页面</h3><p>FastAPI 提供分析、扫描任务、详情、人工复核和 Backtrader 接口；默认打开 127.0.0.1:8301。</p></div>
+      <div class="rulebox"><span class="smallcaps">服务接口</span><h3>独立本地 API 与页面</h3><p>FastAPI 提供分析、扫描任务、详情、历史形态图表和 Backtrader 接口；默认打开 127.0.0.1:8301。</p></div>
     </div>
-    <div class="foot"><span>页面入口：市场扫描 · 形态详情 · 历史回放 · 人工复核</span><span>06 / 07</span></div>
+    <div class="foot"><span>页面入口：市场扫描 · 形态详情</span><span>06 / 07</span></div>
   </section>
 
   <section class="slide" data-title="现状与边界">
-    <div class="topline"><span>06 / STATUS & LIMITS</span><strong>当前进度与下一步</strong></div>
-    <h2 class="section-title">系统可以运行；形态质量和盈利价值仍待验证</h2>
-    <p class="section-sub">以下为当前本地数据和 2026-10-25 分析规则 v13 开发验收记录。</p>
-    <div class="statusgrid">
-      <div class="stat"><strong>5,294</strong><span>本地标的：3,655 股票 + 1,639 ETF</span></div>
-      <div class="stat"><strong>10 例</strong><span>首轮用户开发标签；已用于校准，不是独立准确率样本</span></div>
-      <div class="stat"><strong>0</strong><span>全量扫描文件级失败；每个标的仍有质量告警</span></div>
-      <div class="stat"><strong>138</strong><span>pytest 全部通过；Backtrader 零费用功能验收保留</span></div>
-    </div>
-    <div class="limits">
-      <div><div class="smallcaps">当前已知限制</div><p>大多数本地标的行情截至 2026-10-16；000001 股票和 510300 ETF 已真实更新到 2026-10-23。复权口径、成交量单位、企业行动和退市历史尚未验证。2020–2026 周线使用上交所官方休市公告；2000–2019 年第三方日历及 2027 年后日期仍仅作预览。</p><p>量能或企业行动来源未核验时，v13 仅显示形态研究候选，交易计划返回等待；普通 W/M 不直接触发破底翻/假突破，复合结构需要人工复核。买入候选排序是规则优先级，不是上涨概率。</p></div>
-      <div><div class="smallcaps">仍待完成的验证</div><p>用户明确 N 表示截至标注日十二招均无形态。当前沿用 v12 的几何与因果生命周期规则；v13 将未核验量能作为交易计划等待门槛。W/M 时长比与头肩肩部容差是开发工程初值，十例标签曾参与调整，不能作为独立准确率证据；688216 的原始标签与后续“无效目标不成立”澄清分开留档。</p><p>本轮 v13 全量扫描 5,294 个标的、文件失败 0 个、买入候选 0 个。240 例盲评、冻结留出集和行情前向观察尚未完成。策略效果验证按当前约定暂缓；功能通过不等于策略盈利有效。</p></div>
-    </div>
-    <div class="foot"><span class="sources">依据：patterns.py · pivots.py · plans.py · decision.py · market.py · api.py · static/app.js · SPEC-pattern-engine.md · README.md</span><span>07 / 07</span></div>
+    <div class="topline"><span>06 / STATUS &amp; LIMITS</span><strong>2026-10-27 当前功能</strong></div>
+    <h2 class="section-title">查看历史形态，直接回到结构发生的位置</h2>
+    <div class="limits"><div><h3>详情图表</h3><p>点击已结束形态，自动切换日/周线并定位到结构区间，标出锚点、颈线/边界、确认和结束位置。回到最新可恢复默认视图。</p><h3>扫描与更新</h3><p>全量扫描本地股票与ETF，完成后按行动/形态筛选。行情更新不校验上游数值、不保存旧文件哈希或快照、不支持恢复。</p></div><div><h3>精简工作台</h3><p>只保留市场扫描与形态详情入口；人工复核、人工校准工具与记录、任意截止日期回放均已删除。</p><h3>功能验证与效果</h3><p>保留几何、前缀因果性、完整周、交易决策和Backtrader零费用账目测试。固定工程阈值未经统计有效性验证；策略效果验证仍暂缓。</p></div></div>
+    <div class="foot"><span>依据：README.md · 当前模块规格</span><span>07 / 07</span></div>
   </section>
   <div class="hint">← → 翻页　·　Home / End 跳转　·　F 全屏</div>
   <div class="controls"><button id="prev" aria-label="上一页">←</button><span id="counter">01 / 07</span><div class="progress"><i id="bar"></i></div><button id="next" aria-label="下一页">→</button></div>

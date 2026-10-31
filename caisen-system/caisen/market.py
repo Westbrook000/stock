@@ -62,7 +62,7 @@ def discover_instruments(root: str | Path = ".") -> list[InstrumentFile]:
     return sorted(instruments, key=lambda item: (order[item.kind], item.code, item.path))
 
 
-def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".", as_of=None) -> MarketDataResult:
+def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".") -> MarketDataResult:
     """Load a local instrument file with row-level quality and provenance."""
     path = Path(instrument.path)
     warnings = []
@@ -121,18 +121,13 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".", as_of=No
     if duplicate_rows:
         warnings.append("removed %d duplicate date row(s), keeping last" % duplicate_rows)
     normalized = normalized.sort_values("date", kind="mergesort").drop_duplicates("date", keep="last").reset_index(drop=True)
-    if as_of is not None:
-        cutoff = pd.to_datetime(as_of, errors="coerce")
-        if pd.isna(cutoff):
-            return MarketDataResult(instrument, quality_status="unavailable", warnings=["invalid as_of date"])
-        normalized = normalized[normalized["date"] <= cutoff].reset_index(drop=True)
     if normalized.empty:
         return MarketDataResult(
             instrument,
             source="local_csv",
             file_sha256=hashlib.sha256(raw_bytes).hexdigest(),
             quality_status="insufficient",
-            warnings=warnings + ["no usable bars at requested cutoff"],
+            warnings=warnings + ["no usable bars"],
             rejected_rows=rejected_rows,
             source_rows=source_rows,
         )
@@ -155,8 +150,7 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".", as_of=No
         warnings.append("unverified price discontinuity split %d segment(s)" % len(data_breaks))
 
     file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-    content_hash = _frame_hash(normalized)
-    version_source = file_sha256 if as_of is None else content_hash
+    version_source = file_sha256
     version_material = "market-normalize-v2|%s|%s|%s|%s" % (
         version_source, instrument.kind, instrument.code, adjustment
     )
@@ -190,7 +184,7 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".", as_of=No
         "data_version": data_version,
         "history_basis": "current_snapshot",
         "adjustment_basis": adjustment,
-        "asof": str(normalized["date"].iloc[-1].date()),
+        "latest_date": str(normalized["date"].iloc[-1].date()),
         "refresh": refresh_metadata,
     }
     return MarketDataResult(
@@ -211,9 +205,6 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".", as_of=No
     )
 
 
-def _frame_hash(frame: pd.DataFrame) -> str:
-    columns = ["date", "open", "high", "low", "close", "volume", "segment_id"]
-    return hashlib.sha256(pd.util.hash_pandas_object(frame[columns], index=False).values.tobytes()).hexdigest()
 
 
 def _normalize_code(value, expected):
@@ -236,15 +227,6 @@ def _instrument_metadata(root, instrument, raw_bytes):
             basis = json.loads(basis_path.read_text(encoding="utf-8"))
             adjustment = basis.get("adjustment_by_kind", {}).get(instrument.kind, adjustment)
             source_api = basis.get("source_apis", {}).get(instrument.kind, source_api)
-            manifest_path = root_path / "data" / basis.get("refresh_manifest", "")
-            if manifest_path.is_file():
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                entry = manifest.get("symbols", {}).get("%s:%s" % (instrument.kind, instrument.code), {})
-                adjustment = entry.get("adjustment", adjustment)
-                source_api = entry.get("source_api", source_api)
-                if entry.get("file_sha256") == hashlib.sha256(raw_bytes).hexdigest():
-                    refresh_metadata = {key: entry.get(key) for key in
-                                        ("source", "updated_at", "first_date", "last_date", "rows", "adjustment")}
         except (OSError, ValueError):
             pass
     raw_hash = hashlib.sha256(raw_bytes).hexdigest()
@@ -360,6 +342,14 @@ class ChinaXSHGCalendar:
         self.version = "xshg-sse-official-2020-2026-v1+preview-library-%s" % self._library_version
 
     def last_session_of_week(self, week_start):
+        sessions = self.sessions_of_week(week_start)
+        return sessions[-1] if sessions else None
+
+    def first_session_of_week(self, week_start):
+        sessions = self.sessions_of_week(week_start)
+        return sessions[0] if sessions else None
+
+    def sessions_of_week(self, week_start):
         start = pd.Timestamp(week_start).date()
         if start in self._week_cache:
             return self._week_cache[start]
@@ -378,7 +368,7 @@ class ChinaXSHGCalendar:
                 is_session = bool(self._calendar.is_session(pd.Timestamp(current)))
             if is_session:
                 sessions.append(pd.Timestamp(current))
-        result = sessions[-1] if sessions else None
+        result = tuple(sessions)
         self._week_cache[start] = result
         return result
 
@@ -409,7 +399,7 @@ class ObservedFridayCalendar:
         return pd.Timestamp(week_start) + pd.Timedelta(days=4)
 
 
-def aggregate_weekly(bars, asof=None, calendar=None):
+def aggregate_weekly(bars, calendar=None):
     """Aggregate complete weeks; preserve unfinished weeks as preview bars.
 
     DataFrame input returns a DataFrame for existing callers. MarketDataResult
@@ -421,23 +411,17 @@ def aggregate_weekly(bars, asof=None, calendar=None):
     if frame.empty:
         return _weekly_result(daily_result, frame, frame, calendar, []) if is_result else frame
     frame["date"] = pd.to_datetime(frame["date"])
-    if asof is not None:
-        frame = frame[frame["date"] <= pd.Timestamp(asof)].copy()
-    if frame.empty:
-        empty = frame.copy()
-        empty.attrs.update(bars.bars.attrs if is_result else bars.attrs)
-        return _weekly_result(daily_result, empty, empty, calendar, ["no bars before as_of cutoff"]) if is_result else empty
-
     calendar_version = getattr(calendar, "version", "unknown") if calendar is not None else "unknown"
     if isinstance(bars, pd.DataFrame):
         source_attrs = bars.attrs
     else:
         source_attrs = bars.bars.attrs
-    latest_available = pd.Timestamp(asof) if asof is not None else frame["date"].max()
+    latest_available = min(frame["date"].max(), pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None))
     grouping = frame.copy()
     grouping["week_start"] = grouping["date"].dt.normalize() - pd.to_timedelta(grouping["date"].dt.weekday, unit="D")
     if "segment_id" not in grouping:
         grouping["segment_id"] = 0
+    first_available_by_week = grouping.groupby("week_start", sort=False)["date"].min().dt.normalize()
     columns = ["week_start", "segment_id", "date", "open", "high", "low", "close", "volume"]
     if calendar is None:
         weekly = grouping.sort_values("date", kind="mergesort").groupby(["week_start", "segment_id"], sort=True).agg(
@@ -454,8 +438,11 @@ def aggregate_weekly(bars, asof=None, calendar=None):
             try:
                 final_session = calendar.last_session_of_week(pd.Timestamp(week_start).date())
                 final_session = pd.Timestamp(final_session).normalize() if final_session is not None else None
+                first_fn = getattr(calendar, "first_session_of_week", None)
+                first_value = first_fn(pd.Timestamp(week_start).date()) if first_fn else week_start
+                first_session = pd.Timestamp(first_value).normalize() if first_value is not None else None
             except (TypeError, ValueError, KeyError):
-                final_session = None
+                final_session = first_session = None
             row = {
                 "week_start": pd.Timestamp(week_start),
                 "segment_id": int(segment_id),
@@ -466,10 +453,13 @@ def aggregate_weekly(bars, asof=None, calendar=None):
                 "close": float(group.iloc[-1]["close"]),
                 "volume": float(group["volume"].sum()),
             }
+            first_available_date = first_available_by_week.loc[week_start]
             verified = getattr(calendar, "is_week_verified", lambda _: True)(week_start)
             if not verified:
                 unverified_calendar_weeks = True
             complete = (verified and final_session is not None
+                        and first_session is not None
+                        and first_available_date == first_session
                         and final_session <= latest_available.normalize()
                         and (group["date"].dt.normalize() == final_session).any())
             (completed_rows if complete else preview_rows).append(row)
@@ -541,6 +531,16 @@ def _weekly_result(daily_result, completed, preview, calendar, warnings):
         source_rows=daily_result.source_rows,
         normalized_rows=len(completed),
     )
+
+
+def _frame_hash(frame: pd.DataFrame) -> str:
+    """Hash the normalized analysis bars used to derive an aggregate version."""
+    columns = [column for column in
+               ("week_start", "date", "open", "high", "low", "close", "volume", "segment_id")
+               if column in frame.columns]
+    return hashlib.sha256(
+        pd.util.hash_pandas_object(frame[columns], index=False).values.tobytes()
+    ).hexdigest()
 
 
 def audit_market_inventory(root: str | Path = ".") -> dict:

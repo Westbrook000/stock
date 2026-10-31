@@ -7,14 +7,22 @@ from caisen.indicators import atr
 from caisen.patterns import current_pattern_snapshot, detect_patterns
 from caisen.pivots import detect_pivots
 from caisen.schemas import Pattern, Pivot
+from caisen import RULE_VERSION
+from caisen.v16_baseline import RULE_VERSION as V16_BASELINE_RULE_VERSION
+from caisen.v16_baseline.schemas import Pattern as V16BaselinePattern
 
 
 def test_new_pattern_defaults_use_current_app_and_source_rule_versions():
     pattern = Pattern("id", "000001", "stock", "1d", "w_bottom", "bullish",
                       "forming", "2026-01-01", None)
 
-    assert pattern.rule_version == "caisen-v15"
-    assert pattern.source_rule_version == "caisen-rules-v6"
+    assert pattern.rule_version == "caisen-v17"
+    assert pattern.source_rule_version == "caisen-rules-v7"
+    assert RULE_VERSION == "caisen-v17"
+    assert V16_BASELINE_RULE_VERSION == "caisen-v16"
+    baseline = V16BaselinePattern("old", "000001", "stock", "1d", "w_bottom", "bullish",
+                                  "forming", "2026-01-01", None)
+    assert baseline.rule_version == "caisen-v16"
 
 
 def swing_frame(points, spacing=5):
@@ -30,13 +38,22 @@ def swing_frame(points, spacing=5):
     })
 
 
+def mature_swing_frame(points, spacing=5):
+    """Synthetic pivot geometry with calendar spacing long enough to mature."""
+    frame = swing_frame(points, spacing=spacing)
+    frame["date"] = pd.date_range("2020-01-01", periods=len(frame), freq="7D")
+    return frame
+
+
 def pivot_fixture(spec, close_overrides=None, length=40):
     close = [9.0] * length
     for index, value in (close_overrides or {}).items():
         close[index] = value
     highs = [value + .2 for value in close]
     lows = [value - .2 for value in close]
-    dates = pd.bdate_range("2026-01-01", periods=length)
+    # These geometry fixtures span more than three calendar months, so bottom
+    # recognition tests exercise mature structures rather than short examples.
+    dates = pd.date_range("2026-01-01", periods=length, freq="5D")
     pivots = []
     for index, kind, price in spec:
         if kind == "high":
@@ -74,33 +91,9 @@ def flag_fixture(spec, base, terminal_close):
 
 
 class PatternTests(unittest.TestCase):
-    def test_688216_user_clarification_has_no_active_book_pattern_at_label_date(self):
-        from pathlib import Path
-        from caisen.market import (InstrumentFile, aggregate_weekly, default_china_calendar,
-                                   load_daily_bars)
-
-        root = Path(__file__).parents[2]
-        terminal = {"invalidated", "target_reached", "followthrough_confirmed"}
-        for cutoff in ("2026-10-16", "2026-10-23"):
-            loaded = load_daily_bars(InstrumentFile(
-                "688216", "stock", str(root / "data" / "stocks" / "688216.csv")), root=root,
-                as_of=cutoff)
-            weekly = aggregate_weekly(loaded, asof=cutoff, calendar=default_china_calendar())
-            for timeframe, bars in (("1d", loaded.bars), ("1w", weekly.bars)):
-                snapshot = current_pattern_snapshot(detect_patterns(
-                    bars, "688216", "stock", timeframe, asof=cutoff))
-                active = [pattern for pattern in snapshot if pattern.state not in terminal]
-                self.assertEqual(active, [], f"{timeframe} at {cutoff} should show no active book pattern")
-
-        positive = load_daily_bars(InstrumentFile(
-            "688330", "stock", str(root / "data" / "stocks" / "688330.csv")), root=root,
-            as_of="2026-10-16")
-        self.assertTrue(any(pattern.pattern_type == "w_bottom" and pattern.state == "forming"
-                            for pattern in current_pattern_snapshot(detect_patterns(
-                                positive.bars, "688330", "stock", "1d", asof="2026-10-16"))))
 
     def test_current_snapshot_keeps_latest_event_per_rule(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         failure = pd.DataFrame({
             "date": [frame.date.iloc[-1] + pd.offsets.BDay(1)], "open": [7.0],
             "high": [7.1], "low": [6.9], "close": [7.0], "volume": [1_000_000.0],
@@ -114,7 +107,7 @@ class PatternTests(unittest.TestCase):
         self.assertTrue(all(len(items) == 1 for items in by_type.values()))
         self.assertTrue(snapshot)
         self.assertTrue(any(pattern.state == "invalidated" for pattern in snapshot))
-        self.assertTrue(all(pattern.source_rule_version == "caisen-rules-v6" for pattern in snapshot))
+        self.assertTrue(all(pattern.source_rule_version == "caisen-rules-v7" for pattern in snapshot))
         self.assertTrue(all(pattern.last_observed_date == str(frame.date.iloc[-1].date()) for pattern in snapshot))
 
     def test_current_snapshot_keeps_latest_invalidated_event_for_history(self):
@@ -129,7 +122,7 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(snapshot[0].state, "invalidated")
 
     def test_first_measured_target_marks_terminal_state_without_erasing_shape(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         initial = detect_patterns(frame, code="fixture", kind="stock", timeframe="1d")
         measured = next(pattern for pattern in initial
                         if pattern.pattern_type == "w_bottom" and pattern.state == "confirmed")
@@ -302,7 +295,7 @@ class PatternTests(unittest.TestCase):
         self.assertLess(invalid_target, 0)
 
         found = []
-        _add(found, frame, "688216", "stock", "1d", "head_shoulders", seq,
+        _add(found, frame, "fixture", "stock", "1d", "head_shoulders", seq,
              close[-1], neckline, 51.3, [invalid_target], 55, direction="bearish")
 
         self.assertEqual(found, [])
@@ -317,6 +310,8 @@ class PatternTests(unittest.TestCase):
             "low": [value - .1 for value in close], "close": close,
             "volume": [1000.0] * len(close),
         })
+        frame["date"] = pd.date_range("2026-01-01", periods=len(close), freq="25D")
+        frame.loc[0, "low"] = 8.0
         seq = [Pivot(i, str(frame.date.iloc[i].date()), price, kind, i, str(frame.date.iloc[i].date()))
                for i, (kind, price) in enumerate([
                    ("low", 8.0), ("high", 11.0), ("low", 8.5),
@@ -328,7 +323,7 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(found[0].state, "invalidated")
         evidence = {item["code"]: item["value"] for item in found[0].evidence}
         self.assertEqual(evidence["structure_invalidation"]["level"], 8.0)
-        self.assertEqual(evidence["structure_invalidation"]["date"], "2026-01-07")
+        self.assertEqual(evidence["structure_invalidation"]["date"], str(frame.date.iloc[4].date()))
 
     def test_atr_uses_only_current_and_prior_bars(self):
         frame = swing_frame([10, 9, 11, 9, 12])
@@ -389,6 +384,8 @@ class PatternTests(unittest.TestCase):
             "low": [value - .1 for value in close], "close": close,
             "volume": [1000.0] * len(close),
         })
+        frame["date"] = pd.date_range("2026-01-01", periods=len(close), freq="20D")
+        frame.loc[2, "low"] = 8.0
         seq = [
             Pivot(2, str(frame.date.iloc[2].date()), 8.0, "low", 4, str(frame.date.iloc[4].date()), "1ATR"),
             Pivot(5, str(frame.date.iloc[5].date()), 12.0, "high", 7, str(frame.date.iloc[7].date()), "1ATR"),
@@ -405,17 +402,17 @@ class PatternTests(unittest.TestCase):
                               if item["code"] == "confirmation_index"), 10)
 
     def test_w_bottom_recognizes_unequal_lows_and_frozen_neckline(self):
-        frame = swing_frame([12, 8.2, 11, 7.8, 12.5])
+        frame = mature_swing_frame([12, 8.2, 11, 7.8, 12.5])
         patterns = detect_patterns(frame, code="000001", kind="stock", timeframe="1d")
         bottoms = [p for p in patterns if p.pattern_type == "w_bottom"]
         self.assertTrue(bottoms)
         pattern = next(p for p in bottoms if p.key_points.get("second_low", 0) < p.key_points.get("first_low", 0))
         self.assertLess(pattern.key_points["second_low"], pattern.key_points["first_low"])
         self.assertIsNotNone(pattern.neckline)
-        self.assertEqual(pattern.rule_version, "caisen-v15")
+        self.assertEqual(pattern.rule_version, "caisen-v17")
 
     def test_w_bottom_exposes_geometry_diagnostics_without_changing_candidate_state(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         patterns = detect_patterns(frame, code="000001", kind="stock", timeframe="1d")
         pattern = next(p for p in patterns if p.pattern_type == "w_bottom" and p.state == "confirmed"
                        and next(item["value"] for item in p.evidence if item["code"] == "pivot_topology")
@@ -526,14 +523,14 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(round(_duration_balance_ratio("triangle_bottom", pivots), 2), 4.83)
         self.assertFalse(_passes_duration_balance("triangle_bottom", pivots))
 
-    def test_pattern_result_has_no_confirmation_after_asof(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+    def test_pattern_result_has_no_confirmation_after_input_prefix(self):
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         end = frame.iloc[:-2].copy()
         patterns = detect_patterns(end, code="000001", kind="stock", timeframe="1d")
         self.assertTrue(all(p.confirmed_at < len(end) for p in patterns))
 
     def test_confirmed_pattern_identity_and_confirmation_are_stable_after_future_bars(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         earlier = detect_patterns(frame, code="000001", kind="stock", timeframe="1d")
         confirmed = {p.pattern_id: p for p in earlier if p.state == "confirmed"}
         self.assertTrue(confirmed)
@@ -551,7 +548,7 @@ class PatternTests(unittest.TestCase):
             self.assertEqual(new.neckline, old.neckline)
 
     def test_pattern_geometry_never_crosses_an_unverified_data_break(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         frame["segment_id"] = 0
         frame.loc[frame.index[15]:, "segment_id"] = 1
         patterns = detect_patterns(frame, code="000001", kind="stock", timeframe="1d")
@@ -561,7 +558,7 @@ class PatternTests(unittest.TestCase):
                 self.assertEqual(frame.segment_id.iloc[indices].nunique(), 1)
 
     def test_pattern_is_not_actionable_after_a_later_data_break(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         original = detect_patterns(frame, code="000001", kind="stock", timeframe="1d")
         expected = next(p for p in original if p.pattern_type == "w_bottom" and p.state == "confirmed")
         append = pd.concat([frame.iloc[[-1]]] * 4, ignore_index=True)
@@ -577,7 +574,7 @@ class PatternTests(unittest.TestCase):
         frame = swing_frame([12, 8, 11, 8.2, 12.5], spacing=5)
         frame["date"] = pd.date_range("2020-01-06", periods=len(frame), freq="B")
         from caisen.market import aggregate_weekly
-        weekly = aggregate_weekly(frame, asof=frame.iloc[-1]["date"])
+        weekly = aggregate_weekly(frame)
         patterns = detect_patterns(weekly, code="000001", kind="stock", timeframe="1w") if len(weekly) >= 20 else []
         self.assertTrue(all(p.confirmed_at < len(weekly) for p in patterns))
 
@@ -656,7 +653,7 @@ class PatternTests(unittest.TestCase):
         self.assertFalse(any(pattern.pattern_type == "bull_flag" for pattern in patterns))
 
     def test_w_topology_does_not_automatically_create_a_spring_label(self):
-        frame = swing_frame([12, 8, 11, 8.2, 12.5])
+        frame = mature_swing_frame([12, 8, 11, 8.2, 12.5])
         patterns = detect_patterns(frame, code="fixture", kind="stock", timeframe="1d")
         self.assertTrue(any(pattern.pattern_type == "w_bottom" for pattern in patterns))
         spring_events = [pattern for pattern in patterns if pattern.pattern_type == "spring"]

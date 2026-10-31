@@ -3,23 +3,59 @@ import math
 from .indicators import atr
 
 
+BUY_CANDIDATE_PATTERN_TYPES = frozenset({
+    "w_bottom", "inverse_head_shoulders", "triangle_bottom",
+})
+
+
 def build_trade_plan(pattern, entry_price, cash=100000, lot_size=100, bars=None,
                      max_risk_pct=0.07, min_net_reward_risk=2.0, commission=0.0,
                      min_commission=0.0, slippage=0.0, adv_shares=None, tick_size=0.01):
     p = pattern.to_dict() if hasattr(pattern, "to_dict") else dict(pattern)
-    reasons=[]; entry=float(entry_price); structure=float(p.get("invalidation") or 0); stop=structure
+    reasons=[]; entry=float(entry_price)
+    main_structure = next((item.get("value") for item in (p.get("evidence") or [])
+                           if item.get("code") == "main_structure" and isinstance(item.get("value"), dict)), {})
+    execution_suppression = next((item.get("value") for item in (p.get("evidence") or [])
+                                  if item.get("code") == "execution_suppression" and isinstance(item.get("value"), dict)), {})
+    main_bottom = main_structure.get("role") == "main"
+    structure=float(main_structure.get("neckline_at_observed", p.get("invalidation") or 0)) if main_bottom else float(p.get("invalidation") or 0)
+    stop=float(main_structure.get("plan_stop_level", structure)) if main_bottom else structure
     if bars is not None and len(bars) and structure>0:
         current_atr=float(atr(bars).iloc[-1])
-        if math.isfinite(current_atr): stop=structure-max(2*float(tick_size),0.5*current_atr)
+        if math.isfinite(current_atr) and (not main_bottom or main_structure.get("plan_stop_level") is None):
+            stop=structure-max(2*float(tick_size),0.5*current_atr)
     data_warnings=[]
     result={"pattern_id":p.get("pattern_id"),"decision":"WAIT","entry_price":entry,"stop":stop,"structure_level":structure,
             "targets":p.get("targets",[]),"reason_codes":reasons,"data_warnings":data_warnings,
             "planned_risk_pct":None,"net_reward_risk":None,"reward_risk":None,"shares":0,
             "cost_model":{"commission":commission,"minimum_commission":min_commission,"slippage":slippage}}
+    if main_bottom:
+        result["stop_basis"]="frozen_neckline"
+        result["main_bottom_reference"]={key:main_structure.get(key) for key in
+                                          ("support_lower","support_upper","first_trough_date","latest_anchor_date")}
+    if execution_suppression.get("suppressed") is True:
+        reasons.append("nested_in_main_bottom")
+    if p.get("pattern_type") not in BUY_CANDIDATE_PATTERN_TYPES:
+        reasons.append("pattern_not_buy_candidate")
+    if "ambiguous_structure" in (p.get("flags") or []):
+        reasons.append("ambiguous_structure")
+    if p.get("pattern_type")=="bull_flag" and any(
+            item.get("code")=="measured_target_locked" and item.get("value") is True
+            for item in p.get("evidence",[])):
+        reasons.append("bull_flag_target_locked")
     if p.get("direction") != "bullish" or p.get("state") != "confirmed": reasons.append("pattern_not_confirmed_bullish")
+    main_bottom = main_structure.get("role") == "main"
+    if main_bottom and main_structure.get("signal_eligible") is not True:
+        reasons.append("main_structure_not_signal_eligible")
+    if main_bottom:
+        main_selection = next((item.get("value") for item in (p.get("evidence") or [])
+                               if item.get("code") == "main_selection" and isinstance(item.get("value"), dict)), {})
+        if main_selection.get("selected") is not True:
+            reasons.append("main_structure_not_selected_primary")
     if not p.get("volume_verified"):
         data_warnings.append("volume unit or corporate-action adjustment is unverified")
-        reasons.append("volume_data_unverified")
+        if not (main_bottom and main_structure.get("signal_eligible") is True):
+            reasons.append("volume_data_unverified")
     if not p.get("execution_rules_verified"): data_warnings.append("instrument trading rules are unverified")
     if stop <= 0 or stop >= entry: reasons.append("invalid_structural_stop")
     if not p.get("targets"): reasons.append("no_verified_target")

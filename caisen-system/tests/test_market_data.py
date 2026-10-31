@@ -55,7 +55,7 @@ def write_stock_csv(root, rows):
     return path
 
 
-def test_load_daily_bars_preserves_file_hash_adjustment_and_cutoff(tmp_path):
+def test_load_daily_bars_preserves_file_hash_adjustment_and_latest_history(tmp_path):
     write_basis(tmp_path)
     path = write_stock_csv(tmp_path, [
         "2026-01-05,000001,样本,10,11,9,10.5,100",
@@ -99,21 +99,6 @@ def test_load_daily_bars_drops_and_reports_bad_rows_and_duplicates(tmp_path):
     assert result.quality_status == "usable_with_warnings"
 
 
-def test_as_of_version_ignores_future_rows_but_raw_file_hash_does_not(tmp_path):
-    write_basis(tmp_path)
-    path = write_stock_csv(tmp_path, [
-        "2026-01-05,000001,样本,10,11,9,10,100",
-        "2026-01-06,000001,样本,10,12,9,11,100",
-    ])
-    instrument = discover_instruments(tmp_path)[0]
-    first = load_daily_bars(instrument, root=tmp_path, as_of="2026-01-05")
-    path.write_text(path.read_text(encoding="utf-8-sig") + "2026-01-07,000001,样本,11,13,10,12,150\n", encoding="utf-8-sig")
-    second = load_daily_bars(instrument, root=tmp_path, as_of="2026-01-05")
-
-    assert first.file_sha256 != second.file_sha256
-    assert first.data_version == second.data_version
-    assert second.last_date == "2026-01-05"
-    assert second.bars.date.max() == pd.Timestamp("2026-01-05")
 
 
 class FixtureCalendar:
@@ -124,6 +109,11 @@ class FixtureCalendar:
 
     def last_session_of_week(self, week_start):
         return self.last_sessions.get(str(week_start))
+
+    def first_session_of_week(self, week_start):
+        start = pd.Timestamp(week_start)
+        end = self.last_sessions.get(str(week_start))
+        return start if end is not None else None
 
 
 def make_bars(dates):
@@ -138,10 +128,9 @@ def make_bars(dates):
 def test_weekly_short_week_requires_calendar_and_exposes_preview():
     source = make_bars(["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"])
 
-    unknown = aggregate_weekly(source, asof="2026-01-09")
+    unknown = aggregate_weekly(source)
     known = aggregate_weekly(
         source,
-        asof="2026-01-09",
         calendar=FixtureCalendar({"2026-01-05": "2026-01-08"}),
     )
 
@@ -153,21 +142,40 @@ def test_weekly_short_week_requires_calendar_and_exposes_preview():
 
 def test_weekly_without_verified_calendar_stays_preview_even_with_friday_bar():
     source = make_bars(pd.bdate_range("2026-01-05", periods=5))
-    weekly = aggregate_weekly(source, asof="2026-01-09")
+    weekly = aggregate_weekly(source)
 
     assert weekly.empty
     assert len(weekly.attrs["preview_bars"]) == 1
     assert weekly.attrs["quality"]["weekly_calendar_verified"] is False
 
 
-def test_weekly_as_of_midweek_does_not_confirm_friday_week():
+def test_partial_week_bars_do_not_confirm_friday_week():
     source = make_bars(["2026-01-05", "2026-01-06", "2026-01-07"])
 
-    weekly = aggregate_weekly(source, asof="2026-01-07")
+    weekly = aggregate_weekly(source)
 
     assert weekly.empty
     assert len(weekly.attrs["preview_bars"]) == 1
     assert weekly.attrs["quality"]["weekly_status"] == "incomplete_week_preview"
+
+
+def test_weekly_bars_cut_by_selected_start_or_end_date_stay_preview():
+    class BoundaryCalendar(FixtureCalendar):
+        def first_session_of_week(self, week_start):
+            return pd.Timestamp(week_start)
+
+    calendar = BoundaryCalendar({"2026-01-05": "2026-01-09"})
+    source = make_bars(pd.bdate_range("2026-01-05", periods=5))
+    starts_midweek = source[source.date >= pd.Timestamp("2026-01-07")].copy()
+    ends_midweek = source[source.date <= pd.Timestamp("2026-01-07")].copy()
+
+    start_week = aggregate_weekly(starts_midweek, calendar=calendar)
+    end_week = aggregate_weekly(ends_midweek, calendar=calendar)
+
+    assert start_week.empty
+    assert end_week.empty
+    assert len(start_week.attrs["preview_bars"]) == 1
+    assert len(end_week.attrs["preview_bars"]) == 1
 
 
 def test_weekly_result_carries_provisional_bars_and_calendar_version():
@@ -179,7 +187,7 @@ def test_weekly_result_carries_provisional_bars_and_calendar_version():
         quality_status="usable_with_warnings",
     )
 
-    weekly = aggregate_weekly(daily, calendar=FixtureCalendar({"2026-01-05": "2026-01-09"}), asof="2026-01-07")
+    weekly = aggregate_weekly(daily, calendar=FixtureCalendar({"2026-01-05": "2026-01-09"}))
 
     assert isinstance(weekly, MarketDataResult)
     assert weekly.bars.empty
@@ -205,8 +213,8 @@ def test_official_calendar_makes_holiday_shortened_week_formal_only_after_last_s
     source = make_bars(["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"])
     calendar = ChinaXSHGCalendar()
 
-    before_close = aggregate_weekly(source, asof="2026-09-23", calendar=calendar)
-    after_close = aggregate_weekly(source, asof="2026-09-24", calendar=calendar)
+    before_close = aggregate_weekly(source.iloc[:-1].copy(), calendar=calendar)
+    after_close = aggregate_weekly(source, calendar=calendar)
 
     assert before_close.empty
     assert len(before_close.attrs["preview_bars"]) == 1
@@ -218,7 +226,7 @@ def test_pre2020_library_history_remains_weekly_preview():
     from caisen.market import ChinaXSHGCalendar
 
     source = make_bars(pd.bdate_range("2019-01-07", periods=5))
-    weekly = aggregate_weekly(source, asof="2019-01-11", calendar=ChinaXSHGCalendar())
+    weekly = aggregate_weekly(source, calendar=ChinaXSHGCalendar())
 
     assert weekly.empty
     assert len(weekly.attrs["preview_bars"]) == 1
@@ -289,3 +297,33 @@ def test_full_inventory_reports_discovered_readable_warning_insufficient_failed(
     assert report["stock_count"] == 2
     assert report["etf_count"] == 1
     assert len(report["files"]) == report["discovered"]
+
+
+def test_nonempty_weekly_market_result_tracks_analysis_version():
+    instrument = InstrumentFile("000001", "stock", "/tmp/000001.csv")
+    source = make_bars(pd.bdate_range("2026-01-05", periods=5))
+    daily = MarketDataResult(
+        instrument=instrument,
+        bars=source,
+        data_version="daily-source-v1",
+        quality_status="usable",
+    )
+    calendar = FixtureCalendar({"2026-01-05": "2026-01-09"})
+
+    weekly = aggregate_weekly(daily, calendar=calendar)
+
+    changed_source = source.copy()
+    changed_source.loc[4, "close"] = 10.5
+    changed = aggregate_weekly(
+        MarketDataResult(
+            instrument=instrument,
+            bars=changed_source,
+            data_version="daily-source-v1",
+            quality_status="usable",
+        ),
+        calendar=calendar,
+    )
+
+    assert len(weekly.bars) == 1
+    assert weekly.data_version != daily.data_version
+    assert weekly.data_version != changed.data_version

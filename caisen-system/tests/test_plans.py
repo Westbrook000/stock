@@ -53,3 +53,42 @@ class TradePlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_ambiguous_structure_cannot_bypass_wait_through_direct_plan_or_simulation():
+    result=build_trade_plan(pattern(flags=['ambiguous_structure']),entry_price=10.1)
+    assert result['decision']=='WAIT'
+    assert 'ambiguous_structure' in result['reason_codes']
+
+
+def test_direct_plan_cannot_buy_patterns_outside_four_shape_allowlist():
+    result=build_trade_plan(pattern(pattern_type='spring'),entry_price=10.1)
+    assert result['decision']=='WAIT'
+    assert 'pattern_not_buy_candidate' in result['reason_codes']
+
+
+def test_locked_flag_target_waits_through_direct_plan():
+    result=build_trade_plan(pattern(pattern_type='bull_flag',evidence=[{'code':'measured_target_locked','value':True}]),entry_price=10.1)
+    assert result['decision']=='WAIT'
+    assert 'bull_flag_target_locked' in result['reason_codes']
+
+
+def test_direct_plan_suppresses_legacy_child_inside_main_bottom():
+    child=pattern(pattern_type='bull_flag',evidence=[{'code':'execution_suppression','value':{
+        'suppressed':True,'reason':'nested_in_main_bottom','parent_id':'main'}}])
+    result=build_trade_plan(child,entry_price=10.1)
+    assert result['decision']=='WAIT'
+    assert 'nested_in_main_bottom' in result['reason_codes']
+
+
+def test_main_bottom_plan_uses_frozen_neckline_stop_and_keeps_bottom_reference():
+    main=pattern(invalidation=8.0,evidence=[{'code':'main_structure','value':{
+        'role':'main','signal_eligible':True,'neckline_at_observed':9.7,'plan_stop_level':9.5,
+        'support_lower':8.8,'support_upper':9.0,'first_trough_date':'2024-01-01',
+        'latest_anchor_date':'2024-09-01'}},{'code':'main_selection','value':{'selected':True}}])
+    result=build_trade_plan(main,entry_price=10.1)
+    assert result['stop']==9.5
+    assert result['structure_level']==9.7
+    assert result['stop_basis']=='frozen_neckline'
+    assert result['main_bottom_reference']=={'support_lower':8.8,'support_upper':9.0,
+        'first_trough_date':'2024-01-01','latest_anchor_date':'2024-09-01'}

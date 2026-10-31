@@ -102,13 +102,17 @@ def _passes_shoulder_tolerance(pattern_type, seq, neckline):
 def current_pattern_snapshot(patterns):
     """Keep the latest event per rule for a current-analysis screen.
 
-    Historical/replay callers can retain the complete event list returned by
+    Machine consumers can retain the complete event list returned by
     ``detect_patterns``. The snapshot keeps a terminal latest event as history
     instead of reviving an older same-rule event. It ranks only frozen pivot
     anchor indices already present in each event.
     """
     latest = {}
+    main_events = []
     for pattern in patterns:
+        if any(item.get("code") == "main_structure" for item in pattern.evidence):
+            main_events.append(pattern)
+            continue
         anchor_indices = [value for key, value in pattern.key_points.items()
                           if key.startswith("pivot_") and key.endswith("_index") and isinstance(value, int)]
         anchor = max(anchor_indices, default=-1)
@@ -116,7 +120,8 @@ def current_pattern_snapshot(patterns):
         current = latest.get(pattern.pattern_type)
         if current is None or rank > current[0]:
             latest[pattern.pattern_type] = (rank, pattern)
-    return sorted((item[1] for item in latest.values()), key=lambda pattern: (pattern.formed_at, pattern.pattern_type), reverse=True)
+    return sorted([item[1] for item in latest.values()] + main_events,
+                  key=lambda pattern: (pattern.formed_at, pattern.pattern_type, pattern.pattern_id), reverse=True)
 
 
 def _line(p1, p2):
@@ -144,11 +149,115 @@ def _valid_projection_geometry(seq, neck, targets, direction, end):
     return True
 
 
-def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", asof=None, _atr_multiple=2.0) -> List[Pattern]:
+_MATURITY_GATED_PATTERNS = {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}
+
+
+def _duration_quality(start_date, observed_date, confirmation_date=None):
+    """Return the strict three-calendar-month rule for a frozen structure."""
+    start = pd.Timestamp(start_date).normalize()
+    observed = pd.Timestamp(observed_date).normalize()
+    eligible_after = start + pd.DateOffset(months=3)
+    first_break = pd.Timestamp(confirmation_date).normalize() if confirmation_date is not None else None
+    early_break = first_break is not None and first_break <= eligible_after
+    return {
+        "start_date": str(start.date()),
+        "observed_date": str(observed.date()),
+        "duration_days": int((observed - start).days),
+        "eligible_after": str(eligible_after.date()),
+        "first_valid_break_date": str(first_break.date()) if first_break is not None else None,
+        "early_break": bool(early_break),
+        "eligible": bool(not early_break and observed > eligible_after),
+    }
+
+
+def _prepare_position_history(background_bars):
+    """Normalize all market history once so candidate checks use indexed prefixes."""
+    if background_bars is None or background_bars.empty:
+        return {"_position_history": True, "dates": np.array([], dtype=np.int64),
+                "lows": np.array([], dtype=float), "highs": np.array([], dtype=float),
+                "prefix_min_low": np.array([], dtype=float),
+                "prefix_max_high": np.array([], dtype=float)}
+    history = background_bars[["date", "low", "high"]].copy()
+    history["date"] = pd.to_datetime(history.date, errors="coerce")
+    history["low"] = pd.to_numeric(history.low, errors="coerce")
+    history["high"] = pd.to_numeric(history.high, errors="coerce")
+    history = history.dropna(subset=["date"]).sort_values("date")
+    dates = pd.DatetimeIndex(history.date).asi8
+    lows = history.low.to_numpy(dtype=float)
+    highs = history.high.to_numpy(dtype=float)
+    return {"_position_history": True, "dates": dates, "lows": lows, "highs": highs,
+            "prefix_min_low": np.minimum.accumulate(np.where(np.isfinite(lows), lows, np.inf)),
+            "prefix_max_high": np.maximum.accumulate(np.where(np.isfinite(highs), highs, -np.inf))}
+
+
+def _low_position_quality(structure_low, start_date, background_bars, observed_date=None):
+    """Evaluate the two approved low-position branches using only known bars."""
+    result = {"structure_low": float(structure_low), "passed": False,
+              "position_pass": False, "drawdown_pass": False}
+    if isinstance(background_bars, dict) and background_bars.get("_position_history"):
+        history = background_bars
+    else:
+        history = _prepare_position_history(background_bars)
+    dates = history["dates"]
+    if len(dates) == 0:
+        return result
+    start = pd.Timestamp(start_date).normalize()
+    asof = (pd.Timestamp(observed_date).normalize() if observed_date is not None
+            else pd.Timestamp(dates[-1], unit="ns").normalize())
+    right = int(np.searchsorted(dates, asof.value, side="right"))
+    if right == 0:
+        return result
+    low = float(history["prefix_min_low"][right - 1])
+    high = float(history["prefix_max_high"][right - 1])
+    if not np.isfinite(low) or not np.isfinite(high):
+        return result
+    result.update({"history_start": str(pd.Timestamp(dates[0], unit="ns").date()),
+                   "history_end": str(pd.Timestamp(dates[right - 1], unit="ns").date()),
+                   "range_low": low, "range_high": high,
+                   "position_threshold": 0.30, "position_ratio": None,
+                   "prepattern_high": None, "prepattern_drawdown": None,
+                   "drawdown_threshold": 0.30})
+    if np.isfinite(low) and np.isfinite(high) and high > low:
+        ratio = (float(structure_low) - low) / (high - low)
+        result["position_ratio"] = float(ratio)
+        result["position_pass"] = bool(0 <= ratio <= 0.30)
+    cutoff = start - pd.DateOffset(years=2)
+    left = int(np.searchsorted(dates, cutoff.value, side="left"))
+    right_start = min(int(np.searchsorted(dates, start.value, side="left")), right)
+    prior_highs = history["highs"][left:right_start]
+    finite_prior_highs = prior_highs[np.isfinite(prior_highs)]
+    if len(finite_prior_highs) and float(finite_prior_highs.max()) > 0:
+        pre_high = float(finite_prior_highs.max())
+        drawdown = (pre_high - float(structure_low)) / pre_high
+        result["prepattern_high"] = pre_high
+        result["prepattern_drawdown"] = float(drawdown)
+        result["drawdown_pass"] = bool(drawdown >= 0.30)
+    result["passed"] = bool(result["position_pass"] or result["drawdown_pass"])
+    return result
+
+
+def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", _atr_multiple=2.0,
+                    background_bars=None, structure_window=520, _position_history=None) -> List[Pattern]:
     """Causal first-pass recognizer for the 12 book families; all matches retain evidence."""
-    frame = bars.copy().reset_index(drop=True)
-    if asof is not None:
-        frame = frame[pd.to_datetime(frame.date) <= pd.Timestamp(asof)].reset_index(drop=True)
+    observed = bars.copy().reset_index(drop=True)
+    if observed.empty:
+        return []
+    background = (background_bars.copy().reset_index(drop=True) if background_bars is not None
+                  else observed.copy())
+    # Defensive as-of clipping: callers should pass a full prefix, but future rows
+    # must never affect evidence even if a caller accidentally supplies them.
+    cutoff = pd.to_datetime(observed.date.iloc[-1])
+    background["date"] = pd.to_datetime(background.date, errors="coerce")
+    background = background[background.date.notna() & (background.date <= cutoff)].reset_index(drop=True)
+    position_history = _position_history or _prepare_position_history(background)
+    frame = observed.tail(max(8, int(structure_window))).copy().reset_index(drop=True)
+    object.__setattr__(frame, "_caisen_pattern_context", {
+        "background_position_history": position_history,
+        "dates": pd.DatetimeIndex(pd.to_datetime(frame.date)),
+        "close": frame.close.to_numpy(dtype=float),
+        "high": frame.high.to_numpy(dtype=float),
+        "low": frame.low.to_numpy(dtype=float),
+    })
     if len(frame) < 8:
         return []
     provenance = frame.attrs.get("provenance", {})
@@ -160,7 +269,7 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
     found = []
     close = frame.close.to_numpy()
     # Consecutive 5-point topology: valley/peak/valley/peak/valley or its mirror.
-    for start in range(max(0, len(pivots) - 12), max(0, len(pivots) - 2)):
+    for start in range(0, max(0, len(pivots) - 4)):
         seq = pivots[start:start + 5]
         if len(seq) != 5:
             continue
@@ -217,7 +326,7 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
                     _add(found, frame, code, kind, timeframe, "triangle_top", seq, close[-1], lower,
                          max(hi1, hi2, hi3), [_at(lower,i4)-base_width], i4, direction="bearish")
     # Two-point W/M are also classified from the trailing three-turn topology.
-    for j in range(max(0, len(pivots)-8), len(pivots)-2):
+    for j in range(0, max(0, len(pivots)-2)):
         seq = pivots[j:j+3]
         if len(seq) != 3: continue
         if "segment_id" in frame and frame.segment_id.iloc[[p.index for p in seq]].nunique() > 1:
@@ -245,7 +354,9 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
     for p in found:
         unique[p.pattern_id] = p
     if _atr_multiple == 2.0:
-        for p in detect_patterns(frame,code,kind,timeframe,asof,_atr_multiple=3.0):
+        for p in detect_patterns(frame,code,kind,timeframe,_atr_multiple=3.0,
+                                 background_bars=background, structure_window=structure_window,
+                                 _position_history=position_history):
             unique[p.pattern_id]=p
     active = _active_rule_ids()
     recognized = [pattern for pattern in unique.values() if pattern.pattern_type in active]
@@ -259,8 +370,8 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
         labels = sorted({pattern.pattern_type for pattern in group})
         if len(labels) > 1:
             for pattern in group:
-                if "manual_review_required" not in pattern.flags:
-                    pattern.flags.append("manual_review_required")
+                if "ambiguous_structure" not in pattern.flags:
+                    pattern.flags.append("ambiguous_structure")
                 pattern.evidence.append({"code": "competing_topology_labels", "value": labels})
     for pattern in recognized:
         pattern.last_observed_date = str(pd.to_datetime(frame.date.iloc[-1]).date())
@@ -271,13 +382,24 @@ def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", a
 def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidation, targets, anchor,
          direction="bullish", extra=None):
     index = len(frame)-1
+    context = getattr(frame, "_caisen_pattern_context", {})
+    close_values = context.get("close")
+    high_values = context.get("high")
+    low_values = context.get("low")
+    dates = context.get("dates")
+    if close_values is None:
+        close_values = frame.close.to_numpy(dtype=float)
+        high_values = frame.high.to_numpy(dtype=float)
+        low_values = frame.low.to_numpy(dtype=float)
+        dates = pd.DatetimeIndex(pd.to_datetime(frame.date))
     # Freeze topology at the last anchor, then find the first causal close break and later invalidation.
     anchor=max(p.index for p in seq)
     known_at=max(p.confirmed_at for p in seq)
-    segment = int(frame.segment_id.iloc[anchor]) if "segment_id" in frame else 0
+    segment_values = frame.segment_id.to_numpy() if "segment_id" in frame else None
+    segment = int(segment_values[anchor]) if segment_values is not None else 0
     end = index
     if "segment_id" in frame:
-        later = frame.index[(frame.segment_id != segment) & (frame.index > anchor)]
+        later = frame.index[(segment_values != segment) & (frame.index > anchor)]
         if len(later): end = int(later[0]) - 1
     if known_at > end:
         return
@@ -287,10 +409,35 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
     target_values = [float(target) for target in targets] if first_target_valid else []
     breaks=[]
     for k in range(known_at,end+1):
-        above=frame.close.iloc[k] > _at(neck,k)
+        above=close_values[k] > _at(neck,k)
         if above if direction=="bullish" else not above:
             breaks.append(k)
     confirm_idx=breaks[0] if breaks else max(p.confirmed_at for p in seq)
+    start_date = dates[min(p.index for p in seq)]
+    observed_date = dates[end]
+    first_break_date = dates[breaks[0]] if breaks else None
+    duration_quality = None
+    low_quality = None
+    if ptype in _MATURITY_GATED_PATTERNS:
+        first_structure_index = min(p.index for p in seq)
+        structural_break = next((k for k in range(first_structure_index + 1, end + 1)
+                                 if (close_values[k] > _at(neck, k) if direction == "bullish"
+                                     else close_values[k] < _at(neck, k))), None)
+        structural_break_date = dates[structural_break] if structural_break is not None else None
+        # Freeze eligibility and price position at the signal date. Later bars
+        # may update event state, but cannot rewrite whether it qualified then.
+        quality_date = structural_break_date if structural_break_date is not None else observed_date
+        duration_quality = _duration_quality(start_date, quality_date, structural_break_date)
+        # A breakout before the maturity boundary invalidates this frozen shape
+        # forever; it cannot re-enter the candidate pool after three months.
+        if duration_quality["early_break"] or not duration_quality["eligible"]:
+            return
+        background = context.get("background_position_history", frame)
+        low_quality = _low_position_quality(
+            min(float(p.price) for p in seq if p.kind == "low"),
+            start_date, background, quality_date)
+        if not low_quality["passed"]:
+            return
     crossed_data_break = end < index
     terminal_state = None
     target_index = None
@@ -307,8 +454,8 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
     if breaks:
         first_target = target_values[0] if target_values else None
         preconfirmation_failure = next((k for k in range(anchor + 1, confirm_idx + 1)
-            if ((frame.close.iloc[k] < float(invalidation) if direction == "bullish"
-                 else frame.close.iloc[k] > float(invalidation)) or projection_outside_structure(k))), None)
+            if ((close_values[k] < float(invalidation) if direction == "bullish"
+                 else close_values[k] > float(invalidation)) or projection_outside_structure(k))), None)
         if preconfirmation_failure is not None:
             terminal_state = "invalidated"
             if projection_outside_structure(preconfirmation_failure):
@@ -316,8 +463,8 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
             else:
                 structure_invalidation_index = preconfirmation_failure
         for k in range(confirm_idx + 1, end + 1) if terminal_state is None else ():
-            invalidated_here = ((frame.close.iloc[k] < _at(neck,k)) if direction == "bullish"
-                                else (frame.close.iloc[k] > _at(neck,k)))
+            invalidated_here = ((close_values[k] < _at(neck,k)) if direction == "bullish"
+                                else (close_values[k] > _at(neck,k)))
             # Daily OHLC cannot establish which level traded first within one bar;
             # resolve a same-bar stop/target touch conservatively as invalidation.
             if invalidated_here:
@@ -329,16 +476,16 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
                 neckline_invalidation_index = k
                 break
             target_reached_here = (first_target is not None and
-                                   (frame.high.iloc[k] >= first_target if direction == "bullish"
-                                    else frame.low.iloc[k] <= first_target))
+                                   (high_values[k] >= first_target if direction == "bullish"
+                                    else low_values[k] <= first_target))
             if target_reached_here:
                 terminal_state = "target_reached"
                 target_index = k
                 break
     else:
         for k in range(anchor + 1, end + 1):
-            invalidated_here = (frame.close.iloc[k] < float(invalidation) if direction == "bullish"
-                                else frame.close.iloc[k] > float(invalidation))
+            invalidated_here = (close_values[k] < float(invalidation) if direction == "bullish"
+                                else close_values[k] > float(invalidation))
             if invalidated_here:
                 terminal_state = "invalidated"
                 structure_invalidation_index = k
@@ -369,10 +516,21 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
             points["first_high"], points["second_high"] = highs[0], highs[1]
     identity = "%s|%s|%s|%s|%s" % (code, kind, tf, ptype, ":".join(p.date for p in seq))
     pid = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
-    dates = pd.to_datetime(frame.date)
     evidence = [{"code":"pivot_topology", "value":[p.kind for p in seq]},
                 {"code":"neckline", "value":_at(neck,end)}, {"code":"close_confirmation", "value":bool(breaks)},
                 {"code":"confirmation_index", "value":confirm_idx}]
+    if duration_quality is not None:
+        evidence.append({"code": "structure_duration", "value": duration_quality})
+        evidence.append({"code": "first_valid_break", "value": duration_quality["first_valid_break_date"]})
+        evidence.append({"code": "low_position", "value": low_quality})
+        evidence.append({"code": "prepattern_drawdown", "value": {
+            "high": low_quality.get("prepattern_high"),
+            "drawdown": low_quality.get("prepattern_drawdown"),
+            "threshold": low_quality.get("drawdown_threshold"),
+            "passed": low_quality.get("drawdown_pass", False),
+            "history_end": low_quality.get("history_end"),
+        }})
+        evidence.append({"code": "pattern_quality_pass", "value": True})
     if ptype == "w_bottom":
         lows = [p for p in seq if p.kind == "low"]
         highs = [p for p in seq if p.kind == "high"]
@@ -389,40 +547,40 @@ def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidati
                     "leg_duration_ratio": round(max(first_leg, second_leg) / max(min(first_leg, second_leg), 1), 3),
                     "trough_gap_pct": round(abs(first.price - last.price) / max(min(first.price, last.price), 1e-9) * 100, 2),
                 }})
-    if crossed_data_break: evidence.append({"code":"data_discontinuity", "value":True})
+    if crossed_data_break: evidence.append({"code":"data_discontinuity", "value":{"index":end,"date":str(dates[end].date()),"level":float(close_values[end])}})
     if structure_invalidation_index is not None:
         evidence.append({"code":"structure_invalidation", "value":{
             "index": structure_invalidation_index, "level": float(invalidation),
-            "date": str(dates.iloc[structure_invalidation_index].date())}})
+            "date": str(dates[structure_invalidation_index].date())}})
     if neckline_invalidation_index is not None:
         evidence.append({"code":"neckline_projection_invalidation", "value":{
             "index": neckline_invalidation_index, "level": _at(neck, neckline_invalidation_index),
-            "date": str(dates.iloc[neckline_invalidation_index].date()),
+            "date": str(dates[neckline_invalidation_index].date()),
             "structure_low": price_floor, "structure_high": price_ceiling}})
     if target_index is not None:
-        evidence.append({"code":"target_reached", "value":{"index":target_index,"price":float(targets[0]),"date":str(dates.iloc[target_index].date())}})
-    if extra: evidence.append({"code":"manual_review", "value":extra})
+        evidence.append({"code":"target_reached", "value":{"index":target_index,"price":float(targets[0]),"date":str(dates[target_index].date())}})
+    if extra: evidence.append({"code":"structure_uncertainty", "value":extra})
     provenance = frame.attrs.get("provenance", {})
     flags = []
-    if extra and extra.get("manual_review_required", True) and "manual_review_required" not in flags:
-        flags.append("manual_review_required")
+    if extra and extra.get("ambiguous_structure", True) and "ambiguous_structure" not in flags:
+        flags.append("ambiguous_structure")
     out.append(Pattern("%s:%s"%(code,pid), code, kind, tf, ptype, direction, state,
-        str(dates.iloc[seq[0].index].date()), confirm_idx, points, neck,
+        str(dates[seq[0].index].date()), confirm_idx, points, neck,
         float(invalidation), target_values, evidence,
         None if np.isnan(volume) else volume, bool(frame.attrs.get("quality",{}).get("volume_unit_verified", False) and frame.attrs.get("quality",{}).get("corporate_actions_verified", False)),
         RULE_VERSION, provenance.get("data_version","unknown"),
         flags=flags,
         execution_rules_verified=bool(frame.attrs.get("quality",{}).get("trading_rules_verified",False)),
-        last_observed_date=str(dates.iloc[-1].date()),
-        confirmation_date=str(dates.iloc[confirm_idx].date()) if confirmed else None,
+        last_observed_date=str(dates[-1].date()),
+        confirmation_date=str(dates[confirm_idx].date()) if breaks and preconfirmation_failure is None else None,
         source_rule_version=_rule_set_version()))
-    out[-1].evidence.append({"code":"confirmed_date", "value":str(dates.iloc[confirm_idx].date())})
+    out[-1].evidence.append({"code":"confirmed_date", "value":str(dates[confirm_idx].date())})
 
 
 def _detect_box_reclaims(frame, code, kind, tf, pivots):
     """Detect break-and-reclaim events only after an explicit consolidation box.
 
-    These are engineering-start values pending blind-label calibration:
+    These are engineering-start values not statistically validated:
     four alternating boundary touches, at least ten bars between first and
     last touch, boundary agreement within max(0.5 ATR, 5% of price), box
     width no greater than 6 ATR, and at least 80% in-box closes. A breakout
@@ -536,7 +694,7 @@ def _detect_flags(frame, code, kind, tf):
             _add(out, frame, code, kind, tf, "bull_flag", seq, float(frame.close.iloc[-1]), upper,
                  min(lo0, lo1, lo2), [first_target], i4,
                  extra={"measured_target_locked": not unlocked, "impulse_size": impulse,
-                        "correction_ratio": correction / impulse, "manual_review_required": False})
+                        "correction_ratio": correction / impulse, "ambiguous_structure": False})
         elif kinds == ["high", "low", "high", "low", "high"]:
             hi0, lo0, hi1, lo1, hi2 = [float(p.price) for p in seq]
             impulse = hi0 - lo0
@@ -556,7 +714,7 @@ def _detect_flags(frame, code, kind, tf):
             _add(out, frame, code, kind, tf, "bear_flag", seq, float(frame.close.iloc[-1]), lower,
                  max(hi0, hi1, hi2), [first_target], i4, direction="bearish",
                  extra={"measured_target_locked": not unlocked, "impulse_size": impulse,
-                        "correction_ratio": correction / impulse, "manual_review_required": False})
+                        "correction_ratio": correction / impulse, "ambiguous_structure": False})
     return out
 
 
@@ -579,6 +737,7 @@ def _add_reclaim_event(out,frame,code,kind,tf,ptype,seq,neck,invalidation,target
     terminal_state = None
     target_index = None
     followthrough_index = None
+    invalidation_index = None
     first_target = float(targets[0]) if targets else None
     followthrough_level = None
     if extra and "box_upper" in extra and "box_lower" in extra:
@@ -588,6 +747,7 @@ def _add_reclaim_event(out,frame,code,kind,tf,ptype,seq,neck,invalidation,target
                             else frame.close.iloc[k] > _at(neck,k))
         if invalidated_here:
             terminal_state = "invalidated"
+            invalidation_index = k
             break
         target_reached_here = (first_target is not None and
                                (frame.high.iloc[k] >= first_target if bullish
@@ -613,12 +773,14 @@ def _add_reclaim_event(out,frame,code,kind,tf,ptype,seq,neck,invalidation,target
     key_points.update({"pivot_%d"%(n+1):p.price for n,p in enumerate(seq)})
     evidence=[{"code":"reclaim_level","value":level},{"code":"break_index","value":break_index},
               {"code":"confirmation_index","value":confirmation},{"code":"confirmed_date","value":str(dates.iloc[confirmation].date())},
-              {"code":"close_reclaim","value":True},{"code":"manual_review","value":"visual confirmation required"}]
+              {"code":"close_reclaim","value":True},{"code":"structure_uncertainty","value":"unresolved structure"}]
     if extra:
         evidence.extend({"code":key,"value":value} for key,value in extra.items())
-    if crossed_data_break: evidence.append({"code":"data_discontinuity", "value":True})
+    if crossed_data_break: evidence.append({"code":"data_discontinuity", "value":{"index":end-1,"date":str(dates.iloc[end-1].date()),"level":float(frame.close.iloc[end-1])}})
     if target_index is not None:
         evidence.append({"code":"target_reached", "value":{"index":target_index,"price":first_target,"date":str(dates.iloc[target_index].date())}})
+    if invalidation_index is not None:
+        evidence.append({"code":"structure_invalidation","value":{"index":invalidation_index,"date":str(dates.iloc[invalidation_index].date()),"level":_at(neck,invalidation_index)}})
     if followthrough_index is not None:
         evidence.append({"code":"followthrough_confirmed", "value":{"index":followthrough_index,
                         "level":followthrough_level,"date":str(dates.iloc[followthrough_index].date())}})
@@ -627,7 +789,7 @@ def _add_reclaim_event(out,frame,code,kind,tf,ptype,seq,neck,invalidation,target
     out.append(Pattern("%s:%s"%(code,pid),code,kind,tf,ptype,"bullish" if bullish else "bearish",state,
        str(dates.iloc[seq[0].index].date()),confirmation,key_points,neck,float(invalidation),targets,evidence,
        None if np.isnan(volume) else volume,verified,RULE_VERSION,provenance.get("data_version","unknown"),
-       flags=["manual_review_required","reclaim_event"],
+       flags=["ambiguous_structure","reclaim_event"],
        execution_rules_verified=bool(frame.attrs.get("quality",{}).get("trading_rules_verified",False)),
        last_observed_date=str(dates.iloc[-1].date()), confirmation_date=str(dates.iloc[confirmation].date()),
        source_rule_version=_rule_set_version()))

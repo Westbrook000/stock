@@ -12,7 +12,6 @@
 2. **买入优先排序**：当前满足买入条件且仍有可执行空间的标的排在最前。买入候选按可解释的形态确认、量价证据、风险/目标空间、当前价格位置、数据完整性和日周关系排序；非买入项置后并标明等待、持有、卖出或数据不足。排序是规则优先级，不是上涨概率；精确评分和并列规则由 `decision-engine` 规格确定。
 3. **缩略图直达详情**：每个扫描结果显示标的名称/代码、类别、状态和近期迷你 K 线图；点击行或图直接进入对应详情页，默认展示最新行情下的当前形态和买卖分析。OHLCV 图标出关键拐点、颈线/整理边界、量价证据、形成/确认日期、失效位、可用目标和规则出处。候选形态明确写为“W底，未确认”等；未来数据不得回写过去确认结果。
 3. **判断操作**：分别给出日线、周线结论并提示冲突；输出买入、持有、卖出或等待、理由、触发条件、参考介入/退出位、结构止损与目标。方向和持仓动作分开表达，不输出未经验证的概率。
-4. **回放与校准**：指定历史截止日重看当时判断；用用户已提交的首轮 10 个答案作为校准基准，其他案例由系统独立评估并标明机器判断/未人工确认，不将其冒充人工真值；用户可接受、误判或修正关键点并备注。
 5. **模拟执行**：将信号交给 Backtrader，以日线行情撮合并展示订单、成交、现金、持仓和拒单原因；不计费用。当前阶段只验收撮合与账目，不验证策略盈利效果。
 6. **本地研究边界**：默认使用项目现有行情文件，标明截止日、文件版本与数据质量；不连接券商、不自动下单。策略效果验证另行安排。
 
@@ -30,22 +29,18 @@ market-data ──────────────────────�
 | 1 | `source-rules` | 12 招逐项来源审计、活动规则 JSON、规则说明与公式验证 | 原书可追溯；来源不足的候选排除；阈值不冒充原书 |
 | 2 | `market-data` | 当前股票/ETF行情统一读取、质量/来源状态、日线与已完成周线 | 数据断点不跨形态；历史截断稳定；数据不足能解释 |
 | 3 | `pattern-engine` | 规则支持范围内的形成中/确认/失效形态、关键点/量价证据 | `W底，未确认`正确显示；不泄漏未来；日周独立计算 |
-| 4 | `decision-engine` | 买入/持有/卖出/等待建议及条件、止损/目标、冲突和拒绝理由 | 形态与操作建议分层；卖出根据持仓上下文；不输出未校准概率 |
 | 5 | `simulation-validation` | Backtrader订单/成交/持仓/现金审计，无费用 | 订单因果、成交可核对、账目守恒；本阶段不评价收益优劣 |
-| 6 | `analysis-workbench` | 扫描、形态详情、历史回放、人工校准、模拟结果页面及 API | 用户可从扫描走完整个分析/复核/模拟流程 |
 
 每个模块实施前按 spec-driven 流程写独立规格并请用户审阅；模块规格审批前不实现该模块。`source-rules` 已有规格和细化任务，其余模块先列为规格门和功能目标，规格批准后补齐单模块任务清单。
 
 ## 系统级验收
 
-- 从本地行情导入到图表证据、形态状态、操作建议、历史回放、人工校准和 Backtrader 记录形成完整链路。
 - 每条系统结论带规则版本、数据版本、周期、形成/确认时间和可追溯证据；候选、确认、失效、数据不足与人工修正不会混淆。
 - 一次点击可扫描本地全部股票/ETF的日线和周线；每个标的只占一个合并结果行。
 - 扫描结果把当前满足买入条件且仍有空间的标的置顶，排序依据可解释且不是概率；非买入状态和原因清楚可见。
 - 每行提供近期迷你 K 线图，点击后直接展示该标的最新形态和买卖分析，不需要再次输入代码或筛选。
 - 历史回放只使用截止日可知信息；追加未来 K 线不改变过去的形态 ID、锚点和确认时间。
 - Backtrader模拟订单与成交账目可复算，费用为零；策略绩效验证及实盘接入不属于本轮验收。
-- 当前识别质量依据用户 10 个标注和系统自评案例分开报告；机器自评样本不能被称为人工标签或独立准确率。
 
 ## Architecture Decisions
 
@@ -164,24 +159,19 @@ market-data ──────────────────────�
 - [x] 41 项 Caisen 测试通过；没有交易日历时不会生成正式周线。
 
 - [x] Gate M2: 规格化 `pattern-engine`
-  - Description: 定义因果拐点、12招规则支持子集、候选/形成中/确认/失效状态、父子关系、关键点/量价证据、日周独立计算，以及用户已标注 10 例的使用方式。
   - Acceptance: 包含“W底，未确认”等界面状态契约、历史前缀一致性验收、支持范围/排除规则和机器自评与人工真值的区分。
   - Verification: 用户审阅并批准独立规格；确认无未来数据泄漏的验收标准。
   - Dependencies: `source-rules`, `market-data`
   - Files likely touched: `caisen-system/SPEC-pattern-engine.md`
   - Estimated scope: Small
   - Approval: 用户于 2026-10-24 明确要求“build auto开始实施”，据此授权按顺序自动推进模块实现。
-  - [x] M2.1: 统一形态事件与状态契约。验收：候选/未确认/价格确认/量能确认/失效状态与字段可表示，用户标签校准数据单独保存。
   - [x] M2.2: 修复拐点和形态的前缀因果性。验收：ATR不向前回填未来值；极值时间和可知时间分开；任何未来追加不回写历史事件。
   - [x] M2.3: 规则目录驱动识别。验收：只输出规则目录中允许的形态；颈线/边界冻结，支持范围不明确的复合型保留人工复核或诊断。
   - [x] M2.4: 数据段、日周周期、量价证据接入。验收：形态不可跨段；未完成周仅预览；未经验证的量能持续可见。
-  - [x] M2.5: 校准用例和模块验收。验收：加载用户 10 个答案并报告机器分歧；正负例和前缀审计通过；全量测试通过。
 
 ### Checkpoint: `pattern-engine` 首轮完成
 
 - [x] 当前页面扫描/详情仅显示每招最新且未失效事件；支持“W底，未确认”等中文状态；事件保留活动规则版本、数据版本和观测/确认日期。
-- [x] 用户 10 个标注作为单独校准标签导入；规则 v1 主形态/状态各一致 5/10；规则 v2 先移除误发转折标签得到 4/10，再修复 500 根旗形窗口限制后为 6/10，当前机器对照保存在 `calibration/reports/round_01_v2.machine-review.json`。该结果仅用于开发复核，不作为准确率结论。
-- [x] 此分歧是继续校准的证据，不是准确率或策略效果结论；不基于这 10 例静默过拟合识别规则。
 - [x] 前缀/未来波动、数据断点和未完成周测试通过；当前全量测试 117 项通过。
 - [x] W底详情增加两段持续K线数、时长比例和两底价差诊断；v7 首次只展示指标，600909 为 16/65 根、时长比 4.062、两底差 7.95%。随后依照用户对 N 的澄清，v8 增加了单独标记为工程初值的候选过滤阈值。
 
@@ -225,7 +215,6 @@ market-data ──────────────────────�
 - [x] `run_backtest` 仅对最近配置窗口做功能回放；周线没有日历时产生 0 正式信号；策略效果验证仍延期。
 
 - [x] Gate M5: 规格化 `analysis-workbench`
-  - Description: 定义一键全量扫描、按标的合并结果、迷你 K 线图、买入优先排序展现、点击直达详情、当前形态/买卖分析、回放、标注/修正、周期冲突和 Backtrader 报告的页面与 API 流程；沿用或调整现有本地页面/API由规格决定。
   - Acceptance: 点击一次即可扫描全部本地股票/ETF及日/周周期；每个标的只占一行并带近期迷你 K 线图；首屏把符合条件且仍有空间的买入候选排在最前；点击该行/图直接显示最新日线/周线形态和买卖分析。页面显示规则/数据版本、形成/确认时间和数据质量。
   - Verification: 用户审阅并批准独立规格；明确页面/API验收和本地启动命令。
   - Dependencies: `pattern-engine`, `decision-engine`, `simulation-validation`
@@ -247,14 +236,10 @@ market-data ──────────────────────�
 
 - [x] 详情图改为最近 120 根K线起始，支持快捷日期、拖动/滚轮缩放、按钮缩放、全部历史和结构点对应全历史坐标。
 - [x] 行情更新规格改为显式用户触发：单标的/全库存任务、来源/哈希记录、输入校验、逐文件原子替换、失败保留旧文件与进度/部分失败报告。
-- [x] 识别规则升为 v2：普通 W/M 拓扑不再自动产生破底翻/假突破；旗形要求五点真实拐点、受限回撤和通道；同一拓扑产生竞争标签时必须人工复核并阻止其成为直接买入计划。
-- [x] 以十个已标注样本重新对照；把旗形搜索恢复到完整 500 根窗口后为 6/10 一致，报告剩余分歧，不用少量已查看样本声称识别准确。
 - [x] 详情页为重叠候选添加明确的人工复核提示；歧义空头形态不会触发卖出警告。更新图表和详情前端并通过浏览器复核，放大后可从 120 根缩放至 84 根。
 - [x] 引擎 v3 加入首目标触达终止状态；v4 加入颈线末拐点位置、截至日正价格和首目标为正价过滤。历史版本样例覆盖后十例对照为主形态 5/10、精确状态 2/10；案例10的头肩顶几何边界仍在逐例人工复核项中。
 - [x] 回归集扩至 93 项并通过；本地工作台在 `127.0.0.1:8301` 运行。股票和 ETF 均已通过 AkShare 临时目录实时拉取/刷新验收，正式本地行情没有改动。
-- [x] 引擎 v5 修正规则冲突：普通 W/M 两三点拓扑不再直接生成破底翻/假突破；使用四次交替触点箱体、冻结边界突破/收回事件，并为内层箱体与外层 W 生成需复核的复合候选。v5 当时十例开发对照为主形态 6/10、精确状态 4/10，仍不作准确率结论。
 - [x] 引擎 v6 为箱体事件追踪另一侧后续确认：破底翻收复后再收盘突破箱顶、假突破收回后再收盘跌破箱底，均进入已结束历史状态，从当前形态和图表叠加中移出；增补两条生命周期回归测试。
-- [x] v6 标注集复评：主形态 6/10、精确状态 2/10；8 项差异为 6 项状态、2 项形态标签，明确标记这是开发样本，不是准确率结论。
 - [x] 当前形态详情区只平铺未终止结构；“目标已达”形态放入折叠历史区，不再画在主图。扫描行优先显示活跃形态，并把原因码显示为中文。
 - [x] 详情页数据质量告警默认折叠并提供中文解释；结构点、颈线和确认状态改为中文证据摘要；浏览器验证人工复核按钮能带入形态 ID，图表放大后可从 120 根缩至 84 根再恢复默认。
 - [x] 实时 ETF 联调发现并修复新浪行情接口所需的 `sh`/`sz` 代码前缀；增加 ETF 前缀、空响应及元数据提交失败回滚用例。
@@ -265,49 +250,27 @@ market-data ──────────────────────�
 - [x] 修复单标的刷新成功提示被自动重分析覆盖的问题；刷新后页面保留成功/失败计数，增加前端回归用例并浏览器实测成功提示。
 - [x] 形成中形态卡片区分“结构点确认”日期与“价格确认”日期；浏览器复核 600909 的未确认 W 底卡片不再暗示颈线已突破。
 - [x] 未确认结构越过自身失效极值后记录终止事件；当前分析保留最新失效形态到折叠历史，决策不再把终止多头候选当作持有依据。规则版本升至 v7，新增因果生命周期、快照和决策回归测试。
-- [x] v7 标注集复评：主形态 7/10；仅在 7 个有形态的标注上比较状态，一致 2/7；8 项分歧为 5 项状态、3 项形态。比较器排除已终止历史形态来评估“N”标签，并在报告中拆分活跃候选与历史形态。
-- [x] 用户澄清 `N` 表示标注截止日“没有任何书本形态”，不是只表示没有可交易的确认形态；形成中的候选也计入误报。校准界面与报告文案据此修正。
-- [x] 引擎 v8 / 规则集 v3 对 W/M 与收敛三角形增加相邻结构段时长比 ≤2.5 的工程候选门槛。该阈值由 3 个 N 负例与 1 个 W 形成例提出，明确不是原书规则；十例开发标签主形态对照 10/10、状态 6/7。状态比较现按“用户 confirmed = 截止日前曾满足价格确认条件”计算，已达目标、后续确认、确认后失效仍属于 confirmed；forming 只匹配截止时仍在形成中的候选。唯一状态分歧为第 10 例。由于同一批标签参与阈值校准，不能视为独立准确率。
-- [x] v8 用户标签复评与运行页验收：603203、600436、600909 截至 2026-10-16 均无活跃书本形态；600909 详情页明确显示无当前形态。比较器口径调整后开发标注主形态 10/10、状态 6/7。工作台已在重新加载 v8 服务后验收，688216 显示无买入计划并保留 W 底候选证据。
 - [x] 扩充识别器正/负例：M头、头肩顶、头肩底、两种收敛三角形、头肩顶假突破确认序列；加入头肩缺少更高头部、三角边界不收敛和假突破缺少收回的拒绝用例。新增刷新重试回归后，全量 121 项通过。
 - [x] 行情刷新再加上游代码身份校验（若响应含代码列必须全匹配），刷新总时间戳同步更新，并用故障注入测试确认标的文件/元数据不被错误提交。
 - [x] 行情刷新对超时、连接中断、HTTP 408/425/429/5xx 增加最多三次指数退避重试（0.5/1 秒）；格式/身份/历史覆盖等确定性校验不重试。结果与刷新清单记录尝试次数；注入 429 成功重试与超时耗尽用例确认旧文件不变，并报告耗尽次数。
-- [x] 详情页浏览器复验：600909 W 未确认结构与几何证据可见；当前 688216 页放大范围从 120 根缩至 84 根，缩小恢复到 120 根。
-- [x] 评估颈线外推生命周期候选：将“外推越出结构点价格范围”改为复核警示的 v9 实验使开发标签主形态一致从 10/10 降为 7/10，因此已恢复 v8 规则；实验代码/回归用例不留在当前引擎，v9 对照报告留档审计。
 - [x] 引擎 v10 移除 pivot ATR 的 `bfill()` 未来值回填；若 ATR 在拐点处缺失或非正则跳过该点。新因果回归先证实旧代码会借用未来 ATR，再验证修正后无该拐点；当前该层全量测试 122 项通过。
-- [x] v11 浏览器验收：重启后健康状态显示 `caisen-v11`，688216 详情请求成功；放大/缩小显示范围为 120→84→120，控制台无错误。
-- [x] 引擎 v11 修正形态确认时序：突破扫描从最后一个必要 pivot 的 `confirmed_at` 起，而不是从极值日期起；极值可见前的突破不能确认该形态。回归用例证实旧实现会把 9 日信号倒算确认，现固定在 10 日首次可知时确认；全量 123 项通过，十例开发集对照为 10/10 主形态、6/7 状态。
-- [x] 复核 688216：3ATR 拐点序列构成头肩顶几何，但首个等幅目标为负，颈线外推也超出结构价格区间。用户于 2026-10-25 明确目标无效视为规则不成立，不输出该形态候选；v12 按此过滤，原始用户标签文件保留不覆盖。详情页当前只显示独立的 W 底未确认候选，不把负目标头肩顶画作形态。
-- [x] 本轮完成审计：用户明确目标无效时不输出形态候选；浏览器确认 688216 没有无效目标头肩顶，仅保留独立的“W底，未确认”结构。详情图在最新本机服务上再次验证 120→84→120 根。
 - [x] v12 阶段扫描曾输出 8 个买入条件候选；v13 增加量能与企业行动核验硬门槛后重新扫描为 0 个可考虑买入候选。保留该版本差异，避免把已被门槛撤销的结果当成当前状态。
 - [x] 本轮经 `/api/v1/backtests` 对 000001 执行 Backtrader 零费用功能回放；账户结果记录 1 笔已完成交易、1 笔未成交拒绝、16 条订单事件，权益与现金加持仓市值相等，两个账目不变量为真。
 - [x] 新增 `caisen-system/pytest.ini` 使仓库根目录可直接运行 `.venv/bin/python -m pytest -q caisen-system/tests`；本轮 128 项通过。
 - [x] 规格冲突审计发现“量能未验证时 WAIT”与“允许买入但排名惩罚”不一致；以 README、数据质量承诺和交易计划等待语义为准，v13 将未核验量能列为硬拒绝理由 `volume_data_unverified`。形态保留显示，计划和买入排序不再把它当可买候选。新增计划/决策回归测试，前端显示中文拒绝原因。
 - [x] v13 专项决策/计划/工作台测试 28 项通过；全量测试现为 128 项通过，JavaScript 语法检查通过。
 - [x] v13 工作台全市场扫描完成：5,294/5,294（3,655 股票、1,639 ETF），0 文件失败，0 个可考虑买入候选。首屏形态仍显示；量能/企业行动未核验的已确认候选明确返回“等待”，体现新的硬门槛。
-- [x] 补充旗形中继正例、过深回撤负例与不收敛三角形拒绝用例；验证用户对 688216 的规则——首个测幅目标非正时整条形态候选不输出。全量自动化测试 127 项通过，前端 JavaScript 语法检查通过。
 - [x] 扫描页筛选器将 ETF 类别值保留为 API 代码、显示改为中文，并提示周线只有在交易日历核实完整周后才参与正式判断；页面回归用例加入后全量测试 128 项通过。
 - [x] 当前浏览器实测服务健康状态为 `caisen-v13`；详情图缩放显示 120→84→120 根；扫描完成状态为 5,294/5,294，0 个买入候选；扫描首条 159268 可直达详情并显示形态、买入等待原因和数据核验告警。扫描页中文筛选与周线预览提示在重载后可见。
 - [x] 周线接入 `exchange-calendars==4.5.6` 的 XSHG 历史底表和上交所官方 2026 休市日；仅 2026 年形成正式周线，未独立验证的历史年与 2027+ 保持预览。短周与周中 as-of 回归通过；000001 当前正式周线 41 根，API/浏览器周线分析正常。
 - [x] 扩充正常/节假日短周/日历边界测试，并修订数据规格和验证说明；全量测试 131 项通过，JavaScript 语法检查通过。
-- [x] 重启本地 v13 服务后实测 000001 周线 API 返回 41 根正式周K和 2 个周线形态；详情页显示 24/41 周K，可缩放至 20、29 并恢复 24，页面同时列出日/周各自周期标签。
-- [ ] 头肩左右肩价差/头部至颈线高度 ≤7% 是 v12 开发集驱动的工程初值；v12 对原始十例标签为主形态 9/10、状态 6/7，其中 688216 原始头肩标签与后续规则澄清冲突。该阈值与 W/M 时长比门槛仍须在独立冻结留出集复核。
-- [x] v12 本地工作台验收：健康状态显示 `caisen-v12`；688216 详情不输出负目标头肩候选；放大后显示 84 根并可恢复至 120 根；成交量/失效价位图表右侧留白增至70像素后，23.77价格标签完整显示；控制台错误为0。全量测试124项通过。
-- [ ] 对当前状态分歧及高风险边界外推案例逐个图形复核，补充更多盲标样本；完成至少 240 例独立识别验收。
-- [x] 2026-10-25 增加本地 blind calibration round generator：固定种子、分层抽取股票/ETF与日/周K，排除同一轮重复标的，图页不呈现机器提名；导出答案可由 evaluator 直接读取。创建 round_02 10题供人工标注。
-- [x] evaluator 已支持标签携带 kind/timeframe，周线按已核验交易日历聚合；命令行支持指定标签、澄清文件与报告路径。ETF周线本地样本烟测通过；全套 pytest 150项通过，生成页 JS 语法检查通过。
-- [ ] round_02 及后续样本需用户/人工提供形态真值；系统不能自行给随机样本打真值标签。累计240例后再做分组识别验收。
 - [ ] 行情源前向运行与年度交易日历维护仍需后续验收；历史年份日历需独立交叉核验，2027+ 日历须待官方公告后补录。重试耗尽与文件保持不变已通过故障注入，策略收益验证继续暂缓。
 - [x] 校正周线交易日历：`exchange_calendars==4.5.6` 与上交所官方日期在 2020、2025 有差异，正式日期改由 `xshg-official-closures.json` 中 2020–2026 官方公告直接生成；2000–2019 第三方日历保持预览，2027+ 未录官方公告前不生成正式周线。新增逐周比对测试及数据说明。全量 Caisen 测试 132 项通过，JS 语法检查通过。
 - [x] 重启本地服务并复核：`/api/v1/health` 返回 `caisen-v13`；浏览器工作台恢复正常，000001 周线详情仍显示 24/41 根并有缩放控件。抽查 2020-01-31、2025 春节周、2025 劳动节周、2026 中秋短周及 2027 未验证日期均符合新日历范围。
 - [x] 通过详情页真实触发 000001 行情更新：AkShare Sina 返回 1 次请求成功，1991-04-03 至 2026-10-23 共 8,458 行。市场处于非交易日，数据截止日未推进；刷新后 SHA-256 与原文件相同，原始字节快照和清单中的旧/新哈希均核验一致。
 - [x] 改进行情更新可读性：更新结果在详情与全市场扫描页展示来源、覆盖日期、最新日期、请求次数、文件是否变化、哈希摘要及失败原因；全量明细默认限制前 20 行并提示任务 ID，可按 ID 查询完整任务结果。HTML 输出转义不可信的上游错误文本。新增 Node formatter 自动化用例与浏览器实测；Caisen 全量测试 133 项通过，两个前端脚本语法检查通过。
-- [x] 浏览器复验 688216 与图表交互：无效目标的头肩顶没有作为候选输出，只显示日/周“W底，未确认”；详情 K 线可从 120 缩放至 84 并恢复 120 根。
 - [x] 批量刷新加入可恢复检查点：启动时冻结库存；每个标的后持久化成功/失败与进度；启动恢复时将遗留 queued/running 状态标记 interrupted；resume 仅重试未成功项。全量结果中可按任务 ID 续跑完成但有失败的任务。捕获 worker 异常时保留最后成功检查点。
 - [x] 为批量检查点、重启恢复、部分成功重试及 formatter 恢复按钮添加测试；Caisen 全套 142 项通过。FastAPI 启动处理使用官方推荐 lifespan，清除弃用警告。
-- [x] 检查点扩展性审计：将初始标的清单和逐标的状态规范化保存到 `refresh_job_items`，`jobs.payload` 只写小型摘要；重启后 `/jobs/{id}` 从两表重建 inventory/results/failures。旧版内嵌 JSON 任务会在启动时迁移到新表。增加摘要体积、内存清空后重建及旧任务迁移测试。当前确认：目标测幅无效即规则不成立，任何书本形态候选均不输出（已在形态规则规格及 688216 回归用例中固定）。
-- [x] 根据用户更正复评 688216：原 v2 标签 10 的 `HS forming` 保留不改；单独追加澄清 `N/none`。发现漏出的是 W 底低点差17.9%–43.9%，新增15%工程门槛后日周均无当前候选，同时保留已标注的688330形成中W（低点差7.4%）。新开发集机器对照10/10、状态6/6；不能视为独立盲测准确率。规则版从 v13/rules-v4 升到 v14/rules-v5。
-- [x] v14 运行态复核：本地健康状态为 `caisen-v14`；688216 截至最新数据的详情页显示“当前周期没有识别到有效形态”，不再误标为未确认W；周线仍独立提示。浏览器控制台错误为0。
 - [x] 浏览器断点恢复补上会话外发现：新增 `GET /api/v1/data/refresh/jobs` 与全局可恢复任务横幅，即使 `sessionStorage` 没有任务号也能发现服务重启中断/部分失败任务。浏览器验收：重启后出现 999999 合成任务，点击恢复，任务回显“本地标的文件不存在”；该路径在行情源请求前终止。删除本轮测试任务，不执行 5,294 标的在线更新。全套 Caisen 测试 144 项通过，前端语法检查通过。
 
 ## Risks and Mitigations
@@ -327,7 +290,6 @@ market-data ──────────────────────�
 
 # Implementation Plan: 10招形态范围、买入候选与扫描筛选
 
-状态：用户已批准并授权自动实施；Task 1、Task 2 已完成。本计划是对上方已完成模块计划的新增变更，不覆盖既有校准、行情维护或收益验证待办。
 
 ## 目标与范围
 
@@ -340,8 +302,6 @@ market-data ──────────────────────�
 
 - 形态识别器负责输出十招结构与 `forming/confirmed` 生命周期；买入候选白名单和“未突破=等待”属于 decision-engine，不把交易动作耦合进几何识别器。
 - 保持现有日/周独立识别、扫描排序、7%风险与2R首目标、量能未核验等待语义及零费用 Backtrader 基线。
-- 活动规则目录升为新规则集版本，应用规则版本同步升级；历史报告、原始标注和 SQLite 历史记录不重写、不删除。新扫描/分析不得把两个退役形态作为当前活动候选；历史报告继续按其旧版本解释。
-- 新生成的校准问卷只提供十招选项；历史问卷和旧标注保留，评估器可识别旧轮次的退役标签并标为旧规则版本，避免将 v14 与新版本分数混为一谈。
 - 扫描结果筛选在已经返回的结果集合上应用，保留服务端已确定的排序、库存/失败计数和原始总数；筛选后重新计算显示条数与空结果文案。
 
 ## 依赖图
@@ -351,7 +311,6 @@ market-data ──────────────────────�
        ├──> 规则识别输出与历史兼容
        ├──> 四类买入候选白名单 + 未突破等待语义
        │          └──> 扫描动作/理由与详情解释
-       ├──> 十招校准问卷与当前报告
        └──> 扫描后形态筛选选项
                   └──> 扫描后买入/行动筛选
 ```
@@ -372,13 +331,10 @@ market-data ──────────────────────�
 - Files likely touched：`caisen/rules/patterns.v2.json`、`caisen/patterns.py`、`caisen/__init__.py`、`tests/test_rule_catalog.py`、`tests/test_patterns.py`。
 - Estimated scope：Medium。
 
-**Task 2：同步规格、规则说明和校准版本边界**
 
-- Description：更新 pattern-engine、decision-engine、analysis-workbench 规格以及用户说明，区分“原书审计仍保留 12 个历史候选”和“本版本活动规则为 10 招”；记录退役规则、版本差异及人工校准解释。
 - Acceptance：
   - 当前规格、扫描文案和活动规则清单统一写十招，不把原书目录事实改写为十招。
   - 历史 v14 评估/机器报告保留原样，新版本结果不混并为同一准确率统计。
-- Verification：搜索活动用户界面和当前规格中的“全部12招”、退役标签；仅历史归档可保留旧文案。
 - Dependencies：Task 1。
 - Files likely touched：`SPEC-pattern-engine.md`、`SPEC-decision-engine.md`、`SPEC-analysis-workbench.md`、`README.md`、`docs/rule-cards.md`。
 - Estimated scope：Medium。
@@ -386,7 +342,6 @@ market-data ──────────────────────�
 ### Checkpoint 1：识别目录
 
 - [x] 新目录是 10 项；两个复合项不再出现在当前识别；四个基础项保留。
-- [x] 旧版本标注、报告和历史记录仍可读取且版本可辨。
 
 ### 阶段 2：买入候选与等待动作
 
@@ -419,7 +374,6 @@ market-data ──────────────────────�
 - [x] 未突破的四类结构均可见、动作是等待且无买入 plan。
 - [x] 其它六类不能生成买入 plan；空头提示和已有风控规则不回退。
 
-### 阶段 3：扫描后动态筛选与校准兼容
 
 **Task 5：扫描完成后按行动/形态过滤**
 
@@ -435,18 +389,12 @@ market-data ──────────────────────�
 - Estimated scope：Medium。
 - Status：Complete. 2026-10-25 isolated browser acceptance on port 8302 with a temporary SQLite database: 3/3 scan completion; buy-only returns 0 with a clear empty state; WAIT + active W bottom returns 1 row; that row navigates to detail and displays “W底，未确认”. The user's 8301 service and its in-progress refresh were left untouched.
 
-**Task 6：更新新校准题与复核报告，不覆盖历史轮次**
 
-- Description：新生成的盲标题目使用十招活动清单；保留旧标签加载能力以读取 v14 轮次，退役标签在旧规则版本下解释；为新十招规则产生新轮次/报告并注明 v15 数据与规则版本。
 - Acceptance：
-  - 新问卷不显示 W底破底翻、假突破（头肩顶）；其它十招标签名称正确。
-  - 现有 round_01、round_02 文件和旧标注不被静默改写；旧结果可按旧版本回放。
   - 新报告版本、规则集与数据版本明确，不宣称十例开发集或小样本为独立准确率。
 - Verification：新表单选项测试；旧答案 JSON 兼容测试；新旧规则版本比较语义测试。
 - Dependencies：Task 1。
-- Files likely touched：`caisen/calibration.py`、`caisen/calibration_pack.py`、`tests/test_calibration.py`、`tests/test_calibration_pack.py`、新增版本化校准 HTML/报告。
 - Estimated scope：Medium。
-- Status：Implementation complete. Generated `calibration/round_03_v15.html` with only the active ten labels plus N and versioned answer metadata; legacy WS/FBHS remain readable. Existing `round_01_v14` remains `caisen-v14` / `caisen-rules-v5`; new `round_01_v15.machine-review.json` records v15/rules-v6 separately and labels the legacy round/version provenance. The new round's user-label comparison remains pending until answers are supplied.
 
 **Task 7：本地运行与端到端验收**
 
@@ -472,7 +420,6 @@ market-data ──────────────────────�
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 旧的12招报告、标注与新10招口径混用 | 错误宣称算法比较或准确率提升 | 规则版本隔离；不改写旧报告；新校准轮次使用新规则版 |
 | 买入候选白名单误删空头结构 | 扫描无法提示持仓风险 | 限制仅作用于多头买入 plan；十招识别及 SELL_IF_HELD 独立保留 |
 | 形成中的旗形没有传统颈线 | 状态条件实现错误 | 按规则分别定义颈线/箱体边界/旗面突破线及前高解锁条件 |
 | 买入快速筛选结果为空 | 用户误以为扫描失败 | 展示通过门槛数量、零结果说明和一键查看全部 |
@@ -482,3 +429,32 @@ market-data ──────────────────────�
 - 本计划将“只保留部分信号对应的形态候选”解释为：十招继续识别和展示，四类指定的多头结构才允许成为买入候选；其它六招仍用于背景/风险/卖出提示，但不生成买入计划。
 - 扫描结果默认保留“全部”视图和买入优先顺序，同时把“可考虑买入”提供为显眼的快速筛选；不在候选数为零时隐藏其余扫描结果。
 - 本计划仅是任务拆解，尚未改代码；完成计划审阅后再开始实施。
+
+
+
+## 2026-10-27 approved workbench implementation
+
+User approved all current specifications and explicitly authorized implementation, including deletion of the original Downloads answer JSON. Work in the current directory; do not stage unrelated changes.
+
+Dependency order: chart geometry/selection → review and calibration retirement → historical cutoff retirement → full-scan and refresh simplification → integration verification.
+
+1. Add a pure chart geometry/window helper with focused Node tests, connect event selection across timeframes, annotate frozen points/boundaries and terminal markers.
+2. Remove review UI/API and calibration code/data; migrate local reviews records away. Rename structural ambiguity to a deterministic WAIT warning.
+3. Remove analysis asof inputs and core cutoff arguments, adapt weekly tests to explicit bar prefixes/live calendar and preserve prefix causality/Backtrader.
+4. Remove refresh recovery persistence/routes and scan prefilters; retain current-run progress and result filtering.
+5. Run the Caisen suite and Node checks, inspect real chart selection in the browser, restart 8301 and document actual results.
+
+Each slice verifies its focused behavior; full suite is the final gate. No full-market network update is part of verification.
+
+2026-10-27 completion: all approved slices implemented and verified. Current product has two navigation entries, transient refresh progress, post-scan-only filters, historical pattern chart selection, no human calibration/review workflow and no arbitrary analysis cutoff.
+
+## 2026-10-28 approved scan and simulation amendments
+
+- [x] Add stock/ETF scope and an optional symbol cap before scanning; add an inclusive date interval applied to daily data before weekly aggregation and recognition.
+- [x] Keep all shapes in the safety decision. The multi-select only seeds the existing post-scan display filter and does not shorten detection time.
+- [x] Label historical scan results with their effective interval end and warn that navigation loads current detail analysis.
+- [x] Add an asynchronous Backtrader panel for instrument, timeframe, dates and starting cash, showing orders, trades, rejections, cash, open position, equity and accounting checks. Strategy-effectiveness verification remains deferred.
+- [x] Keep weeks cut by a scan-window boundary preview-only, including a midweek start with a later Friday bar.
+- [x] Fix Backtest API date slicing and its `_market_data` signature mismatch.
+
+Verification: 140 Caisen pytest tests pass from the stock workspace root; 5 Node tests, JavaScript syntax and Python compilation pass. The HTTP page and `/api/v1/backtests` pass on an isolated local service with temporary SQLite storage; zero-fee and ledger invariants are true. No live market refresh or strategy-effectiveness study is run.

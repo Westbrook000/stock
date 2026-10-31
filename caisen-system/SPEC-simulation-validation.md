@@ -27,3 +27,10 @@ Return starting cash, ending cash, available cash, marked position value, equity
 - An open end-of-data position reconciles its marked equity.
 - No-calendar weekly input produces zero formal weekly signals.
 - Run simulation tests and all Caisen tests. Do not report profitability metrics as evidence of validity.
+
+## 2026-10-28 approved workbench amendment
+
+- The local workbench provides a Backtrader panel with instrument code, stock/ETF kind, daily/weekly signal timeframe, optional start/end dates, and initial cash.
+- The browser submits the request asynchronously and shows running/completed/error status. The result displays zero commission/slippage, order events, fills/trades, rejected signals, available cash, marked position value, ending equity, open position, and accounting invariants.
+- The API applies the inclusive date interval before simulation, reports the actual available interval and whether it predates the latest local bar, and rejects invalid or non-positive cash and reversed dates.
+- Every result states that this phase validates execution and accounting only; strategy effectiveness remains deferred.

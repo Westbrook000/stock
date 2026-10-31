@@ -1,5 +1,5 @@
 {
-  "rule_set_version": "caisen-rules-v6",
+  "rule_set_version": "caisen-rules-v7",
   "patterns": [
     {
       "rule_id": "w_bottom",
@@ -45,15 +45,15 @@
         },
         {
           "name": "max_leg_duration_ratio",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 2.5,
-          "rationale": "筛除两段或相邻触点时间跨度极端不均衡的候选；由 round_01_v2 的三个 N 负例与一个 W 形成正例提出，仅为开发阈值，不是原书参数或准确率结论。"
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
         },
         {
           "name": "max_trough_gap_ratio",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 0.15,
-          "rationale": "底部间距超过较高底部的15%时拒绝W底候选；由用户对688216明确标注N、对688330标注形成中W的对照提出，仍是小样本工程阈值，不是原书参数。"
+          "rationale": "底部间距超过较高底部的15%时拒绝W底候选；固定工程阈值，不是原书参数或准确率结论。"
         }
       ],
       "source_refs": [
@@ -64,7 +64,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "spring",
@@ -111,7 +111,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "bull_flag",
@@ -193,7 +193,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "bear_flag",
@@ -275,7 +275,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "m_top",
@@ -320,9 +320,9 @@
         },
         {
           "name": "max_leg_duration_ratio",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 2.5,
-          "rationale": "筛除两段或相邻触点时间跨度极端不均衡的候选；由 round_01_v2 的三个 N 负例与一个 W 形成正例提出，仅为开发阈值，不是原书参数或准确率结论。"
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
         }
       ],
       "source_refs": [
@@ -333,7 +333,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "false_breakout",
@@ -380,7 +380,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "head_shoulders",
@@ -420,9 +420,9 @@
       "engineering_parameters": [
         {
           "name": "shoulder_tolerance",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 0.07,
-          "rationale": "左右肩高差相对头部至颈线高度不超过7%；依据首轮标签区分头肩候选与N误报，是待独立留出样本验证的工程参数，不是原书数值。"
+          "rationale": "双肩差相对头部至颈线高度的比例上限为7%；固定工程阈值，未经统计有效性验证。"
         }
       ],
       "source_refs": [
@@ -433,7 +433,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "inverse_head_shoulders",
@@ -473,9 +473,9 @@
       "engineering_parameters": [
         {
           "name": "shoulder_tolerance",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 0.07,
-          "rationale": "左右肩高差相对头部至颈线高度不超过7%；依据首轮标签区分头肩候选与N误报，是待独立留出样本验证的工程参数，不是原书数值。"
+          "rationale": "双肩差相对头部至颈线高度的比例上限为7%；固定工程阈值，未经统计有效性验证。"
         }
       ],
       "source_refs": [
@@ -486,7 +486,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "triangle_top",
@@ -532,9 +532,9 @@
         },
         {
           "name": "max_leg_duration_ratio",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 2.5,
-          "rationale": "筛除两段或相邻触点时间跨度极端不均衡的候选；由 round_01_v2 的三个 N 负例与一个 W 形成正例提出，仅为开发阈值，不是原书参数或准确率结论。"
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
         }
       ],
       "source_refs": [
@@ -551,7 +551,7 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     },
     {
       "rule_id": "triangle_bottom",
@@ -597,9 +597,9 @@
         },
         {
           "name": "max_leg_duration_ratio",
-          "status": "calibration_derived_initial",
+          "status": "fixed_engineering",
           "value": 2.5,
-          "rationale": "筛除两段或相邻触点时间跨度极端不均衡的候选；由 round_01_v2 的三个 N 负例与一个 W 形成正例提出，仅为开发阈值，不是原书参数或准确率结论。"
+          "rationale": "相邻结构段时长比例上限为2.5；固定工程阈值，不是原书参数或准确率结论。"
         }
       ],
       "source_refs": [
@@ -616,7 +616,52 @@
           "source_status": "verified"
         }
       ],
-      "rule_set_version": "caisen-rules-v6"
+      "rule_set_version": "caisen-rules-v7"
     }
-  ]
+  ],
+  "main_structure_extension": {
+    "source_rule_version": "caisen-main-bottoms-v1",
+    "timeframes": {
+      "1d": {"structure_window_calendar_years": 5, "minimum_duration_calendar_months": 6},
+      "1w": {"structure_window_calendar_years": 10, "minimum_duration_calendar_months": 12}
+    },
+    "minimum_duration_calendar_months": 6,
+    "minimum_duration_calendar_months_by_timeframe": {"1d": 6, "1w": 12},
+    "pivot_scales": [
+      {"name": "2atr_5pct", "atr_multiple": 2.0, "percent_multiple": 0.05},
+      {"name": "3atr_8pct", "atr_multiple": 3.0, "percent_multiple": 0.08},
+      {"name": "5atr_12pct", "atr_multiple": 5.0, "percent_multiple": 0.12}
+    ],
+    "neckline_tests": {
+      "minimum_independent_groups": 2,
+      "lookback_calendar_years": 1,
+      "minimum_separation_daily_sessions": 10,
+      "minimum_separation_weekly_bars": 2,
+      "minimum_departure_atr": 1.0,
+      "tolerance_atr": 0.5,
+      "minimum_tolerance_ticks": 2,
+      "w_bottom_rim_association_ceiling_relative": 0.2,
+      "w_bottom_rim_snap_relative": 0.05
+    },
+    "neckline_slope": {
+      "maximum_cumulative_relative_rise": 0.05,
+      "rationale": "两次独立颈线测试间累计相对上升超过5%时排除；不以绝对价格水平决定。"
+    },
+    "breakout": {
+      "close_buffer_previous_atr_multiple": 1.0,
+      "minimum_buffer_ticks": 2
+    },
+    "w_bottom": {"maximum_trough_gap_ratio": 0.15},
+    "low_position": {
+      "full_history_position_max": 0.3,
+      "prepattern_lookback_calendar_years": 2,
+      "minimum_prepattern_drawdown": 0.3
+    },
+    "volume_support_ratio": 1.5,
+    "volume_required": false,
+    "child_suppression": {
+      "same_timeframe_only": true,
+      "known_by_child_action_date": true
+    }
+  }
 }

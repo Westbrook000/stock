@@ -1,0 +1,790 @@
+import hashlib
+from functools import lru_cache
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+
+from . import RULE_VERSION
+from .indicators import atr, volume_ratio
+from .pivots import detect_pivots
+from .schemas import Pattern
+from .rules.catalog import load_rule_catalog
+
+
+BOOK_PATTERNS = {
+    "w_bottom": "W底", "spring": "破底翻",
+    "bull_flag": "下飘旗形上涨中继", "inverse_head_shoulders": "头肩底", "triangle_bottom": "收敛三角形底部",
+    "m_top": "M头", "false_breakout": "假突破",
+    "bear_flag": "上飘旗形下跌中继", "head_shoulders": "头肩顶", "triangle_top": "收敛三角形头部",
+}
+LEGACY_PATTERN_LABELS = {
+    "w_bottom_spring": "W底破底翻",
+    "false_breakout_head_shoulders": "假突破（头肩顶）",
+}
+PATTERN_LABELS = {**BOOK_PATTERNS, **LEGACY_PATTERN_LABELS}
+
+
+@lru_cache(maxsize=1)
+def _active_rule_ids():
+    return {item["rule_id"] for item in load_rule_catalog()["patterns"]}
+
+
+@lru_cache(maxsize=1)
+def _rule_set_version():
+    return load_rule_catalog()["rule_set_version"]
+
+
+@lru_cache(maxsize=1)
+def _engineering_parameters():
+    return {item["rule_id"]: {parameter["name"]: parameter["value"]
+                              for parameter in item.get("engineering_parameters", [])}
+            for item in load_rule_catalog()["patterns"]}
+
+
+def _duration_balance_ratio(pattern_type, seq):
+    if pattern_type in ("w_bottom", "triangle_bottom"):
+        outer_kind, middle_kind = "low", "high"
+    elif pattern_type in ("m_top", "triangle_top"):
+        outer_kind, middle_kind = "high", "low"
+    else:
+        return None
+    if pattern_type.startswith("triangle_"):
+        gaps = [b.index - a.index for a, b in zip(seq, seq[1:])]
+    else:
+        outer = [pivot for pivot in seq if pivot.kind == outer_kind]
+        if len(outer) < 2:
+            return None
+        first, last = outer[0], outer[-1]
+        centers = [pivot for pivot in seq if pivot.kind == middle_kind and first.index < pivot.index < last.index]
+        if not centers:
+            return None
+        center = (max(centers, key=lambda pivot: pivot.price) if middle_kind == "high"
+                  else min(centers, key=lambda pivot: pivot.price))
+        gaps = [center.index - first.index, last.index - center.index]
+    if not gaps or min(gaps) <= 0:
+        return None
+    return max(gaps) / min(gaps)
+
+
+def _passes_duration_balance(pattern_type, seq):
+    limit = _engineering_parameters().get(pattern_type, {}).get("max_leg_duration_ratio")
+    ratio = _duration_balance_ratio(pattern_type, seq)
+    return limit is None or ratio is None or ratio <= float(limit)
+
+
+def _passes_trough_tolerance(pattern_type, seq):
+    if pattern_type != "w_bottom":
+        return True
+    limit = _engineering_parameters().get(pattern_type, {}).get("max_trough_gap_ratio")
+    if limit is None:
+        return True
+    lows = [float(pivot.price) for pivot in seq if pivot.kind == "low"]
+    if len(lows) < 2 or max(lows) <= 0:
+        return False
+    return (max(lows) - min(lows)) / max(lows) <= float(limit)
+
+
+def _passes_shoulder_tolerance(pattern_type, seq, neckline):
+    limit = _engineering_parameters().get(pattern_type, {}).get("shoulder_tolerance")
+    if limit is None or len(seq) != 5:
+        return True
+    head = seq[2]
+    neck_at_head = _at(neckline, head.index)
+    depth = (head.price - neck_at_head if pattern_type == "head_shoulders"
+             else neck_at_head - head.price)
+    if depth <= 0:
+        return False
+    ratio = abs(float(seq[0].price) - float(seq[4].price)) / depth
+    return ratio <= float(limit)
+
+
+def current_pattern_snapshot(patterns):
+    """Keep the latest event per rule for a current-analysis screen.
+
+    Machine consumers can retain the complete event list returned by
+    ``detect_patterns``. The snapshot keeps a terminal latest event as history
+    instead of reviving an older same-rule event. It ranks only frozen pivot
+    anchor indices already present in each event.
+    """
+    latest = {}
+    for pattern in patterns:
+        anchor_indices = [value for key, value in pattern.key_points.items()
+                          if key.startswith("pivot_") and key.endswith("_index") and isinstance(value, int)]
+        anchor = max(anchor_indices, default=-1)
+        rank = (anchor, pattern.formed_at, pattern.pattern_id)
+        current = latest.get(pattern.pattern_type)
+        if current is None or rank > current[0]:
+            latest[pattern.pattern_type] = (rank, pattern)
+    return sorted((item[1] for item in latest.values()), key=lambda pattern: (pattern.formed_at, pattern.pattern_type), reverse=True)
+
+
+def _line(p1, p2):
+    if p1[0] == p2[0]:
+        return {"slope": 0.0, "intercept": float(p1[1])}
+    slope = (p2[1] - p1[1]) / (p2[0] - p1[0])
+    return {"slope": float(slope), "intercept": float(p1[1] - slope * p1[0])}
+
+
+def _at(line, index):
+    return line["slope"] * index + line["intercept"]
+
+
+def _valid_projection_geometry(seq, neck, targets, direction, end):
+    """Reject impossible boundary geometry and rules without a positive first target."""
+    last_pivot = seq[-1]
+    boundary = _at(neck, last_pivot.index)
+    if direction == "bearish" and boundary >= float(last_pivot.price):
+        return False
+    if direction == "bullish" and boundary <= float(last_pivot.price):
+        return False
+    target_is_valid = bool(targets) and np.isfinite(float(targets[0])) and float(targets[0]) > 0
+    if not target_is_valid:
+        return False
+    return True
+
+
+_MATURITY_GATED_PATTERNS = {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}
+
+
+def _duration_quality(start_date, observed_date, confirmation_date=None):
+    """Return the strict three-calendar-month rule for a frozen structure."""
+    start = pd.Timestamp(start_date).normalize()
+    observed = pd.Timestamp(observed_date).normalize()
+    eligible_after = start + pd.DateOffset(months=3)
+    first_break = pd.Timestamp(confirmation_date).normalize() if confirmation_date is not None else None
+    early_break = first_break is not None and first_break <= eligible_after
+    return {
+        "start_date": str(start.date()),
+        "observed_date": str(observed.date()),
+        "duration_days": int((observed - start).days),
+        "eligible_after": str(eligible_after.date()),
+        "first_valid_break_date": str(first_break.date()) if first_break is not None else None,
+        "early_break": bool(early_break),
+        "eligible": bool(not early_break and observed > eligible_after),
+    }
+
+
+def _prepare_position_history(background_bars):
+    """Normalize all market history once so candidate checks use indexed prefixes."""
+    if background_bars is None or background_bars.empty:
+        return {"_position_history": True, "dates": np.array([], dtype=np.int64),
+                "lows": np.array([], dtype=float), "highs": np.array([], dtype=float),
+                "prefix_min_low": np.array([], dtype=float),
+                "prefix_max_high": np.array([], dtype=float)}
+    history = background_bars[["date", "low", "high"]].copy()
+    history["date"] = pd.to_datetime(history.date, errors="coerce")
+    history["low"] = pd.to_numeric(history.low, errors="coerce")
+    history["high"] = pd.to_numeric(history.high, errors="coerce")
+    history = history.dropna(subset=["date"]).sort_values("date")
+    dates = pd.DatetimeIndex(history.date).asi8
+    lows = history.low.to_numpy(dtype=float)
+    highs = history.high.to_numpy(dtype=float)
+    return {"_position_history": True, "dates": dates, "lows": lows, "highs": highs,
+            "prefix_min_low": np.minimum.accumulate(np.where(np.isfinite(lows), lows, np.inf)),
+            "prefix_max_high": np.maximum.accumulate(np.where(np.isfinite(highs), highs, -np.inf))}
+
+
+def _low_position_quality(structure_low, start_date, background_bars, observed_date=None):
+    """Evaluate the two approved low-position branches using only known bars."""
+    result = {"structure_low": float(structure_low), "passed": False,
+              "position_pass": False, "drawdown_pass": False}
+    if isinstance(background_bars, dict) and background_bars.get("_position_history"):
+        history = background_bars
+    else:
+        history = _prepare_position_history(background_bars)
+    dates = history["dates"]
+    if len(dates) == 0:
+        return result
+    start = pd.Timestamp(start_date).normalize()
+    asof = (pd.Timestamp(observed_date).normalize() if observed_date is not None
+            else pd.Timestamp(dates[-1], unit="ns").normalize())
+    right = int(np.searchsorted(dates, asof.value, side="right"))
+    if right == 0:
+        return result
+    low = float(history["prefix_min_low"][right - 1])
+    high = float(history["prefix_max_high"][right - 1])
+    if not np.isfinite(low) or not np.isfinite(high):
+        return result
+    result.update({"history_start": str(pd.Timestamp(dates[0], unit="ns").date()),
+                   "history_end": str(pd.Timestamp(dates[right - 1], unit="ns").date()),
+                   "range_low": low, "range_high": high,
+                   "position_threshold": 0.30, "position_ratio": None,
+                   "prepattern_high": None, "prepattern_drawdown": None,
+                   "drawdown_threshold": 0.30})
+    if np.isfinite(low) and np.isfinite(high) and high > low:
+        ratio = (float(structure_low) - low) / (high - low)
+        result["position_ratio"] = float(ratio)
+        result["position_pass"] = bool(0 <= ratio <= 0.30)
+    cutoff = start - pd.DateOffset(years=2)
+    left = int(np.searchsorted(dates, cutoff.value, side="left"))
+    right_start = min(int(np.searchsorted(dates, start.value, side="left")), right)
+    prior_highs = history["highs"][left:right_start]
+    finite_prior_highs = prior_highs[np.isfinite(prior_highs)]
+    if len(finite_prior_highs) and float(finite_prior_highs.max()) > 0:
+        pre_high = float(finite_prior_highs.max())
+        drawdown = (pre_high - float(structure_low)) / pre_high
+        result["prepattern_high"] = pre_high
+        result["prepattern_drawdown"] = float(drawdown)
+        result["drawdown_pass"] = bool(drawdown >= 0.30)
+    result["passed"] = bool(result["position_pass"] or result["drawdown_pass"])
+    return result
+
+
+def detect_patterns(bars: pd.DataFrame, code="", kind="stock", timeframe="1d", _atr_multiple=2.0,
+                    background_bars=None, structure_window=520, _position_history=None) -> List[Pattern]:
+    """Causal first-pass recognizer for the 12 book families; all matches retain evidence."""
+    observed = bars.copy().reset_index(drop=True)
+    if observed.empty:
+        return []
+    background = (background_bars.copy().reset_index(drop=True) if background_bars is not None
+                  else observed.copy())
+    # Defensive as-of clipping: callers should pass a full prefix, but future rows
+    # must never affect evidence even if a caller accidentally supplies them.
+    cutoff = pd.to_datetime(observed.date.iloc[-1])
+    background["date"] = pd.to_datetime(background.date, errors="coerce")
+    background = background[background.date.notna() & (background.date <= cutoff)].reset_index(drop=True)
+    position_history = _position_history or _prepare_position_history(background)
+    frame = observed.tail(max(8, int(structure_window))).copy().reset_index(drop=True)
+    object.__setattr__(frame, "_caisen_pattern_context", {
+        "background_position_history": position_history,
+        "dates": pd.DatetimeIndex(pd.to_datetime(frame.date)),
+        "close": frame.close.to_numpy(dtype=float),
+        "high": frame.high.to_numpy(dtype=float),
+        "low": frame.low.to_numpy(dtype=float),
+    })
+    if len(frame) < 8:
+        return []
+    provenance = frame.attrs.get("provenance", {})
+    pivots = detect_pivots(frame, radius=2, atr_multiple=_atr_multiple)
+    if "segment_id" in frame:
+        pivots = [p for p in pivots if int(frame.segment_id.iloc[p.index]) == int(frame.segment_id.iloc[p.confirmed_at])]
+    if not pivots:
+        return []
+    found = []
+    close = frame.close.to_numpy()
+    # Consecutive 5-point topology: valley/peak/valley/peak/valley or its mirror.
+    for start in range(0, max(0, len(pivots) - 4)):
+        seq = pivots[start:start + 5]
+        if len(seq) != 5:
+            continue
+        if "segment_id" in frame and frame.segment_id.iloc[[p.index for p in seq]].nunique() > 1:
+            continue
+        types = [p.kind for p in seq]
+        i0, i1, i2, i3, i4 = [p.index for p in seq]
+        if types == ["low", "high", "low", "high", "low"]:
+            lo1, hi1, lo2, hi2, lo3 = [p.price for p in seq]
+            neck_hs=_line((i1, hi1), (i3, hi2))
+            if (lo2 < lo1 and lo2 < lo3
+                    and _passes_shoulder_tolerance("inverse_head_shoulders", seq, neck_hs)):
+                neck_level=_at(neck_hs,i4)
+                distance=neck_level-lo2
+                _add(found, frame, code, kind, timeframe, "inverse_head_shoulders", seq, close[-1],
+                     neck_hs, min(lo1, lo2, lo3), [neck_level+distance,neck_level+2*distance], i4)
+            if (_passes_trough_tolerance("w_bottom", seq)
+                    and _passes_duration_balance("w_bottom", seq)):
+                neck = _line((i1, hi1), (i3, hi2))
+                neck_level=(hi1+hi2)/2.0; bottom_level=(lo1+lo2+lo3)/3.0
+                distance=neck_level-bottom_level; target = neck_level + distance
+                _add(found, frame, code, kind, timeframe, "w_bottom", seq, close[-1], neck,
+                     min(lo1, lo2, lo3), [target,target+distance], i4)
+            # Both descending upper and ascending lower bounds indicate a converging base.
+            lower = _line((i0, lo1), (i4, lo3)); upper = _line((i1, hi1), (i3, hi2))
+            if (lower["slope"] > 0 and upper["slope"] < 0
+                    and _passes_duration_balance("triangle_bottom", seq)):
+                cross = (lower["intercept"] - upper["intercept"]) / (upper["slope"] - lower["slope"])
+                position = (i4 - i0) / max(cross - i0, 1)
+                if 0.5 <= position <= 0.75:
+                    base_width=max(0.0,_at(upper,i0)-_at(lower,i0))
+                    _add(found, frame, code, kind, timeframe, "triangle_bottom", seq, close[-1], upper,
+                         min(lo1, lo2, lo3), [_at(upper,i4)+base_width], i4)
+        if types == ["high", "low", "high", "low", "high"]:
+            hi1, lo1, hi2, lo2, hi3 = [p.price for p in seq]
+            hs_neck=_line((i1, lo1), (i3, lo2))
+            if (hi2 > hi1 and hi2 > hi3
+                    and _passes_shoulder_tolerance("head_shoulders", seq, hs_neck)):
+                neck_level=_at(hs_neck,i4); head_level=hi2
+                distance=head_level-neck_level
+                _add(found, frame, code, kind, timeframe, "head_shoulders", seq, close[-1],
+                     hs_neck, max(hi1, hi2, hi3), [neck_level-distance,neck_level-2*distance], i4, direction="bearish")
+            if (abs(hi1 - hi3) <= max(hi2 - min(lo1, lo2), 1e-9) * 0.75
+                    and _passes_duration_balance("m_top", seq)):
+                neck = _line((i1, lo1), (i3, lo2)); target = min(lo1, lo2) - (max(hi1, hi2, hi3) - min(lo1, lo2))
+                _add(found, frame, code, kind, timeframe, "m_top", seq, close[-1], neck,
+                     max(hi1, hi2, hi3), [target], i4, direction="bearish")
+            upper = _line((i0, hi1), (i4, hi3)); lower = _line((i1, lo1), (i3, lo2))
+            if (upper["slope"] < 0 and lower["slope"] > 0
+                    and _passes_duration_balance("triangle_top", seq)):
+                cross = (lower["intercept"] - upper["intercept"]) / (upper["slope"] - lower["slope"])
+                if 0.5 <= (i4-i0) / max(cross-i0, 1) <= 0.75:
+                    base_width=max(0.0,_at(upper,i0)-_at(lower,i0))
+                    _add(found, frame, code, kind, timeframe, "triangle_top", seq, close[-1], lower,
+                         max(hi1, hi2, hi3), [_at(lower,i4)-base_width], i4, direction="bearish")
+    # Two-point W/M are also classified from the trailing three-turn topology.
+    for j in range(0, max(0, len(pivots)-2)):
+        seq = pivots[j:j+3]
+        if len(seq) != 3: continue
+        if "segment_id" in frame and frame.segment_id.iloc[[p.index for p in seq]].nunique() > 1:
+            continue
+        kinds = [p.kind for p in seq]; a,b,c = seq
+        if (kinds == ["low", "high", "low"]
+                and _passes_trough_tolerance("w_bottom", seq)
+                and _passes_duration_balance("w_bottom", seq)):
+            line = {"slope": 0.0, "intercept": b.price}
+            bottom_mid=(a.price+c.price)/2.0
+            distance=b.price-bottom_mid; first=b.price+distance
+            _add(found, frame, code, kind, timeframe, "w_bottom", seq, close[-1], line,
+                 min(a.price,c.price), [first,first+distance], c.index)
+        if (kinds == ["high", "low", "high"]
+                and abs(a.price-c.price) < (max(a.price,c.price)-b.price)*0.55
+                and _passes_duration_balance("m_top", seq)):
+            _add(found, frame, code, kind, timeframe, "m_top", seq, close[-1], {"slope":0.0,"intercept":b.price},
+                 max(a.price,c.price), [b.price-(max(a.price,c.price)-b.price)], c.index, direction="bearish")
+    box_events = _detect_box_reclaims(frame, code, kind, timeframe, pivots)
+    found.extend(box_events)
+    # Continuation flag candidates: prior impulse followed by bounded counter-trend range and breakout.
+    found.extend(_detect_flags(frame, code, kind, timeframe))
+    # Remove duplicate same-type event identities while retaining distinct book labels.
+    unique = {}
+    for p in found:
+        unique[p.pattern_id] = p
+    if _atr_multiple == 2.0:
+        for p in detect_patterns(frame,code,kind,timeframe,_atr_multiple=3.0,
+                                 background_bars=background, structure_window=structure_window,
+                                 _position_history=position_history):
+            unique[p.pattern_id]=p
+    active = _active_rule_ids()
+    recognized = [pattern for pattern in unique.values() if pattern.pattern_type in active]
+    topology_groups = {}
+    for pattern in recognized:
+        indices = tuple(pattern.key_points.get("pivot_%d_index" % n) for n in range(1, 6))
+        indices = tuple(index for index in indices if index is not None)
+        if len(indices) >= 3:
+            topology_groups.setdefault(indices, []).append(pattern)
+    for group in topology_groups.values():
+        labels = sorted({pattern.pattern_type for pattern in group})
+        if len(labels) > 1:
+            for pattern in group:
+                if "ambiguous_structure" not in pattern.flags:
+                    pattern.flags.append("ambiguous_structure")
+                pattern.evidence.append({"code": "competing_topology_labels", "value": labels})
+    for pattern in recognized:
+        pattern.last_observed_date = str(pd.to_datetime(frame.date.iloc[-1]).date())
+        pattern.source_rule_version = _rule_set_version()
+    return sorted(recognized, key=lambda p: (p.formed_at, p.pattern_id), reverse=True)
+
+
+def _add(out, frame, code, kind, tf, ptype, seq, current_close, neck, invalidation, targets, anchor,
+         direction="bullish", extra=None):
+    index = len(frame)-1
+    context = getattr(frame, "_caisen_pattern_context", {})
+    close_values = context.get("close")
+    high_values = context.get("high")
+    low_values = context.get("low")
+    dates = context.get("dates")
+    if close_values is None:
+        close_values = frame.close.to_numpy(dtype=float)
+        high_values = frame.high.to_numpy(dtype=float)
+        low_values = frame.low.to_numpy(dtype=float)
+        dates = pd.DatetimeIndex(pd.to_datetime(frame.date))
+    # Freeze topology at the last anchor, then find the first causal close break and later invalidation.
+    anchor=max(p.index for p in seq)
+    known_at=max(p.confirmed_at for p in seq)
+    segment_values = frame.segment_id.to_numpy() if "segment_id" in frame else None
+    segment = int(segment_values[anchor]) if segment_values is not None else 0
+    end = index
+    if "segment_id" in frame:
+        later = frame.index[(segment_values != segment) & (frame.index > anchor)]
+        if len(later): end = int(later[0]) - 1
+    if known_at > end:
+        return
+    if not _valid_projection_geometry(seq, neck, targets, direction, end):
+        return
+    first_target_valid = bool(targets) and np.isfinite(float(targets[0])) and float(targets[0]) > 0
+    target_values = [float(target) for target in targets] if first_target_valid else []
+    breaks=[]
+    for k in range(known_at,end+1):
+        above=close_values[k] > _at(neck,k)
+        if above if direction=="bullish" else not above:
+            breaks.append(k)
+    confirm_idx=breaks[0] if breaks else max(p.confirmed_at for p in seq)
+    start_date = dates[min(p.index for p in seq)]
+    observed_date = dates[end]
+    first_break_date = dates[breaks[0]] if breaks else None
+    duration_quality = None
+    low_quality = None
+    if ptype in _MATURITY_GATED_PATTERNS:
+        first_structure_index = min(p.index for p in seq)
+        structural_break = next((k for k in range(first_structure_index + 1, end + 1)
+                                 if (close_values[k] > _at(neck, k) if direction == "bullish"
+                                     else close_values[k] < _at(neck, k))), None)
+        structural_break_date = dates[structural_break] if structural_break is not None else None
+        # Freeze eligibility and price position at the signal date. Later bars
+        # may update event state, but cannot rewrite whether it qualified then.
+        quality_date = structural_break_date if structural_break_date is not None else observed_date
+        duration_quality = _duration_quality(start_date, quality_date, structural_break_date)
+        # A breakout before the maturity boundary invalidates this frozen shape
+        # forever; it cannot re-enter the candidate pool after three months.
+        if duration_quality["early_break"] or not duration_quality["eligible"]:
+            return
+        background = context.get("background_position_history", frame)
+        low_quality = _low_position_quality(
+            min(float(p.price) for p in seq if p.kind == "low"),
+            start_date, background, quality_date)
+        if not low_quality["passed"]:
+            return
+    crossed_data_break = end < index
+    terminal_state = None
+    target_index = None
+    structure_invalidation_index = None
+    neckline_invalidation_index = None
+    price_floor = min(float(p.price) for p in seq)
+    price_ceiling = max(float(p.price) for p in seq)
+
+    first_target_valid = bool(targets) and np.isfinite(float(targets[0])) and float(targets[0]) > 0
+    def projection_outside_structure(k):
+        projected = _at(neck, k)
+        return projected <= 0 or projected < price_floor or projected > price_ceiling
+
+    if breaks:
+        first_target = target_values[0] if target_values else None
+        preconfirmation_failure = next((k for k in range(anchor + 1, confirm_idx + 1)
+            if ((close_values[k] < float(invalidation) if direction == "bullish"
+                 else close_values[k] > float(invalidation)) or projection_outside_structure(k))), None)
+        if preconfirmation_failure is not None:
+            terminal_state = "invalidated"
+            if projection_outside_structure(preconfirmation_failure):
+                neckline_invalidation_index = preconfirmation_failure
+            else:
+                structure_invalidation_index = preconfirmation_failure
+        for k in range(confirm_idx + 1, end + 1) if terminal_state is None else ():
+            invalidated_here = ((close_values[k] < _at(neck,k)) if direction == "bullish"
+                                else (close_values[k] > _at(neck,k)))
+            # Daily OHLC cannot establish which level traded first within one bar;
+            # resolve a same-bar stop/target touch conservatively as invalidation.
+            if invalidated_here:
+                terminal_state = "invalidated"
+                neckline_invalidation_index = k
+                break
+            if projection_outside_structure(k):
+                terminal_state = "invalidated"
+                neckline_invalidation_index = k
+                break
+            target_reached_here = (first_target is not None and
+                                   (high_values[k] >= first_target if direction == "bullish"
+                                    else low_values[k] <= first_target))
+            if target_reached_here:
+                terminal_state = "target_reached"
+                target_index = k
+                break
+    else:
+        for k in range(anchor + 1, end + 1):
+            invalidated_here = (close_values[k] < float(invalidation) if direction == "bullish"
+                                else close_values[k] > float(invalidation))
+            if invalidated_here:
+                terminal_state = "invalidated"
+                structure_invalidation_index = k
+                break
+            if projection_outside_structure(k):
+                terminal_state = "invalidated"
+                neckline_invalidation_index = k
+                break
+    if terminal_state is None and crossed_data_break:
+        terminal_state = "invalidated"
+    state = terminal_state or ("confirmed" if breaks else "forming")
+    invalidated = state == "invalidated"
+    confirmed=bool(breaks) and not invalidated
+    volume = float("nan")
+    if confirmed:
+        volume = volume_ratio(frame, confirm_idx)
+    points = {"%s_%d" % (p.kind, n+1): p.price for n,p in enumerate(seq)}
+    for n,p in enumerate(seq,1):
+        points["pivot_%d_index"%n]=p.index
+        points["pivot_%d"%n]=p.price
+    if ptype == "w_bottom":
+        lows = [p.price for p in seq if p.kind == "low"]
+        if len(lows) >= 2:
+            points["first_low"], points["second_low"] = lows[0], lows[1]
+    if ptype == "m_top":
+        highs = [p.price for p in seq if p.kind == "high"]
+        if len(highs) >= 2:
+            points["first_high"], points["second_high"] = highs[0], highs[1]
+    identity = "%s|%s|%s|%s|%s" % (code, kind, tf, ptype, ":".join(p.date for p in seq))
+    pid = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    evidence = [{"code":"pivot_topology", "value":[p.kind for p in seq]},
+                {"code":"neckline", "value":_at(neck,end)}, {"code":"close_confirmation", "value":bool(breaks)},
+                {"code":"confirmation_index", "value":confirm_idx}]
+    if duration_quality is not None:
+        evidence.append({"code": "structure_duration", "value": duration_quality})
+        evidence.append({"code": "first_valid_break", "value": duration_quality["first_valid_break_date"]})
+        evidence.append({"code": "low_position", "value": low_quality})
+        evidence.append({"code": "prepattern_drawdown", "value": {
+            "high": low_quality.get("prepattern_high"),
+            "drawdown": low_quality.get("prepattern_drawdown"),
+            "threshold": low_quality.get("drawdown_threshold"),
+            "passed": low_quality.get("drawdown_pass", False),
+            "history_end": low_quality.get("history_end"),
+        }})
+        evidence.append({"code": "pattern_quality_pass", "value": True})
+    if ptype == "w_bottom":
+        lows = [p for p in seq if p.kind == "low"]
+        highs = [p for p in seq if p.kind == "high"]
+        if len(lows) >= 2 and highs:
+            first, last = lows[0], lows[-1]
+            middle = max((p for p in highs if first.index < p.index < last.index),
+                         key=lambda pivot: pivot.price, default=None)
+            if middle is not None:
+                first_leg = middle.index - first.index
+                second_leg = last.index - middle.index
+                evidence.append({"code": "w_geometry_metrics", "value": {
+                    "first_leg_bars": first_leg,
+                    "second_leg_bars": second_leg,
+                    "leg_duration_ratio": round(max(first_leg, second_leg) / max(min(first_leg, second_leg), 1), 3),
+                    "trough_gap_pct": round(abs(first.price - last.price) / max(min(first.price, last.price), 1e-9) * 100, 2),
+                }})
+    if crossed_data_break: evidence.append({"code":"data_discontinuity", "value":{"index":end,"date":str(dates[end].date()),"level":float(close_values[end])}})
+    if structure_invalidation_index is not None:
+        evidence.append({"code":"structure_invalidation", "value":{
+            "index": structure_invalidation_index, "level": float(invalidation),
+            "date": str(dates[structure_invalidation_index].date())}})
+    if neckline_invalidation_index is not None:
+        evidence.append({"code":"neckline_projection_invalidation", "value":{
+            "index": neckline_invalidation_index, "level": _at(neck, neckline_invalidation_index),
+            "date": str(dates[neckline_invalidation_index].date()),
+            "structure_low": price_floor, "structure_high": price_ceiling}})
+    if target_index is not None:
+        evidence.append({"code":"target_reached", "value":{"index":target_index,"price":float(targets[0]),"date":str(dates[target_index].date())}})
+    if extra: evidence.append({"code":"structure_uncertainty", "value":extra})
+    provenance = frame.attrs.get("provenance", {})
+    flags = []
+    if extra and extra.get("ambiguous_structure", True) and "ambiguous_structure" not in flags:
+        flags.append("ambiguous_structure")
+    out.append(Pattern("%s:%s"%(code,pid), code, kind, tf, ptype, direction, state,
+        str(dates[seq[0].index].date()), confirm_idx, points, neck,
+        float(invalidation), target_values, evidence,
+        None if np.isnan(volume) else volume, bool(frame.attrs.get("quality",{}).get("volume_unit_verified", False) and frame.attrs.get("quality",{}).get("corporate_actions_verified", False)),
+        RULE_VERSION, provenance.get("data_version","unknown"),
+        flags=flags,
+        execution_rules_verified=bool(frame.attrs.get("quality",{}).get("trading_rules_verified",False)),
+        last_observed_date=str(dates[-1].date()),
+        confirmation_date=str(dates[confirm_idx].date()) if breaks and preconfirmation_failure is None else None,
+        source_rule_version=_rule_set_version()))
+    out[-1].evidence.append({"code":"confirmed_date", "value":str(dates[confirm_idx].date())})
+
+
+def _detect_box_reclaims(frame, code, kind, tf, pivots):
+    """Detect break-and-reclaim events only after an explicit consolidation box.
+
+    These are engineering-start values not statistically validated:
+    four alternating boundary touches, at least ten bars between first and
+    last touch, boundary agreement within max(0.5 ATR, 5% of price), box
+    width no greater than 6 ATR, and at least 80% in-box closes. A breakout
+    must return inside the frozen box within 20 bars. Candidate events always
+    require visual review; the thresholds are not attributed to the book.
+    """
+    if len(pivots) < 4:
+        return []
+    atr_values = atr(frame, period=14).to_numpy()
+    close = frame.close.to_numpy()
+    dates = pd.to_datetime(frame.date)
+    found = []
+    for offset in range(len(pivots) - 3):
+        seq = pivots[offset:offset + 4]
+        kinds = [pivot.kind for pivot in seq]
+        if kinds not in (["low", "high", "low", "high"], ["high", "low", "high", "low"]):
+            continue
+        if "segment_id" in frame and frame.segment_id.iloc[[p.index for p in seq]].nunique() != 1:
+            continue
+        first, last = seq[0].index, seq[-1].index
+        if last - first < 10:
+            continue
+        highs = [pivot.price for pivot in seq if pivot.kind == "high"]
+        lows = [pivot.price for pivot in seq if pivot.kind == "low"]
+        upper, lower = float(np.mean(highs)), float(np.mean(lows))
+        midpoint = max((upper + lower) / 2.0, 0.01)
+        tolerance = max(float(atr_values[last]) * 0.5, midpoint * 0.05)
+        if max(highs) - min(highs) > tolerance or max(lows) - min(lows) > tolerance:
+            continue
+        width = upper - lower
+        if width <= 0 or width > float(atr_values[last]) * 6.0:
+            continue
+        box_closes = close[first:last + 1]
+        inside = (box_closes >= lower - tolerance) & (box_closes <= upper + tolerance)
+        if float(inside.mean()) < 0.8:
+            continue
+        segment = int(frame.segment_id.iloc[last]) if "segment_id" in frame else 0
+        end = len(frame)
+        if "segment_id" in frame:
+            later = frame.index[(frame.segment_id != segment) & (frame.index > last)]
+            if len(later):
+                end = int(later[0])
+        if kinds[0] == "low":
+            break_indices = [i for i in range(last + 1, end) if close[i] < lower]
+            ptype, direction, boundary = "spring", "bullish", lower
+            in_box = lambda value: lower <= value <= upper
+            invalidation = lower
+        else:
+            break_indices = [i for i in range(last + 1, end) if close[i] > upper]
+            ptype, direction, boundary = "false_breakout", "bearish", upper
+            in_box = lambda value: lower <= value <= upper
+            invalidation = upper
+        if not break_indices:
+            continue
+        break_index = break_indices[0]
+        stop = min(end, break_index + 21)
+        reclaims = [i for i in range(break_index + 1, stop) if in_box(close[i])]
+        if not reclaims:
+            continue
+        event_seq = seq
+        _add_reclaim_event(
+            found, frame, code, kind, tf, ptype, event_seq,
+            {"slope": 0.0, "intercept": boundary}, invalidation, [], break_index,
+            bullish=(direction == "bullish"),
+            extra={"box_lower": lower, "box_upper": upper,
+                   "box_first_touch": str(dates.iloc[first].date()),
+                   "box_last_touch": str(dates.iloc[last].date()),
+                   "box_width_atr": width / max(float(atr_values[last]), 1e-9)},
+        )
+    return found
+
+
+def _detect_flags(frame, code, kind, tf):
+    if len(frame) < 30:
+        return []
+    out = []
+    tail = len(frame) - 1
+    pivots = detect_pivots(frame, radius=2, atr_multiple=1.5)
+    if "segment_id" in frame:
+        pivots = [p for p in pivots if int(frame.segment_id.iloc[p.index]) == int(frame.segment_id.iloc[p.confirmed_at])]
+    # Search the full configured history window. Restricting this to the last
+    # ten turns hid still-active flag structures that formed earlier in the
+    # 500-bar analysis window.
+    search_floor = max(0, tail - 500)
+    pivots = [pivot for pivot in pivots if pivot.index >= search_floor]
+    for offset in range(0, len(pivots) - 4):
+        seq = pivots[offset:offset + 5]
+        if len(seq) != 5:
+            continue
+        if "segment_id" in frame and frame.segment_id.iloc[[p.index for p in seq]].nunique() != 1:
+            continue
+        kinds = [p.kind for p in seq]
+        i0, i1, i2, i3, i4 = [p.index for p in seq]
+        if kinds == ["low", "high", "low", "high", "low"]:
+            lo0, hi0, lo1, hi1, lo2 = [float(p.price) for p in seq]
+            impulse = hi0 - lo0
+            correction = hi0 - lo2
+            if (i1 - i0 < 4 or i4 - i1 < 5 or impulse <= 0 or
+                    correction < impulse * 0.12 or correction > impulse * 0.50 or
+                    lo1 <= lo0 or lo2 <= lo0 or hi1 >= hi0 or hi1 <= lo2):
+                continue
+            upper = _line((i1, hi0), (i3, hi1))
+            # Require a real counter-trend channel and an actual close beyond it.
+            if upper["slope"] >= 0:
+                continue
+            section = frame.iloc[i1:i4 + 1]
+            if section.high.max() - section.low.min() > impulse * 0.60:
+                continue
+            unlocked = bool(frame.close.iloc[tail] > hi0)
+            first_target = float(_at(upper, tail) + impulse) if unlocked else float(hi0)
+            _add(out, frame, code, kind, tf, "bull_flag", seq, float(frame.close.iloc[-1]), upper,
+                 min(lo0, lo1, lo2), [first_target], i4,
+                 extra={"measured_target_locked": not unlocked, "impulse_size": impulse,
+                        "correction_ratio": correction / impulse, "ambiguous_structure": False})
+        elif kinds == ["high", "low", "high", "low", "high"]:
+            hi0, lo0, hi1, lo1, hi2 = [float(p.price) for p in seq]
+            impulse = hi0 - lo0
+            correction = hi2 - lo0
+            if (i1 - i0 < 4 or i4 - i1 < 5 or impulse <= 0 or
+                    correction < impulse * 0.12 or correction > impulse * 0.50 or
+                    hi1 >= hi0 or hi2 >= hi0 or lo1 <= lo0 or lo1 >= hi1):
+                continue
+            lower = _line((i1, lo0), (i3, lo1))
+            if lower["slope"] <= 0:
+                continue
+            section = frame.iloc[i1:i4 + 1]
+            if section.high.max() - section.low.min() > impulse * 0.60:
+                continue
+            unlocked = bool(frame.close.iloc[tail] < lo0)
+            first_target = float(_at(lower, tail) - impulse) if unlocked else float(lo0)
+            _add(out, frame, code, kind, tf, "bear_flag", seq, float(frame.close.iloc[-1]), lower,
+                 max(hi0, hi1, hi2), [first_target], i4, direction="bearish",
+                 extra={"measured_target_locked": not unlocked, "impulse_size": impulse,
+                        "correction_ratio": correction / impulse, "ambiguous_structure": False})
+    return out
+
+
+def _add_reclaim_event(out,frame,code,kind,tf,ptype,seq,neck,invalidation,targets,break_index,bullish,extra=None):
+    if targets and (not np.isfinite(float(targets[0])) or float(targets[0]) <= 0):
+        return
+    if "segment_id" in frame:
+        segment = int(frame.segment_id.iloc[break_index])
+        if any(int(frame.segment_id.iloc[p.index]) != segment for p in seq): return
+        end = len(frame)
+        later = frame.index[(frame.segment_id != segment) & (frame.index > break_index)]
+        if len(later): end = int(later[0])
+    else:
+        end = len(frame)
+    dates=pd.to_datetime(frame.date); level=_at(neck,break_index)
+    reclaim=[k for k in range(break_index+1,end) if (frame.close.iloc[k]>_at(neck,k) if bullish else frame.close.iloc[k]<_at(neck,k))]
+    if not reclaim: return
+    confirmation=reclaim[0]
+    crossed_data_break = end < len(frame)
+    terminal_state = None
+    target_index = None
+    followthrough_index = None
+    invalidation_index = None
+    first_target = float(targets[0]) if targets else None
+    followthrough_level = None
+    if extra and "box_upper" in extra and "box_lower" in extra:
+        followthrough_level = float(extra["box_upper"] if bullish else extra["box_lower"])
+    for k in range(confirmation + 1, end):
+        invalidated_here = (frame.close.iloc[k] < _at(neck,k) if bullish
+                            else frame.close.iloc[k] > _at(neck,k))
+        if invalidated_here:
+            terminal_state = "invalidated"
+            invalidation_index = k
+            break
+        target_reached_here = (first_target is not None and
+                               (frame.high.iloc[k] >= first_target if bullish
+                                else frame.low.iloc[k] <= first_target))
+        if target_reached_here:
+            terminal_state = "target_reached"
+            target_index = k
+            break
+        followed_through = (followthrough_level is not None and
+                            (frame.close.iloc[k] > followthrough_level if bullish
+                             else frame.close.iloc[k] < followthrough_level))
+        if followed_through:
+            terminal_state = "followthrough_confirmed"
+            followthrough_index = k
+            break
+    if terminal_state is None and crossed_data_break:
+        terminal_state = "invalidated"
+    state = terminal_state or "confirmed"
+    identity="%s|%s|%s|%s|%s"%(code,kind,tf,ptype,":".join(p.date for p in seq))
+    pid=hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    key_points={"pivot_%d_index"%(n+1):p.index for n,p in enumerate(seq)}
+    key_points.update({"pivot_%d_price"%(n+1):p.price for n,p in enumerate(seq)})
+    key_points.update({"pivot_%d"%(n+1):p.price for n,p in enumerate(seq)})
+    evidence=[{"code":"reclaim_level","value":level},{"code":"break_index","value":break_index},
+              {"code":"confirmation_index","value":confirmation},{"code":"confirmed_date","value":str(dates.iloc[confirmation].date())},
+              {"code":"close_reclaim","value":True},{"code":"structure_uncertainty","value":"unresolved structure"}]
+    if extra:
+        evidence.extend({"code":key,"value":value} for key,value in extra.items())
+    if crossed_data_break: evidence.append({"code":"data_discontinuity", "value":{"index":end-1,"date":str(dates.iloc[end-1].date()),"level":float(frame.close.iloc[end-1])}})
+    if target_index is not None:
+        evidence.append({"code":"target_reached", "value":{"index":target_index,"price":first_target,"date":str(dates.iloc[target_index].date())}})
+    if invalidation_index is not None:
+        evidence.append({"code":"structure_invalidation","value":{"index":invalidation_index,"date":str(dates.iloc[invalidation_index].date()),"level":_at(neck,invalidation_index)}})
+    if followthrough_index is not None:
+        evidence.append({"code":"followthrough_confirmed", "value":{"index":followthrough_index,
+                        "level":followthrough_level,"date":str(dates.iloc[followthrough_index].date())}})
+    volume=volume_ratio(frame,confirmation); verified=bool(frame.attrs.get("quality",{}).get("volume_unit_verified",False) and frame.attrs.get("quality",{}).get("corporate_actions_verified",False))
+    provenance=frame.attrs.get("provenance",{})
+    out.append(Pattern("%s:%s"%(code,pid),code,kind,tf,ptype,"bullish" if bullish else "bearish",state,
+       str(dates.iloc[seq[0].index].date()),confirmation,key_points,neck,float(invalidation),targets,evidence,
+       None if np.isnan(volume) else volume,verified,RULE_VERSION,provenance.get("data_version","unknown"),
+       flags=["ambiguous_structure","reclaim_event"],
+       execution_rules_verified=bool(frame.attrs.get("quality",{}).get("trading_rules_verified",False)),
+       last_observed_date=str(dates.iloc[-1].date()), confirmation_date=str(dates.iloc[confirmation].date()),
+       source_rule_version=_rule_set_version()))

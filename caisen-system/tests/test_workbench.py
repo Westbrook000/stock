@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import HTTPException
 
 from caisen.market import InstrumentFile, MarketDataResult
@@ -28,7 +29,9 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
                pattern_type="w_bottom", direction="bullish", state="confirmed",
                formed_at="2026-10-01", confirmed_at=10, confirmation_date="2026-10-15",
                invalidation=9.6, targets=[12.0], volume_verified=True,
-               execution_rules_verified=False)
+        execution_rules_verified=False,
+        evidence=[{"code":"main_structure", "value":{"role":"main","signal_eligible":True}},
+                  {"code":"main_selection", "value":{"selected":True}}])
 
     monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
     def load(instrument, root):
@@ -40,14 +43,14 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
         return MarketDataResult(result.instrument, quality_status="insufficient", warnings=["calendar missing"])
     monkeypatch.setattr(api, "load_daily_bars", load)
     monkeypatch.setattr(api, "aggregate_weekly", weekly)
-    monkeypatch.setattr(api, "detect_patterns", lambda bars, code, kind, tf: [bullish] if code == "000001" and tf == "1d" else [])
+    monkeypatch.setattr(api, "detect_main_bottoms", lambda bars, code, kind, tf, **kwargs: [bullish] if code == "000001" and tf == "1d" else [])
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
-    api._scan_worker("fixture-job", {"kind": "all", "limit": 10, "timeframes": ["1d", "1w"]})
+    api._scan_worker("fixture-job", {"timeframes":["1d","1w"]}, executor_factory=ThreadPoolExecutor)
     result = api._jobs["fixture-job"]
 
-    assert result["status"] == "completed"
+    assert result["status"] == "partial_failed"
     assert result["total"] == 3
     assert len(result["results"]) == 3
     assert [row["code"] for row in result["results"]] == ["000001", "000002", "000003"]
@@ -58,13 +61,177 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
     assert result["inventory"]["inventory_at"]
 
 
+def test_scan_worker_applies_kind_and_limit_before_loading(monkeypatch):
+    instruments = [InstrumentFile("000001", "stock", "one.csv"),
+                   InstrumentFile("000002", "etf", "two.csv"),
+                   InstrumentFile("000003", "stock", "three.csv")]
+    loaded = []
+    monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
+    def load(instrument, root):
+        loaded.append(instrument.code)
+        return MarketDataResult(instrument, bars=make_bars(), quality_status="usable_with_warnings")
+    monkeypatch.setattr(api, "load_daily_bars", load)
+    monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
+    monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: [])
+    monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
+    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
+
+    api._scan_worker("prefilter-job", {"kinds": ["etf"], "limit": 1, "timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
+
+    result = api._jobs["prefilter-job"]
+    assert loaded == ["000002"]
+    assert result["total"] == 1
+    assert result["inventory"]["stock_count"] == 0
+    assert result["inventory"]["etf_count"] == 1
+
+
+def test_scan_request_rejects_invalid_prefilters():
+    with pytest.raises(HTTPException):
+        api.start_scan({"timeframes": ["1d"], "kinds": ["crypto"]})
+    with pytest.raises(HTTPException):
+        api.start_scan({"timeframes": ["1d"], "limit": 0})
+    with pytest.raises(HTTPException):
+        api.start_scan({"timeframes": ["1d"], "date_from": "2026-10-20", "date_to": "2026-10-01"})
+    with pytest.raises(HTTPException):
+        api.start_scan({"timeframes": ["1d"], "date_from": "not-a-date"})
+
+
+def test_scan_date_window_slices_before_weekly_aggregation_and_pattern_detection(monkeypatch):
+    result = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
+    weekly_dates = []
+    detected_dates = []
+    background_dates = []
+    monkeypatch.setattr(api, "discover_instruments", lambda root: [result.instrument])
+    monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: result)
+    def aggregate(sliced, **kwargs):
+        weekly_dates.extend(sliced.bars.date.dt.strftime("%Y-%m-%d").tolist())
+        return MarketDataResult(sliced.instrument, bars=sliced.bars.tail(1).copy(), quality_status="usable")
+    def detect(frame, *args, **kwargs):
+        detected_dates.extend(frame.date.dt.strftime("%Y-%m-%d").tolist())
+        background_dates.extend(kwargs["background_bars"].date.dt.strftime("%Y-%m-%d").tolist())
+        return []
+    monkeypatch.setattr(api, "aggregate_weekly", aggregate)
+    monkeypatch.setattr(api, "detect_main_bottoms", detect)
+    monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
+    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
+
+    api._scan_worker("window-job", {"timeframes": ["1d", "1w"], "date_from": "2026-10-15", "date_to": "2026-10-15"}, executor_factory=ThreadPoolExecutor)
+
+    row = api._jobs["window-job"]["results"][0]
+    assert weekly_dates == ["2026-10-15"]
+    assert detected_dates == ["2026-10-15", "2026-10-15"]
+    assert background_dates == ["2026-10-14", "2026-10-15", "2026-10-14", "2026-10-15"]
+    assert row["latest_date"] == "2026-10-15"
+    assert row["analysis_window"] == {"requested_from":"2026-10-15", "requested_to":"2026-10-15",
+                                       "from":"2026-10-15", "to":"2026-10-15",
+                                       "latest_available":"2026-10-16", "historical":True}
+
+
+def test_scan_date_window_with_no_rows_keeps_insufficient_data_row(monkeypatch):
+    result = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
+    monkeypatch.setattr(api, "discover_instruments", lambda root: [result.instrument])
+    monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: result)
+    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
+
+    api._scan_worker("empty-window-job", {"timeframes": ["1d"], "date_from": "2027-01-01"}, executor_factory=ThreadPoolExecutor)
+
+    row = api._jobs["empty-window-job"]["results"][0]
+    assert row["action"] == "INSUFFICIENT_DATA"
+    assert row["reason_codes"] == ["no_market_data_in_selected_date_range"]
+    assert row["analysis_window"]["from"] is None
+
+
+def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(monkeypatch):
+    instrument = InstrumentFile("000001", "stock", "one.csv")
+    w_bottom = Pattern(pattern_id="w", code="000001", kind="stock", timeframe="1d",
+                       pattern_type="w_bottom", direction="bullish", state="confirmed",
+                       formed_at="2026-10-01", confirmed_at=2, confirmation_date="2026-10-15",
+                       evidence=[{"code":"main_structure", "value":{"role":"main"}},
+                                 {"code":"main_selection", "value":{"selected":True}}])
+    m_top = Pattern(pattern_id="m", code="000001", kind="stock", timeframe="1d",
+                    pattern_type="m_top", direction="bearish", state="confirmed",
+                    formed_at="2026-10-01", confirmed_at=2, confirmation_date="2026-10-15")
+    monkeypatch.setattr(api, "discover_instruments", lambda root: [instrument])
+    monkeypatch.setattr(api, "load_daily_bars", lambda item, root: MarketDataResult(item, bars=make_bars()))
+    monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
+    monkeypatch.setattr(api, "detect_main_bottoms", lambda *args, **kwargs: [w_bottom, m_top])
+    monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("scan must not call the legacy recognizer")))
+    monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
+    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
+    decision_inputs = []
+    def synthesize(code, kind, patterns_by_tf, *args, **kwargs):
+        decision_inputs.append(patterns_by_tf)
+        return {"code":code,"kind":kind,"action":"WAIT","rank":{"action_priority":1,
+                "confirmed_timeframes":0,"reward_risk":0,"risk_pct":1,"confirmation_ordinal":0,
+                "tie_break":{"kind":kind,"code":code}}}
+    monkeypatch.setattr(api, "synthesize_decision", synthesize)
+
+    api._scan_worker("shape-job", {"timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
+
+    assert {pattern["pattern_type"] for pattern in api._jobs["shape-job"]["results"][0]["patterns"]} == {"w_bottom"}
+    assert {pattern.pattern_type for pattern in decision_inputs[0]["1d"]} == {"w_bottom"}
+    assert api._jobs["shape-job"]["results"][0]["pattern_migration"]["families"]["m_top"]["status"] == "unsupported"
+
+
+def test_backtest_api_uses_date_window_and_returns_auditable_metadata(monkeypatch):
+    source = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
+    captured = {}
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def execute(self, *args): pass
+    monkeypatch.setattr(api, "_market_data", lambda code, kind: source)
+    def run(bars, code, kind, timeframe, cash, start=None):
+        captured["dates"] = bars.date.dt.strftime("%Y-%m-%d").tolist()
+        return {"engine":"backtrader","commission":0,"slippage":0,"starting_cash":cash,
+                "available_cash":cash,"marked_position_value":0,"ending_equity":cash,
+                "trades":[],"order_events":[],"rejections":[],
+                "accounting_invariants":{"equity_equals_cash_plus_marked_position":True,"zero_commission":True},
+                "strategy_effectiveness":"deferred","limitations":["strategy not validated"]}
+    monkeypatch.setattr(api, "run_backtest", run)
+    monkeypatch.setattr(api, "connect", FakeConnection)
+
+    result = api.backtest(api.BacktestRequest(code="000001", start="2026-10-15", end="2026-10-15", cash=50000))
+
+    assert captured["dates"] == ["2026-10-15"]
+    assert result["starting_cash"] == 50000
+    assert result["analysis_window"] == {"from":"2026-10-15", "to":"2026-10-15",
+                                          "latest_available":"2026-10-16", "historical":True}
+    assert result["strategy_effectiveness"] == "deferred"
+
+
+def test_backtrader_page_exposes_inputs_progress_and_accounting_ledgers():
+    from pathlib import Path
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "app.js").read_text(encoding="utf-8")
+    for element_id in ("backtestCode", "backtestKind", "backtestTimeframe", "backtestStart", "backtestCash", "backtestBtn"):
+        assert f'id="{element_id}"' in html
+    assert 'data-panel="simulation"' in html
+    assert "/api/v1/backtests" in js
+    assert "正在运行本地模拟，请稍候" in js
+    for field in ("available_cash", "marked_position_value", "ending_equity", "order_events", "rejections"):
+        assert field in js
+    assert "策略效果未验证" in js
+
+
+def test_modified_workbench_assets_use_current_cache_version():
+    from pathlib import Path
+    html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
+    version = "20261029v7"
+    for asset in ("app.css", "refresh_report.js", "scan-filters.js", "pattern-chart.js", "http-client.js", "fixed-backtest-report.js", "app.js"):
+        assert f"/static/{asset}?v={version}" in html
+    assert "20261027v6" not in html
+
+
 def test_workbench_html_contains_one_click_scan_and_detail_navigation():
     from pathlib import Path
     root = Path(__file__).parents[1] / "caisen" / "static"
     html = (root / "index.html").read_text(encoding="utf-8")
     js = (root / "app.js").read_text(encoding="utf-8")
 
-    assert "全量扫描" in html
+    assert "开始扫描" in html
     assert "miniCandles" in js
     assert "openTicker" in js
     assert "decisionMarkup" in js
@@ -72,15 +239,22 @@ def test_workbench_html_contains_one_click_scan_and_detail_navigation():
 
 def test_scan_filters_use_chinese_category_labels_and_explain_weekly_preview():
     from pathlib import Path
-    html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "app.js").read_text(encoding="utf-8")
 
-    assert '<option value="equity">股票型</option>' in html
-    assert '<option value="bond">债券型</option>' in html
-    assert '<option value="money">货币型</option>' in html
-    assert '<option value="gold">黄金</option>' in html
-    assert '<option value="commodity">商品</option>' in html
-    assert '<option value="crossborder">跨境</option>' in html
-    assert "周线只有在交易日历核实完整周后才参与正式判断" in html
+    assert 'id="scanKind"' not in html
+    assert 'id="scanShapeFilter"' in html
+    assert 'id="scanDateFrom"' in html
+    assert 'id="scanDateTo"' in html
+    assert 'id="scanPatternTypes"' in html
+    assert 'id="scanStock"' in html and 'id="scanEtf"' in html
+    assert 'id="scanLimit"' in html
+    assert "仅用于扫描完成后的结果展示筛选" in html
+    assert "不会缩短扫描时间" in html
+    assert "scanSettings.pattern_types" in js
+    assert "打开详情将加载最新行情" in js
+    assert "交易日历核实完整的周线才参与正式判断" in html
 
 
 def test_scan_results_filter_after_completion_without_resubmitting_the_scan():
@@ -140,8 +314,8 @@ def test_detail_chart_returns_full_history_and_preview_weekly_bars(monkeypatch):
         quality_status="insufficient",
         warnings=["calendar missing"],
     )
-    monkeypatch.setattr(api, "_market_data", lambda code, kind, asof: daily_result)
-    monkeypatch.setattr(api, "aggregate_weekly", lambda result, asof=None, calendar=None: weekly_result)
+    monkeypatch.setattr(api, "_market_data", lambda code, kind: daily_result)
+    monkeypatch.setattr(api, "aggregate_weekly", lambda result, calendar=None: weekly_result)
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
 
@@ -152,6 +326,26 @@ def test_detail_chart_returns_full_history_and_preview_weekly_bars(monkeypatch):
     assert daily_payload["_chart_offset"] == len(daily) - 500
     assert weekly_payload["chart_is_preview"] is True
     assert len(weekly_payload["_bars"]) == len(weekly_preview)
+
+
+def test_weekly_analysis_uses_full_daily_history_as_quality_background(monkeypatch):
+    daily = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
+    weekly = MarketDataResult(daily.instrument, bars=daily.bars.tail(1).copy(), quality_status="usable")
+    seen = {}
+    monkeypatch.setattr(api, "_market_data", lambda code, kind: daily)
+    monkeypatch.setattr(api, "aggregate_weekly", lambda result, calendar=None: weekly)
+    def detect(frame, code, kind, timeframe, **kwargs):
+        seen[timeframe] = kwargs["background_bars"].date.dt.strftime("%Y-%m-%d").tolist()
+        return []
+    monkeypatch.setattr(api, "detect_main_bottoms", detect)
+    monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
+    monkeypatch.setattr(api, "synthesize_decision", lambda *args, **kwargs: {"action": "WAIT"})
+
+    api.analysis("000001", timeframe="1w")
+
+    expected = daily.bars.date.dt.strftime("%Y-%m-%d").tolist()
+    assert seen["1d"] == expected
+    assert seen["1w"] == expected
 
 
 def test_detail_chart_exposes_range_controls_and_both_zoom_modes():
@@ -208,73 +402,27 @@ const job=JSON.parse(input);process.stdout.write(JSON.stringify({summary:report.
     assert "1991-04-03" in output["markup"]
     assert "失败 1" in output["markup"]
     assert "fixture-job" in output["markup"]
-    assert 'data-resume-refresh="fixture-job"' in output["markup"]
-    assert "重试失败标的" in output["markup"]
-    assert 'data-resume-refresh="fixture-job"' in output["interrupted"]
+    assert "data-resume-refresh" not in output["markup"]
+    assert "重试失败标的" not in output["markup"]
+    assert "data-resume-refresh" not in output["interrupted"]
     assert "&lt;script&gt;" in output["markup"]
     assert "<script>" not in output["markup"]
     assert "/static/refresh_report.js" in html
     assert "renderRefreshReport({...current,job_id:jobId})" in app
-    assert "caisen-refresh-job" in app
-    assert "/resume" in app
-    assert "/api/v1/data/refresh/jobs" in app
-    assert "renderRefreshRecoveryList" in app
+    assert "caisen-refresh-job" not in app
+    assert "/resume" not in app
+    assert "/api/v1/data/refresh/jobs" not in app
+    assert "renderRefreshRecoveryList" not in app
 
 
-def test_recoverable_refresh_jobs_can_be_discovered_without_browser_session(monkeypatch, tmp_path):
-    import json
-    from caisen.store import connect
-
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "recoverable-list.sqlite3"))
-    api._jobs.clear()
-    inventory = [{"code": "999999", "kind": "stock", "path": "/missing/999999.csv"}]
-    fixtures = [
-        ("interrupted-job", "interrupted", 0, 0),
-        ("partial-job", "completed", 1, 1),
-        ("successful-job", "completed", 1, 0),
-    ]
-    for job_id, status, successes, failures in fixtures:
-        payload = {"job_type": "data_refresh", "status": status, "scope": "single",
-                   "inventory": inventory, "results": [], "failures": [],
-                   "total": 1, "completed": successes + failures,
-                   "success_count": successes, "failure_count": failures}
-        api._persist_refresh_job(job_id, payload, initialize=True)
-        with connect() as db:
-            db.execute("UPDATE jobs SET status=? WHERE job_id=?", (status, job_id))
-    with connect() as db:
-        db.execute("INSERT INTO jobs(job_id,status,payload) VALUES(?,?,?)",
-                   ("scan-job", "failed", json.dumps({"job_type": "scan"})))
-
-    found = api.recoverable_refresh_jobs()
-
-    assert {job["job_id"] for job in found["jobs"]} == {"interrupted-job", "partial-job"}
-    assert all("inventory" not in job and "results" not in job for job in found["jobs"])
-    assert next(job for job in found["jobs"] if job["job_id"] == "partial-job")["failure_count"] == 1
 
 
-def test_refresh_recovery_formatter_renders_restart_resume_actions():
-    import subprocess
-    from pathlib import Path
-
-    script = """const report=require('./caisen-system/caisen/static/refresh_report.js');
-const jobs=[{job_id:'restart-job',scope:'single',status:'interrupted',success_count:1,failure_count:0,total:2,completed:1},
-{job_id:'partial-job',scope:'all',status:'completed',success_count:4,failure_count:1,total:5,completed:5}];
-process.stdout.write(report.renderRefreshRecoveryList(jobs));"""
-    result = subprocess.run(["node", "-e", script], cwd=Path(__file__).parents[2],
-                            text=True, capture_output=True, check=True)
-    markup = result.stdout
-
-    assert 'data-resume-refresh="restart-job"' in markup
-    assert 'data-resume-refresh="partial-job"' in markup
-    assert "恢复未完成的更新" in markup
-    assert "重试失败标的" in markup
 
 
 def test_refresh_worker_reports_partial_successes_and_failure_counts(monkeypatch):
     instruments = [InstrumentFile("000001", "stock", "one.csv"),
                    InstrumentFile("510300", "etf", "two.csv")]
     monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
-    monkeypatch.setattr(api, "_persist_refresh_job", lambda *args, **kwargs: None)
     def refresh(root, code, kind):
         if code == "510300":
             raise RuntimeError("provider throttled")
@@ -292,210 +440,18 @@ def test_refresh_worker_reports_partial_successes_and_failure_counts(monkeypatch
     assert result["failures"][0]["error"] == "provider throttled"
 
 
-def test_refresh_worker_persists_each_symbol_checkpoint(monkeypatch):
-    import json
-
-    instruments = [InstrumentFile("000001", "stock", "one.csv"),
-                   InstrumentFile("510300", "etf", "two.csv")]
-    checkpoints = []
-    monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
-    monkeypatch.setattr(api, "_persist_refresh_job", lambda job_id, payload, **kwargs: checkpoints.append(
-        ({key: value for key, value in json.loads(json.dumps(payload)).items()
-         if key not in ("inventory", "results", "failures", "latest_results", "latest_failures")}, kwargs)))
-    monkeypatch.setattr(api, "refresh_one", lambda root, code, kind: {
-        "code": code, "kind": kind, "last_date": "2026-10-23"})
-    monkeypatch.setattr(api.time, "sleep", lambda duration: None)
-
-    api._refresh_worker("checkpoint-fixture", {"scope": "all"})
-
-    running = [item for item, _ in checkpoints if item["status"] == "running"]
-    assert len(running) == 3  # initial state, then one durable checkpoint per symbol
-    assert running[1]["completed"] == 1
-    assert "results" not in running[1] and "inventory" not in running[1]
-    assert checkpoints[1][1]["item_update"]["record"]["code"] == "000001"
-    assert checkpoints[-1][0]["status"] == "completed"
 
 
-def test_refresh_worker_fatal_error_retains_last_durable_success(monkeypatch):
-    instruments = [InstrumentFile("000001", "stock", "one.csv"),
-                   InstrumentFile("510300", "etf", "two.csv")]
-    monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
-    monkeypatch.setattr(api, "_persist_refresh_job", lambda *args, **kwargs: None)
-    monkeypatch.setattr(api, "refresh_one", lambda root, code, kind: {"code": code, "kind": kind})
-    monkeypatch.setattr(api.time, "sleep", lambda duration: (_ for _ in ()).throw(RuntimeError("worker interruption")))
-
-    api._refresh_worker("fatal-fixture", {"scope": "all"})
-
-    result = api._jobs["fatal-fixture"]
-    assert result["status"] == "failed"
-    assert result["error"] == "worker interruption"
-    assert result["success_count"] == 1
-    assert result["results"][0]["code"] == "000001"
 
 
-def test_startup_marks_interrupted_refresh_jobs_and_resume_reuses_inventory(monkeypatch, tmp_path):
-    import json
-    from caisen.store import connect
-
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "resume.sqlite3"))
-    api._jobs.clear()
-    payload = {"job_type": "data_refresh", "scope": "all", "status": "running",
-               "inventory": [{"code": "000001", "kind": "stock", "path": "one.csv"},
-                             {"code": "510300", "kind": "etf", "path": "two.csv"}],
-               "results": [{"code": "000001", "kind": "stock", "last_date": "2026-10-23"}],
-               "failures": [{"code": "510300", "kind": "etf", "error": "temporary failure"}],
-               "success_count": 1, "failure_count": 1, "completed": 2, "total": 2}
-    api._persist_refresh_job("resume-fixture", payload, initialize=True)
-    with connect() as db:
-        db.execute("UPDATE jobs SET status='running' WHERE job_id='resume-fixture'")
-
-    assert api._recover_interrupted_refresh_jobs() == 1
-    with connect() as db:
-        recovered = json.loads(db.execute(
-            "SELECT payload FROM jobs WHERE job_id=?", ("resume-fixture",)).fetchone()[0])
-        saved_items = db.execute(
-            "SELECT status FROM refresh_job_items WHERE job_id=? ORDER BY instrument_key",
-            ("resume-fixture",)).fetchall()
-    assert recovered["status"] == "interrupted"
-    assert not {"inventory", "results", "failures"}.intersection(recovered)
-    assert sorted(item["status"] for item in saved_items) == ["failure", "success"]
-
-    captured = {}
-    class FakeThread:
-        def __init__(self, target, args, daemon):
-            captured.update(target=target, args=args, daemon=daemon)
-        def start(self):
-            captured["started"] = True
-    monkeypatch.setattr(api.threading, "Thread", FakeThread)
-
-    result = api.resume_data_refresh("resume-fixture")
-
-    assert result["status"] == "queued"
-    assert result["job_id"] == "resume-fixture"
-    assert captured["started"] is True
-    resumed = captured["args"][1]
-    assert len(resumed["inventory"]) == 2
-    assert [item["code"] for item in resumed["results"]] == ["000001"]
-    assert [item["code"] for item in resumed["failures"]] == ["510300"]
 
 
-def test_refresh_job_checkpoint_reconstructs_inventory_and_results_after_memory_loss(monkeypatch, tmp_path):
-    import json
-    from caisen.store import connect
-
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "normalized-refresh.sqlite3"))
-    api._jobs.clear()
-    payload = {"job_type": "data_refresh", "status": "running", "scope": "all",
-               "inventory": [{"code": "000001", "kind": "stock", "path": "one.csv"},
-                             {"code": "510300", "kind": "etf", "path": "two.csv"}],
-               "results": [], "failures": [], "completed": 0, "total": 2}
-    api._persist_refresh_job("normalized-fixture", payload, initialize=True)
-    first = {"code": "000001", "kind": "stock", "rows": 100}
-    second = {"code": "510300", "kind": "etf", "error": "HTTP 429"}
-    api._persist_refresh_job("normalized-fixture", {**payload, "completed": 1},
-                             item_update={"instrument": payload["inventory"][0],
-                                          "status": "success", "record": first})
-    api._persist_refresh_job("normalized-fixture", {**payload, "completed": 2},
-                             item_update={"instrument": payload["inventory"][1],
-                                          "status": "failure", "record": second})
-
-    with connect() as db:
-        summary = json.loads(db.execute(
-            "SELECT payload FROM jobs WHERE job_id='normalized-fixture'").fetchone()[0])
-    api._jobs.clear()  # model a process restart: only SQLite remains
-    restored = api._load_job_payload("normalized-fixture")
-
-    assert not {"inventory", "results", "failures"}.intersection(summary)
-    assert len(json.dumps(summary)) < 300
-    assert [item["code"] for item in restored["inventory"]] == ["000001", "510300"]
-    assert restored["results"] == [first]
-    assert restored["failures"] == [second]
 
 
-def test_startup_migrates_legacy_inline_refresh_checkpoints(monkeypatch, tmp_path):
-    import json
-    from caisen.store import connect
-
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "legacy-refresh.sqlite3"))
-    api._jobs.clear()
-    legacy = {"job_type": "data_refresh", "status": "running", "scope": "all",
-              "inventory": [{"code": "000001", "kind": "stock", "path": "one.csv"},
-                            {"code": "510300", "kind": "etf", "path": "two.csv"}],
-              "results": [{"code": "000001", "kind": "stock", "rows": 100}],
-              "failures": [{"code": "510300", "kind": "etf", "error": "HTTP 429"}],
-              "success_count": 1, "failure_count": 1, "completed": 2, "total": 2}
-    with connect() as db:
-        db.execute("INSERT INTO jobs(job_id,status,payload) VALUES(?,?,?)",
-                   ("legacy-refresh-fixture", "running", json.dumps(legacy)))
-
-    assert api._recover_interrupted_refresh_jobs() == 1
-    with connect() as db:
-        compact = json.loads(db.execute(
-            "SELECT payload FROM jobs WHERE job_id='legacy-refresh-fixture'").fetchone()[0])
-        count = db.execute(
-            "SELECT count(*) FROM refresh_job_items WHERE job_id='legacy-refresh-fixture'").fetchone()[0]
-    restored = api._load_job_payload("legacy-refresh-fixture")
-
-    assert compact["status"] == "interrupted"
-    assert not {"inventory", "results", "failures"}.intersection(compact)
-    assert count == 2
-    assert [item["code"] for item in restored["inventory"]] == ["000001", "510300"]
-    assert restored["results"][0]["code"] == "000001"
-    assert restored["failures"][0]["code"] == "510300"
 
 
-def test_resumed_refresh_skips_successful_symbols_and_retries_failures(monkeypatch):
-    calls = []
-    monkeypatch.setattr(api, "_persist_refresh_job", lambda *args, **kwargs: None)
-    monkeypatch.setattr(api, "refresh_one", lambda root, code, kind: calls.append((code, kind)) or {
-        "code": code, "kind": kind, "last_date": "2026-10-23"})
-    monkeypatch.setattr(api.time, "sleep", lambda duration: None)
-    inventory = [{"code": "000001", "kind": "stock", "path": "one.csv"},
-                 {"code": "510300", "kind": "etf", "path": "two.csv"}]
-
-    api._refresh_worker("resume-worker-fixture", {
-        "job_type": "data_refresh", "scope": "all", "inventory": inventory,
-        "results": [{"code": "000001", "kind": "stock", "last_date": "2026-10-23"}],
-        "failures": [{"code": "510300", "kind": "etf", "error": "previous failure"}],
-    })
-
-    result = api._jobs["resume-worker-fixture"]
-    assert calls == [("510300", "etf")]
-    assert result["status"] == "completed"
-    assert result["success_count"] == 2
-    assert result["failure_count"] == 0
 
 
-def test_completed_partial_refresh_can_be_resumed_from_persisted_job(monkeypatch, tmp_path):
-    import json
-    from caisen.store import connect
-
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "partial-resume.sqlite3"))
-    api._jobs.clear()
-    payload = {"job_type": "data_refresh", "scope": "all", "status": "completed",
-               "inventory": [{"code": "000001", "kind": "stock", "path": "one.csv"},
-                             {"code": "510300", "kind": "etf", "path": "two.csv"}],
-               "results": [{"code": "000001", "kind": "stock", "last_date": "2026-10-23"}],
-               "failures": [{"code": "510300", "kind": "etf", "error": "HTTP 429"}],
-               "success_count": 1, "failure_count": 1, "completed": 2, "total": 2}
-    api._persist_refresh_job("partial-resume-fixture", payload, initialize=True)
-    with connect() as db:
-        db.execute("UPDATE jobs SET status='completed' WHERE job_id='partial-resume-fixture'")
-
-    captured = {}
-    class FakeThread:
-        def __init__(self, target, args, daemon):
-            captured.update(target=target, args=args, daemon=daemon)
-        def start(self):
-            captured["started"] = True
-    monkeypatch.setattr(api.threading, "Thread", FakeThread)
-
-    result = api.resume_data_refresh("partial-resume-fixture")
-
-    assert result["resumed"] is True
-    assert captured["started"] is True
-    assert captured["args"][1]["results"][0]["code"] == "000001"
-    assert captured["args"][1]["failures"][0]["code"] == "510300"
 
 
 def test_refresh_endpoint_requires_single_symbol_or_explicit_all_scope(monkeypatch, tmp_path):
@@ -506,7 +462,6 @@ def test_refresh_endpoint_requires_single_symbol_or_explicit_all_scope(monkeypat
     path.parent.mkdir(parents=True)
     path.write_text("date,open,high,low,close,volume\n2026-01-01,1,1,1,1,1\n", encoding="utf-8")
     monkeypatch.setattr(api, "ROOT", root)
-    monkeypatch.setattr(api, "_persist_refresh_job", lambda *args, **kwargs: None)
     class FakeThread:
         def __init__(self, target, args, daemon):
             captured.update(target=target, args=args, daemon=daemon)
@@ -529,7 +484,6 @@ def test_refresh_endpoint_requires_single_symbol_or_explicit_all_scope(monkeypat
 def test_refresh_endpoint_rejects_symbol_missing_from_local_inventory(monkeypatch, tmp_path):
     captured = {}
     monkeypatch.setattr(api, "ROOT", tmp_path)
-    monkeypatch.setattr(api, "_persist_refresh_job", lambda *args, **kwargs: None)
     class FakeThread:
         def __init__(self, target, args, daemon):
             captured["created"] = True
@@ -542,3 +496,245 @@ def test_refresh_endpoint_rejects_symbol_missing_from_local_inventory(monkeypatc
 
     assert error.value.status_code == 404
     assert not captured
+
+
+def test_scan_history_routes_filter_persisted_results_without_rescanning(monkeypatch, tmp_path):
+    from caisen.store import create_scan_run, save_scan_result, update_scan_run
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "history.sqlite3"))
+    create_scan_run("history-1", {"kinds": ["stock"], "date_to": "2026-10-15"}, total=1,
+                    rule_version="rules-v1", app_version="app-v1")
+    save_scan_result("history-1", 0, {
+        "code": "000001", "kind": "stock", "name": "样本公司", "category": "银行",
+        "action": "WAIT", "patterns": [{"pattern_type": "w_bottom", "timeframe": "1d"}],
+        "latest_date": "2026-10-15",
+    })
+    update_scan_run("history-1", status="completed", progress=1, scanned=1)
+
+    history = api.list_scans(page=1)
+    result = api.scan_results("history-1", q="样本", kind="stock", category="银行", action="WAIT",
+                              pattern_types="w_bottom", timeframes="1d", page=1, sort="code")
+
+    assert history["items"][0]["run_id"] == "history-1"
+    assert history["items"][0]["params"]["date_to"] == "2026-10-15"
+    assert result["total"] == 1
+    assert result["items"][0]["code"] == "000001"
+
+
+def test_history_ui_separates_new_scan_and_reads_saved_results_with_kind_and_rank_defaults():
+    root = api.WEB
+    html = open(f"{root}/index.html", encoding="utf-8").read()
+    js = open(f"{root}/app.js", encoding="utf-8").read()
+    http = open(f"{root}/http-client.js", encoding="utf-8").read()
+    assert 'data-scan-view="newScan"' in html and 'data-scan-view="scanHistory"' in html
+    assert 'id="historyKind"' in html and 'value="rank" selected' in html
+    assert "/api/v1/scans/${encodeURIComponent(historyRunId)}/results" in js
+    assert "历史区间" in js and "打开详情将加载最新行情" in js
+    assert "旧任务参数未记录" in js and "失败数未记录" in js and "规则版本未记录" in js
+    assert "fetchJson('/api/v1/health')" in js and ".json()" not in js
+    assert "JSON.parse(body)" in http and "response.status" in http
+
+
+def test_fixed_batch_worker_builds_report_link_and_validates_inputs(monkeypatch, tmp_path):
+    from pathlib import Path
+    instrument = InstrumentFile("000001", "stock", "one.csv")
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "fixed.sqlite3"))
+    monkeypatch.setattr(api, "ROOT", str(tmp_path))
+    monkeypatch.setattr(api, "discover_instruments", lambda root: [instrument])
+    monkeypatch.setattr(api, "load_daily_bars", lambda item, root: MarketDataResult(item, bars=make_bars()))
+
+    def fake_batch(items, output_dir, development_cutoff=None, max_workers=1, progress_callback=None,
+                   strategy_version="pattern_fixed_8_20_main_parent_v2"):
+        assert strategy_version == "pattern_fixed_8_20_v1"
+        assert len(items) == 1 and items[0]["timeframe"] == "1d"
+        assert len(items[0]["bars"]) == 3 and items[0]["trade_start"] == "2026-10-15"
+        report_path = Path(output_dir) / "fixed-backtest-report.html"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text('<script src="fixed-backtest-report.js"></script>', encoding="utf-8")
+        if progress_callback:
+            progress_callback({"completed": 1, "total": 1, "current": "000001", "timeframe": "1d"})
+        return {"strategy_version": "pattern_fixed_8_20_v1", "development_cutoff": "2026-10-15",
+                "summary": {"trade_count": 0}, "groups": [],
+                "output": {"html": str(report_path), "json": str(report_path.with_suffix(".json"))}}
+
+    monkeypatch.setattr(api, "run_fixed_batch", fake_batch)
+    api._fixed_backtest_jobs["fixed-fixture"] = {"job_id": "fixed-fixture", "job_type": "fixed_backtest",
+        "status": "queued", "output_dir": str(tmp_path / "state" / "fixed_backtests" / "fixed-fixture"),
+        "params": {"timeframes": ["1d"]}, "created_at": "2026-10-29T00:00:00+00:00"}
+    api._fixed_backtest_worker("fixed-fixture", {"kinds": ["stock"], "timeframes": ["1d"],
+                              "cash": 100000, "max_workers": 1,"date_from":"2026-10-15",
+                              "strategy_version":"pattern_fixed_8_20_v1"})
+
+    job = api.get_fixed_backtest_job("fixed-fixture")
+    report = api.fixed_backtest_report("fixed-fixture")
+    history = api.list_fixed_backtests(page=1)
+    assert job["status"] == "completed"
+    assert job["strategy_version"] == "pattern_fixed_8_20_v1"
+    assert job["report_url"] == "/api/v1/fixed-backtests/fixed-fixture/report"
+    assert history["total"] == 1 and history["items"][0]["job_id"] == "fixed-fixture"
+    assert b"/static/fixed-backtest-report.js" in report.body
+    api._fixed_backtest_jobs.pop("fixed-fixture")
+    assert api.get_fixed_backtest_job("fixed-fixture")["status"] == "completed"
+    assert b"/static/fixed-backtest-report.js" in api.fixed_backtest_report("fixed-fixture").body
+    with pytest.raises(HTTPException):
+        api.start_fixed_backtest({"kinds": ["crypto"]})
+    with pytest.raises(HTTPException):
+        api.start_fixed_backtest({"cash": 50000})
+    with pytest.raises(HTTPException):
+        api.start_fixed_backtest({"max_workers": 2})
+    with pytest.raises(HTTPException):
+        api.start_fixed_backtest({"scope": "recent100"})
+
+
+def test_fixed_backtest_request_selects_new_default_or_explicit_v1(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "strategy-version.sqlite3"))
+    monkeypatch.setattr(api, "ROOT", str(tmp_path))
+    monkeypatch.setattr(api, "discover_instruments", lambda root: [])
+    class NoStartThread:
+        def __init__(self, *args, **kwargs): pass
+        def start(self): pass
+    monkeypatch.setattr(api.threading, "Thread", NoStartThread)
+
+    latest = api.start_fixed_backtest({})
+    baseline = api.start_fixed_backtest({"strategy_version":"pattern_fixed_8_20_v1"})
+
+    assert api._fixed_backtest_jobs[latest["job_id"]]["params"]["strategy_version"] == "pattern_fixed_8_20_main_parent_v2"
+    assert api._fixed_backtest_jobs[baseline["job_id"]]["params"]["strategy_version"] == "pattern_fixed_8_20_v1"
+    with pytest.raises(HTTPException):
+        api.start_fixed_backtest({"strategy_version":"unknown"})
+
+
+def test_fixed_backtest_page_posts_to_async_batch_and_opens_report():
+    from pathlib import Path
+    html = (Path(api.WEB) / "index.html").read_text(encoding="utf-8")
+    js = (Path(api.WEB) / "app.js").read_text(encoding="utf-8")
+    assert 'data-panel="fixed-simulation"' in html
+    assert 'id="fixedRunBtn"' in html and 'id="fixedCutoff"' in html and 'id="fixedScope"' in html
+    assert 'id="fixedStrategyVersion"' in html
+    assert 'strategy_version:$(' in js and "fixedStrategyVersion" in js
+    assert "fetchJson('/api/v1/fixed-backtests'" in js
+    assert "CaisenFixedBacktestReport" not in js
+    assert "fixed-backtests/${encodeURIComponent(jobId)}" in js
+    assert "job.report_url" in js and "打开完整回测报告" in js
+    assert 'id="fixedHistory"' in html and "/api/v1/fixed-backtests?page=" in js
+    assert "scope=$('fixedScope').value" in js and "全部可用历史" in html
+    assert "params.sample_scope_detail" in js and "混合范围样本" in js
+
+
+def test_fixed_backtest_recovery_marks_active_task_interrupted_and_keeps_checkpoint(monkeypatch, tmp_path):
+    import json
+    from caisen.store import connect
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "recovery.sqlite3"))
+    output_dir = tmp_path / "fixed-output"
+    report_dir = output_dir / "fixed-backtest-20261029T000000Z-ab12cd"
+    report_dir.mkdir(parents=True)
+    (report_dir / "fixed-backtest-report.html").write_text('<script src="fixed-backtest-report.js"></script>', encoding="utf-8")
+    job = {"job_id": "running-fixed", "job_type": "fixed_backtest", "status": "running",
+           "progress": .5, "params": {"date_from": "2026-10-01"}, "output_dir": str(output_dir)}
+    with connect() as db:
+        db.execute("INSERT INTO jobs(job_id,status,payload) VALUES(?,?,?)",
+                   (job["job_id"], "running", json.dumps(job)))
+
+    api._fixed_backtest_jobs.pop("running-fixed", None)
+    api._recover_fixed_backtests()
+
+    recovered = api.get_fixed_backtest_job("running-fixed")
+    report = api.fixed_backtest_report("running-fixed")
+    assert recovered["status"] == "interrupted"
+    assert recovered["params"]["date_from"] == "2026-10-01"
+    assert b"/static/fixed-backtest-report.js" in report.body
+
+
+def test_scan_worker_marks_all_instrument_failures_failed_and_keeps_history(monkeypatch, tmp_path):
+    from caisen.store import create_scan_run, get_scan_run, query_scan_results
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "all-failed.sqlite3"))
+    instruments = [InstrumentFile("000001", "stock", "bad.csv")]
+    monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
+    monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: (_ for _ in ()).throw(ValueError("bad csv")))
+    create_scan_run("all-failed", {"kinds": ["stock"], "timeframes": ["1d"]}, total=1,
+                    rule_version="rules-v1", app_version="app-v1")
+
+    api._scan_worker("all-failed", {"kinds": ["stock"], "timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
+
+    run = get_scan_run("all-failed")
+    rows, count = query_scan_results("all-failed")
+    assert run["status"] == "failed"
+    assert count == 1
+    assert rows[0]["state"] == "data_error"
+
+
+def test_main_bottom_detail_groups_selected_parent_children_and_volume_support():
+    from pathlib import Path
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    js = (root / "app.js").read_text(encoding="utf-8")
+    chart = (root / "pattern-chart.js").read_text(encoding="utf-8")
+    assert "已选主结构" in js
+    assert "已纳入主结构的子形态" in js
+    assert "量能仅作辅助" in js
+    assert "不作买入门槛" in js
+    assert "neckline_tests" in chart
+    assert "neckline_breakout" in chart
+
+
+def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monkeypatch, tmp_path):
+    import threading
+    from caisen.store import create_scan_run, get_scan_run, query_scan_results
+
+    instruments = [InstrumentFile(f"{index:06d}", "stock", f"{index}.csv") for index in range(12)]
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+    first_batch = threading.Barrier(10)
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "concurrent.sqlite3"))
+    monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
+
+    def load(instrument, root):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            if int(instrument.code) < 10:
+                first_batch.wait(timeout=3)
+            if instrument.code == "000011":
+                raise ValueError("unreadable")
+            return MarketDataResult(instrument, bars=make_bars(), quality_status="usable_with_warnings")
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(api, "load_daily_bars", load)
+    monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
+    monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: [])
+    monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
+    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
+    monkeypatch.setattr(api, "synthesize_decision", lambda code, kind, *args, **kwargs: {
+        "code": code, "kind": kind, "action": "CONSIDER_BUY" if code == "000009" else "WAIT",
+        "patterns": [], "rank": {"action_priority": 0 if code == "000009" else 1,
+                                   "confirmed_timeframes": 0, "reward_risk": 0, "risk_pct": 1,
+                                   "confirmation_ordinal": 0, "tie_break": {"kind": kind, "code": code}},
+    })
+    original_update = api.update_scan_run
+    progress_updates = []
+    def record_progress(run_id, **fields):
+        if "scanned" in fields:
+            progress_updates.append(fields["scanned"])
+        return original_update(run_id, **fields)
+    monkeypatch.setattr(api, "update_scan_run", record_progress)
+    create_scan_run("concurrent-scan", {"kinds": ["stock"], "timeframes": ["1d"]}, total=len(instruments))
+
+    api._scan_worker("concurrent-scan", {"kinds": ["stock"], "timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
+
+    result = api._jobs["concurrent-scan"]
+    saved, total = query_scan_results("concurrent-scan", limit=20)
+    run = get_scan_run("concurrent-scan")
+    assert maximum == 10
+    assert result["status"] == "partial_failed"
+    assert result["scanned"] == result["total"] == 12
+    assert progress_updates == [*range(1, 13), 12]
+    assert result["results"][0]["code"] == "000009"
+    assert result["results"][-1]["state"] == "data_error"
+    assert total == 12
+    assert [row["code"] for row in saved] == [row["code"] for row in result["results"]]
+    assert saved == result["results"]
+    assert run["status"] == "partial_failed"
+    assert run["scanned"] == 12 and run["progress"] == 1

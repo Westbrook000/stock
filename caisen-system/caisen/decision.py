@@ -3,13 +3,12 @@
 from datetime import date
 
 from .patterns import PATTERN_LABELS
-from .plans import build_trade_plan
+from .plans import BUY_CANDIDATE_PATTERN_TYPES, build_trade_plan
+from .migration import SUPPORTED_NEW_PATH_TYPES, migration_status
 
 
 _ACTION_ORDER = {"CONSIDER_BUY": 0, "WAIT": 1, "HOLD": 2, "SELL_IF_HELD": 3, "INSUFFICIENT_DATA": 4}
-BUY_CANDIDATE_PATTERN_TYPES = frozenset({
-    "w_bottom", "inverse_head_shoulders", "bull_flag", "triangle_bottom",
-})
+
 
 
 def _value(pattern, field, default=None):
@@ -24,6 +23,10 @@ def _evidence_value(pattern, code):
             return item.get("value")
     return None
 
+def _execution_suppressed(pattern):
+    value = _evidence_value(pattern, "execution_suppression")
+    return isinstance(value, dict) and value.get("suppressed") is True
+
 
 def _to_dict(pattern):
     return pattern.to_dict() if hasattr(pattern, "to_dict") else dict(pattern)
@@ -32,10 +35,13 @@ def _to_dict(pattern):
 def _label(pattern):
     name = PATTERN_LABELS.get(_value(pattern, "pattern_type"), _value(pattern, "pattern_type", "形态"))
     state = _value(pattern, "state")
+    main_bottom = isinstance(_evidence_value(pattern, "main_structure"), dict)
     if state == "forming":
         label = name + "，未确认"
     elif state == "confirmed":
-        label = name + ("，价格确认" if _value(pattern, "volume_verified", False) else "，价格确认，量能未核验")
+        label = name + ("，价格确认，量能仅作辅助" if main_bottom and not _value(pattern, "volume_verified", False)
+                        else "，价格确认" if _value(pattern, "volume_verified", False)
+                        else "，价格确认，量能未核验")
     elif state == "invalidated":
         label = name + "，已失效"
     elif state == "target_reached":
@@ -44,8 +50,8 @@ def _label(pattern):
         label = name + "，箱体后续边界已确认（历史）"
     else:
         label = name + "，" + str(state)
-    if "manual_review_required" in (_value(pattern, "flags", []) or []):
-        label += "，待人工复核"
+    if "ambiguous_structure" in (_value(pattern, "flags", []) or []):
+        label += "，结构存在歧义"
     return label
 
 
@@ -60,7 +66,13 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
     bars_by_timeframe = bars_by_timeframe or {}
     warnings_by_timeframe = warnings_by_timeframe or {}
     timeframes = ("1d", "1w")
-    patterns = [p for tf in timeframes for p in patterns_by_timeframe.get(tf, [])]
+    patterns = [p for tf in timeframes for p in patterns_by_timeframe.get(tf, [])
+                if _value(p, "pattern_type") in SUPPORTED_NEW_PATH_TYPES]
+    patterns_by_timeframe = {
+        tf: [p for p in patterns_by_timeframe.get(tf, [])
+             if _value(p, "pattern_type") in SUPPORTED_NEW_PATH_TYPES]
+        for tf in timeframes
+    }
     active_patterns = [p for p in patterns if _value(p, "state") not in
                        ("invalidated", "target_reached", "followthrough_confirmed")]
     qualities = {tf: quality_by_timeframe.get(tf, "unavailable") for tf in timeframes}
@@ -72,7 +84,7 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
 
     confirmed = {tf: [p for p in patterns_by_timeframe.get(tf, [])
                       if _value(p, "state") == "confirmed" and
-                      "manual_review_required" not in (_value(p, "flags", []) or [])]
+                      "ambiguous_structure" not in (_value(p, "flags", []) or [])]
                  for tf in timeframes}
     directions = {tf: {str(_value(p, "direction")) for p in confirmed[tf]} for tf in timeframes}
     bullish_present = any("bullish" in directions[tf] for tf in timeframes)
@@ -84,6 +96,7 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         _value(pattern, "pattern_type") in BUY_CANDIDATE_PATTERN_TYPES
         and _value(pattern, "direction") == "bullish"
         and _value(pattern, "state") == "forming"
+        and not _execution_suppressed(pattern)
         for pattern in active_patterns
     )
     bull_flag_target_locked = any(
@@ -95,6 +108,13 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
     )
 
     plans = []
+    selected_main_ids = {
+        str(_value(pattern, "pattern_id")) for pattern in patterns
+        if isinstance(_evidence_value(pattern, "main_structure"), dict)
+        and _evidence_value(pattern, "main_structure").get("role") == "main"
+        and isinstance(_evidence_value(pattern, "main_selection"), dict)
+        and _evidence_value(pattern, "main_selection").get("selected") is True
+    }
     for tf in timeframes:
         price = prices_by_timeframe.get(tf)
         if price is None:
@@ -107,7 +127,11 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
             if (_value(pattern, "pattern_type") == "bull_flag"
                     and _evidence_value(pattern, "measured_target_locked") is True):
                 continue
-            if "manual_review_required" in (_value(pattern, "flags", []) or []):
+            if "ambiguous_structure" in (_value(pattern, "flags", []) or []):
+                continue
+            parent_id = _value(pattern, "parent_id")
+            if (_execution_suppressed(pattern)
+                    or parent_id and str(parent_id) in selected_main_ids):
                 continue
             plan = build_trade_plan(
                 pattern, float(price), cash=cash, bars=bars_by_timeframe.get(tf),
@@ -123,14 +147,14 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         plan["timeframe"],
     ))
     selected = passing[0] if passing else None
-    if conflict:
+    if conflict and selected is None:
         action, reasons = "WAIT", ["timeframe_direction_conflict"]
     elif selected is not None:
         action, reasons = "CONSIDER_BUY", []
     elif bearish_present:
         action, reasons = "SELL_IF_HELD", ["confirmed_bearish_structure_sell_warning_if_held"]
     elif has_position and any(_value(p, "direction") == "bullish" and
-                              "manual_review_required" not in (_value(p, "flags", []) or [])
+                              "ambiguous_structure" not in (_value(p, "flags", []) or [])
                               for p in active_patterns):
         action, reasons = "HOLD", ["bullish_structure_exists_without_new_entry"]
     elif plans:
@@ -142,9 +166,9 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
             reasons.append("bull_flag_target_locked")
         reasons = list(dict.fromkeys(reasons))
     elif active_patterns:
-        manual_review = any("manual_review_required" in (_value(p, "flags", []) or [])
+        structural_ambiguity = any("ambiguous_structure" in (_value(p, "flags", []) or [])
                             for p in active_patterns)
-        reasons = ["pattern_requires_manual_review"] if manual_review else []
+        reasons = ["ambiguous_structure"] if structural_ambiguity else []
         if waiting_for_breakout:
             reasons.append("pattern_waiting_for_breakout")
         if bull_flag_target_locked:
@@ -197,6 +221,7 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         "timeframe_conflict": conflict, "confirmed_timeframes": confirmed_timeframes,
         "selected_plan": selected, "candidate_plans": plans,
         "rank": rank, "order_submitted": False,
+        "pattern_migration": migration_status(),
     }
     return result
 
@@ -211,19 +236,20 @@ def _result(code, kind, action, reasons, patterns, qualities, selected, confirme
         "candidate_plans": [], "rank": {"action_priority": _ACTION_ORDER[action], "confirmed_timeframes": 0,
         "reward_risk": 0, "risk_pct": 1, "confirmation_date": None, "confirmation_ordinal": 0,
         "tie_break": {"kind": kind, "code": code}}, "order_submitted": False,
+        "pattern_migration": migration_status(),
     }
 
 
 def _explain(action, reasons):
     if action == "CONSIDER_BUY":
-        return "结构已价格确认，固定止损风险和首个有效目标空间通过零费用基线；仅供人工复核。"
+        return "结构已价格确认，固定止损风险和首个有效目标空间通过零费用基线；请结合图表证据判断。"
     if action == "SELL_IF_HELD":
         return "检测到已确认的空头/顶部结构；若已有持仓，作为退出风险提示，不代表做空或自动卖出。"
     if action == "INSUFFICIENT_DATA":
         return "没有可用于正式判断的有效行情数据。"
     labels = {
         "timeframe_direction_conflict": "日线与周线确认方向冲突，请分别复核。",
-        "pattern_requires_manual_review": "多个候选形态共用结构点，需人工复核。",
+        "ambiguous_structure": "多个候选形态共用结构点，暂不生成买卖计划。",
         "no_confirmed_actionable_pattern": "当前没有通过确认与交易空间检查的形态。",
         "pattern_waiting_for_breakout": "形态已成型，等待颈线或结构边界收盘突破。",
         "bull_flag_target_locked": "旗形边界已突破，但前高尚未收盘突破，测幅目标未解锁。",

@@ -7,11 +7,12 @@
 
   function filterScanRows(rows, filters = {}) {
     const { action = '', patternType = '' } = filters;
+    const patternTypes = filters.patternTypes || (patternType ? [patternType] : []);
     return (rows || []).filter(row => {
       if (action && row.action !== action) return false;
-      if (!patternType) return true;
+      if (!patternTypes.length) return true;
       return (row.patterns || []).some(pattern =>
-        pattern.pattern_type === patternType && !TERMINAL_STATES.has(pattern.state)
+        patternTypes.includes(pattern.pattern_type) && !TERMINAL_STATES.has(pattern.state)
       );
     });
   }

@@ -19,6 +19,9 @@ class NormalWeekCalendar:
     def last_session_of_week(self, week_start):
         return pd.Timestamp(week_start) + pd.Timedelta(days=4)
 
+    def first_session_of_week(self, week_start):
+        return pd.Timestamp(week_start)
+
 
 class MarketTests(unittest.TestCase):
     def test_normalize_sorts_deduplicates_and_reports_legacy_provenance(self):
@@ -34,7 +37,7 @@ class MarketTests(unittest.TestCase):
         source.loc[4, "close"] = 12.0
         source.loc[4, "high"] = 13.0
         source.loc[5, "close"] = 14.0
-        result = aggregate_weekly(source, asof="2026-01-12", calendar=NormalWeekCalendar())
+        result = aggregate_weekly(source, calendar=NormalWeekCalendar())
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["close"], 12.0)
         self.assertEqual(result.iloc[0]["date"], pd.Timestamp("2026-01-09"))
@@ -47,7 +50,10 @@ class MarketTests(unittest.TestCase):
             def last_session_of_week(self, week_start):
                 return {"2026-01-05": "2026-01-08", "2026-01-12": "2026-01-16"}.get(str(week_start))
 
-        result = aggregate_weekly(source, asof="2026-01-12", calendar=HolidayCalendar())
+            def first_session_of_week(self, week_start):
+                return pd.Timestamp(week_start) if self.last_session_of_week(week_start) else None
+
+        result = aggregate_weekly(source, calendar=HolidayCalendar())
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["date"], pd.Timestamp("2026-01-08"))
 
@@ -75,7 +81,7 @@ class MarketTests(unittest.TestCase):
         source = bars(pd.bdate_range("2026-01-05", periods=5))
         source.loc[2:, ["open", "high", "low", "close"]] = [16.0, 16.5, 15.5, 16.0]
         normalized = normalize_bars(source, code="000001", kind="stock")
-        weekly = aggregate_weekly(normalized, asof="2026-01-09", calendar=NormalWeekCalendar())
+        weekly = aggregate_weekly(normalized, calendar=NormalWeekCalendar())
         self.assertEqual(len(weekly), 1)
         self.assertEqual(weekly.segment_id.tolist(), [1])
         self.assertEqual(weekly.volume.tolist(), [300.0])

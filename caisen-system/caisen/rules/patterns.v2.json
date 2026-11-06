@@ -620,20 +620,54 @@
     }
   ],
   "main_structure_extension": {
-    "source_rule_version": "caisen-main-bottoms-v1",
+    "source_rule_version": "caisen-main-bottoms-v9",
+    "neckline_selection_rule_version": "pattern_matched_pressure_envelope_v7",
+    "main_pattern_rule_version": "caisen-v22-main-bottom-v1",
+    "neckline_selection_order": [
+      "independent_test_count_desc",
+      "test_span_desc",
+      "normalized_residual_asc",
+      "latest_test_desc",
+      "anchor_dates_asc"
+    ],
     "timeframes": {
-      "1d": {"structure_window_calendar_years": 5, "minimum_duration_calendar_months": 6},
-      "1w": {"structure_window_calendar_years": 10, "minimum_duration_calendar_months": 12}
+      "1d": {
+        "structure_window_calendar_years": 5,
+        "minimum_duration_calendar_months": 6
+      },
+      "1w": {
+        "structure_window_calendar_years": 10,
+        "minimum_duration_calendar_months": 12
+      }
     },
     "minimum_duration_calendar_months": 6,
-    "minimum_duration_calendar_months_by_timeframe": {"1d": 6, "1w": 12},
+    "minimum_duration_calendar_months_by_timeframe": {
+      "1d": 6,
+      "1w": 12
+    },
     "pivot_scales": [
-      {"name": "2atr_5pct", "atr_multiple": 2.0, "percent_multiple": 0.05},
-      {"name": "3atr_8pct", "atr_multiple": 3.0, "percent_multiple": 0.08},
-      {"name": "5atr_12pct", "atr_multiple": 5.0, "percent_multiple": 0.12}
+      {
+        "name": "2atr_5pct",
+        "atr_multiple": 2.0,
+        "percent_multiple": 0.05
+      },
+      {
+        "name": "3atr_8pct",
+        "atr_multiple": 3.0,
+        "percent_multiple": 0.08
+      },
+      {
+        "name": "5atr_12pct",
+        "atr_multiple": 5.0,
+        "percent_multiple": 0.12
+      }
     ],
     "neckline_tests": {
+      "candidate_reversal_atr_multiple": 2.0,
+      "candidate_reversal_scope": "causal_pressure_point_confirmation_only",
       "minimum_independent_groups": 2,
+      "consumed_boundary_phase_rule": "same_structure_equivalent_frozen_neckline_v1",
+      "consumed_boundary_phase_rationale": "同一结构锚点的已触发缓冲突破会消耗等价冻结颈线；新增同线触点不得重新发出买点。不同压力线及新的结构锚点仍可独立确认。",
       "lookback_calendar_years": 1,
       "minimum_separation_daily_sessions": 10,
       "minimum_separation_weekly_bars": 2,
@@ -641,17 +675,39 @@
       "tolerance_atr": 0.5,
       "minimum_tolerance_ticks": 2,
       "w_bottom_rim_association_ceiling_relative": 0.2,
-      "w_bottom_rim_snap_relative": 0.05
+      "w_bottom_rim_snap_relative": 0.05,
+      "formation_coverage": "all_highs_from_structure_start_through_max_structure_known_and_line_frozen",
+      "post_formation_weak_crossings_allowed": true
     },
     "neckline_slope": {
       "maximum_cumulative_relative_rise": 0.05,
-      "rationale": "两次独立颈线测试间累计相对上升超过5%时排除；不以绝对价格水平决定。"
+      "rationale": "W底、头肩底从首个有效压力触点至确认日累计下降不超过20%；三角形底部与旗形不设下降上限。原有上升5%上限继续有效。",
+      "maximum_cumulative_relative_decline_w_ihs": 0.2,
+      "decline_scope": "first_effective_pressure_touch_to_observation_or_confirmation",
+      "decline_exempt_families": [
+        "triangle_bottom",
+        "bull_flag"
+      ]
+    },
+    "inverse_head_shoulders_neckline": {
+      "require_independent_test_on_each_reaction_leg": true,
+      "require_neckline_above_all_three_troughs": true,
+      "rationale": "至少有独立测试覆盖左右反弹段；右肩之后、突破之前的复测可继续冻结同一压力边界。"
+    },
+    "inverse_head_shoulders": {
+      "maximum_leg_duration_ratio": 2.5,
+      "maximum_shoulder_gap_to_head_depth_ratio": 0.5,
+      "minimum_shoulder_head_separation_atr_multiple": 1.0,
+      "minimum_intervening_right_trough_head_separation_atr_multiple": 2.0,
+      "rationale": "左右腿时长比不超过2.5；肩部允许至多相差头部深度的50%，不优先对称肩部，且两侧肩部都必须高于头部至少1个极值日ATR。右侧若已有高于头部至少2ATR且低于候选右肩的独立谷底，则候选右肩不成立。肩点按已确认的较新右肩、其前最近有效左肩选择。均为工程初值，不是原书参数。"
     },
     "breakout": {
       "close_buffer_previous_atr_multiple": 1.0,
       "minimum_buffer_ticks": 2
     },
-    "w_bottom": {"maximum_trough_gap_ratio": 0.15},
+    "w_bottom": {
+      "maximum_trough_gap_ratio": 0.15
+    },
     "low_position": {
       "full_history_position_max": 0.3,
       "prepattern_lookback_calendar_years": 2,

@@ -1,0 +1,270 @@
+{
+  "universe_id": "daily_800_stock_200_etf_v1",
+  "selection_version": "fixed-universe-stratified-v1",
+  "date_to": "2026-11-01",
+  "rules": {
+    "history_bands_sessions": {
+      "short": "1-260",
+      "medium": "261-780",
+      "long": "781+"
+    },
+    "count_per_band": 8,
+    "kind_counts": {
+      "short": {
+        "stock": 3,
+        "etf": 5
+      },
+      "medium": {
+        "stock": 4,
+        "etf": 4
+      },
+      "long": {
+        "stock": 5,
+        "etf": 3
+      }
+    },
+    "target_sessions": {
+      "short": 220,
+      "medium": 520,
+      "long": 1000
+    },
+    "longest_in_fixed_universe": {
+      "stock": {
+        "kind": "stock",
+        "code": "600602",
+        "history_band": "long",
+        "sessions": 8391,
+        "data_revision": "mtime_ns:1793698112205173529,size:463809",
+        "first_date": "1990-12-19",
+        "last_date": "2026-11-03"
+      },
+      "etf": {
+        "kind": "etf",
+        "code": "510050",
+        "history_band": "long",
+        "sessions": 5270,
+        "data_revision": "mtime_ns:1793700381656272031,size:308023",
+        "first_date": "2005-02-23",
+        "last_date": "2026-11-02"
+      }
+    }
+  },
+  "symbols": [
+    {
+      "kind": "stock",
+      "code": "688790",
+      "history_band": "short",
+      "sessions": 210,
+      "data_revision": "mtime_ns:1793699969140306474,size:12806",
+      "first_date": "2025-12-16",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "603376",
+      "history_band": "short",
+      "sessions": 238,
+      "data_revision": "mtime_ns:1793698974974135522,size:14039",
+      "first_date": "2025-11-06",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "601026",
+      "history_band": "short",
+      "sessions": 252,
+      "data_revision": "mtime_ns:1793698457551944583,size:14963",
+      "first_date": "2025-10-17",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "etf",
+      "code": "159136",
+      "history_band": "short",
+      "sessions": 203,
+      "data_revision": "mtime_ns:1793700047844847350,size:11508",
+      "first_date": "2025-12-25",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "159129",
+      "history_band": "short",
+      "sessions": 232,
+      "data_revision": "mtime_ns:1793700044216263099,size:13443",
+      "first_date": "2025-11-14",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "563530",
+      "history_band": "short",
+      "sessions": 232,
+      "data_revision": "mtime_ns:1793700798367265176,size:13547",
+      "first_date": "2025-11-14",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "159128",
+      "history_band": "short",
+      "sessions": 233,
+      "data_revision": "mtime_ns:1793700043663886240,size:13601",
+      "first_date": "2025-11-13",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "563980",
+      "history_band": "short",
+      "sessions": 237,
+      "data_revision": "mtime_ns:1793700815536770667,size:13510",
+      "first_date": "2025-11-07",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "stock",
+      "code": "001391",
+      "history_band": "medium",
+      "sessions": 443,
+      "data_revision": "mtime_ns:1793696675138919606,size:24812",
+      "first_date": "2024-12-30",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "688726",
+      "history_band": "medium",
+      "sessions": 487,
+      "data_revision": "mtime_ns:1793699940985823751,size:28731",
+      "first_date": "2024-10-29",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "688721",
+      "history_band": "medium",
+      "sessions": 540,
+      "data_revision": "mtime_ns:1793699939304981403,size:31506",
+      "first_date": "2024-08-06",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "603285",
+      "history_band": "medium",
+      "sessions": 562,
+      "data_revision": "mtime_ns:1793698905268433598,size:33100",
+      "first_date": "2024-07-05",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "etf",
+      "code": "560620",
+      "history_band": "medium",
+      "sessions": 501,
+      "data_revision": "mtime_ns:1793700703763847385,size:28101",
+      "first_date": "2024-10-09",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "159326",
+      "history_band": "medium",
+      "sessions": 516,
+      "data_revision": "mtime_ns:1793700140971396652,size:29845",
+      "first_date": "2024-09-09",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "159333",
+      "history_band": "medium",
+      "sessions": 520,
+      "data_revision": "mtime_ns:1793700144907976515,size:29873",
+      "first_date": "2024-09-03",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "159569",
+      "history_band": "medium",
+      "sessions": 528,
+      "data_revision": "mtime_ns:1793700204759183705,size:30363",
+      "first_date": "2024-08-22",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "stock",
+      "code": "688035",
+      "history_band": "long",
+      "sessions": 995,
+      "data_revision": "mtime_ns:1793699421991352820,size:58444",
+      "first_date": "2022-09-19",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "688293",
+      "history_band": "long",
+      "sessions": 995,
+      "data_revision": "mtime_ns:1793699638756044361,size:57860",
+      "first_date": "2022-09-02",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "688455",
+      "history_band": "long",
+      "sessions": 997,
+      "data_revision": "mtime_ns:1793699753187789898,size:57404",
+      "first_date": "2022-09-15",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "001283",
+      "history_band": "long",
+      "sessions": 1004,
+      "data_revision": "mtime_ns:1793696620814100140,size:58720",
+      "first_date": "2022-09-05",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "stock",
+      "code": "600602",
+      "history_band": "long",
+      "sessions": 8391,
+      "data_revision": "mtime_ns:1793698112205173529,size:463809",
+      "first_date": "1990-12-19",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "etf",
+      "code": "159667",
+      "history_band": "long",
+      "sessions": 973,
+      "data_revision": "mtime_ns:1793700248262512328,size:56130",
+      "first_date": "2022-10-26",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "159637",
+      "history_band": "long",
+      "sessions": 1006,
+      "data_revision": "mtime_ns:1793700235611206188,size:57781",
+      "first_date": "2022-09-01",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "510050",
+      "history_band": "long",
+      "sessions": 5270,
+      "data_revision": "mtime_ns:1793700381656272031,size:308023",
+      "first_date": "2005-02-23",
+      "last_date": "2026-11-02"
+    }
+  ]
+}

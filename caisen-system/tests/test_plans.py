@@ -1,94 +1,76 @@
-import unittest
-
+"""Regression tests for the sole fixed execution policy (old 7%/2R policy retired)."""
+import pytest
 from caisen.plans import build_trade_plan
-from caisen.backtest import valid_next_open
 from caisen.schemas import Pattern
 
 
 def pattern(**overrides):
-    values = dict(
-        pattern_id="000001:stock:1d:w_bottom:abc", code="000001", kind="stock",
-        timeframe="1d", pattern_type="w_bottom", direction="bullish",
-        state="confirmed", formed_at="2025-01-02", confirmed_at="2025-03-01",
-        key_points={"first_low": 8.0, "second_low": 8.5}, neckline={"slope": 0.0, "intercept": 10.0},
-        invalidation=9.5, targets=[12.0], evidence=[{"code": "neckline_break", "value": 10.1}],
-        volume_ratio=1.8, volume_verified=True, execution_rules_verified=True, rule_version="caisen-v2", data_version="fixture",
-        parent_id=None, flags=[],
-    )
+    values=dict(pattern_id='000001:w',code='000001',kind='stock',timeframe='1d',
+                pattern_type='w_bottom',direction='bullish',state='confirmed',
+                formed_at='2025-01-02',confirmed_at=10,invalidation=9.5,targets=[12],
+                volume_verified=True,execution_rules_verified=True,evidence=[])
     values.update(overrides)
     return Pattern(**values)
 
 
-class TradePlanTests(unittest.TestCase):
-    def test_next_open_must_be_above_stop_below_target_and_under_cap(self):
-        self.assertTrue(valid_next_open(10.1, 9.5, 12, 10.2))
-        self.assertFalse(valid_next_open(9.5, 9.5, 12, 10.2))
-        self.assertFalse(valid_next_open(12, 9.5, 12, 12.5))
-        self.assertFalse(valid_next_open(10.3, 9.5, 12, 10.2))
-
-    def test_plan_uses_zero_cost_baseline_when_risk_and_reward_meet_limits(self):
-        result = build_trade_plan(pattern(), entry_price=10.1, cash=100_000, lot_size=100)
-        self.assertEqual(result["decision"], "CONSIDER_BUY")
-        self.assertLessEqual(result["planned_risk_pct"], 0.07)
-        self.assertGreaterEqual(result["net_reward_risk"], 2.0)
-        self.assertLessEqual(result["shares"] * result["entry_price"], 100_000)
-        self.assertEqual(result["cost_model"], {"commission": 0.0, "minimum_commission": 0.0, "slippage": 0.0})
-
-    def test_unverified_volume_remains_visible_but_trade_plan_waits(self):
-        result = build_trade_plan(pattern(volume_verified=False), entry_price=10.1, cash=100_000)
-        self.assertEqual(result["decision"], "WAIT")
-        self.assertIn("volume_data_unverified", result["reason_codes"])
-        self.assertIn("volume unit or corporate-action adjustment is unverified", result["data_warnings"])
-
-    def test_stop_above_entry_never_produces_buy_recommendation(self):
-        result = build_trade_plan(pattern(invalidation=10.2), entry_price=10.1, cash=100_000)
-        self.assertNotEqual(result["decision"], "CONSIDER_BUY")
-
-    def test_excessive_structural_risk_is_not_repaired_by_moving_stop(self):
-        result = build_trade_plan(pattern(invalidation=9.0), entry_price=10.1, cash=100_000)
-        self.assertEqual(result["decision"], "WAIT")
-        self.assertEqual(result["stop"], 9.0)
-        self.assertIn("structural_risk_over_7pct", result["reason_codes"])
+def test_fixed_plan_has_zero_costs_and_cash_bounded_lot_size():
+    p=build_trade_plan(pattern(),10.1)
+    assert p['decision']=='CONSIDER_BUY'
+    assert p['planned_risk_pct']==.08
+    assert p['reward_risk']==2.5
+    assert p['shares']%100==0
+    assert p['shares']*10.1<=100000
+    assert p['cost_model']==dict(commission=0,minimum_commission=0,slippage=0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_volume_is_auxiliary_and_disclosed():
+    p=build_trade_plan(pattern(volume_verified=False),10.1)
+    assert p['decision']=='CONSIDER_BUY'
+    assert 'volume unit or corporate-action adjustment is unverified' in p['data_warnings']
 
 
-def test_ambiguous_structure_cannot_bypass_wait_through_direct_plan_or_simulation():
-    result=build_trade_plan(pattern(flags=['ambiguous_structure']),entry_price=10.1)
-    assert result['decision']=='WAIT'
-    assert 'ambiguous_structure' in result['reason_codes']
+@pytest.mark.parametrize('old_stop', [10.2,9,1])
+def test_old_structural_stop_cannot_change_fixed_policy(old_stop):
+    p=build_trade_plan(pattern(invalidation=old_stop),10.1)
+    assert p['decision']=='CONSIDER_BUY'
+    assert p['stop']==pytest.approx(10.1*.92)
 
 
-def test_direct_plan_cannot_buy_patterns_outside_four_shape_allowlist():
-    result=build_trade_plan(pattern(pattern_type='spring'),entry_price=10.1)
-    assert result['decision']=='WAIT'
-    assert 'pattern_not_buy_candidate' in result['reason_codes']
+def test_ambiguous_structure_cannot_bypass_wait():
+    p=build_trade_plan(pattern(flags=['ambiguous_structure']),10.1)
+    assert p['decision']=='WAIT'
+    assert 'ambiguous_structure' in p['reason_codes']
 
 
-def test_locked_flag_target_waits_through_direct_plan():
-    result=build_trade_plan(pattern(pattern_type='bull_flag',evidence=[{'code':'measured_target_locked','value':True}]),entry_price=10.1)
-    assert result['decision']=='WAIT'
-    assert 'bull_flag_target_locked' in result['reason_codes']
+def test_direct_plan_cannot_buy_outside_four_shapes():
+    p=build_trade_plan(pattern(pattern_type='spring'),10.1)
+    assert p['decision']=='WAIT'
+    assert 'pattern_not_buy_candidate' in p['reason_codes']
 
 
-def test_direct_plan_suppresses_legacy_child_inside_main_bottom():
-    child=pattern(pattern_type='bull_flag',evidence=[{'code':'execution_suppression','value':{
-        'suppressed':True,'reason':'nested_in_main_bottom','parent_id':'main'}}])
-    result=build_trade_plan(child,entry_price=10.1)
-    assert result['decision']=='WAIT'
-    assert 'nested_in_main_bottom' in result['reason_codes']
+def test_locked_measured_flag_target_is_explanatory_only():
+    p=build_trade_plan(pattern(pattern_type='bull_flag',evidence=[dict(code='measured_target_locked',value=True)]),10.1)
+    assert p['decision']=='CONSIDER_BUY'
+    assert p['targets']==pytest.approx([12.12])
 
 
-def test_main_bottom_plan_uses_frozen_neckline_stop_and_keeps_bottom_reference():
-    main=pattern(invalidation=8.0,evidence=[{'code':'main_structure','value':{
-        'role':'main','signal_eligible':True,'neckline_at_observed':9.7,'plan_stop_level':9.5,
-        'support_lower':8.8,'support_upper':9.0,'first_trough_date':'2024-01-01',
-        'latest_anchor_date':'2024-09-01'}},{'code':'main_selection','value':{'selected':True}}])
-    result=build_trade_plan(main,entry_price=10.1)
-    assert result['stop']==9.5
-    assert result['structure_level']==9.7
-    assert result['stop_basis']=='frozen_neckline'
-    assert result['main_bottom_reference']=={'support_lower':8.8,'support_upper':9.0,
-        'first_trough_date':'2024-01-01','latest_anchor_date':'2024-09-01'}
+def test_execution_suppression_still_blocks_nested_child():
+    p=build_trade_plan(pattern(pattern_type='bull_flag',evidence=[dict(code='execution_suppression',value=dict(suppressed=True))]),10.1)
+    assert p['decision']=='WAIT'
+    assert 'nested_in_main_bottom' in p['reason_codes']
+
+
+def test_main_shape_reference_survives_but_exit_basis_is_actual_fill():
+    main=pattern(evidence=[dict(code='main_structure',value=dict(role='main',signal_eligible=True,
+                  neckline_at_observed=9.7,plan_stop_level=9.5,support_lower=8.8,support_upper=9,
+                  first_trough_date='2024-01-01',latest_anchor_date='2024-09-01')),
+                  dict(code='main_selection',value=dict(selected=True))])
+    p=build_trade_plan(main,10.1)
+    assert p['stop']==pytest.approx(10.1*.92)
+    assert p['structure_level']==9.7
+    assert p['stop_basis']=='actual_entry_fixed_fraction'
+    assert p['main_bottom_reference']['support_lower']==8.8
+
+
+def test_invalid_reference_price_cannot_buy():
+    assert build_trade_plan(pattern(),0)['decision']=='WAIT'

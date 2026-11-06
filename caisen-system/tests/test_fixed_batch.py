@@ -1,65 +1,9 @@
-import json
-
-import pandas as pd
-
-from caisen.fixed_batch import run_fixed_batch, summarize_batch
-from caisen.fixed_backtest import STRATEGY_VERSION_V1
+from caisen.fixed_batch import summarize_batch
 
 
-def test_batch_runner_freezes_one_cutoff_and_writes_replayable_artifacts(tmp_path):
-    bars = pd.DataFrame([
-        ("2024-01-01", 10, 10, 10, 10, 1000),
-        ("2024-01-02", 10, 10.1, 9.9, 10, 1000),
-        ("2024-01-03", 10, 10.1, 9.9, 10, 1000),
-    ], columns=["date", "open", "high", "low", "close", "volume"])
-    progress = []
-    result = run_fixed_batch([
-        {"bars": bars, "code": "AAA", "kind": "stock", "timeframe": "1d"},
-        {"bars": bars, "code": "BBB", "kind": "etf", "timeframe": "1d"},
-    ], tmp_path, progress_callback=progress.append)
-    assert result["development_cutoff"] == "2024-01-03"
-    assert result["batch_execution"]["worker_count"] == 1
-    assert [item["completed"] for item in progress] == [1, 2]
-    assert result["summary"]["security_timeframe_accounts"] == 2
-    assert result["summary"]["note"].find("收益率不直接求和") >= 0
-    assert all(path.exists() for path in map(__import__("pathlib").Path, result["output"].values()))
-    saved = json.loads(__import__("pathlib").Path(result["output"]["json"]).read_text())
-    assert saved["strategy_version"] == "pattern_fixed_8_20_main_parent_v2"
-    report_html = __import__("pathlib").Path(result["output"]["html"]).read_text()
-    assert ".account-table{min-width:1800px;white-space:nowrap}" in report_html
-    assert "src=\"/static/fixed-backtest-report.js?v=20261029v3\"" in report_html
-    previous_json = result["output"]["json"]
-    second = run_fixed_batch([], tmp_path)
-    assert second["output"]["json"] != previous_json
-    assert __import__("pathlib").Path(previous_json).exists()
-
-
-def test_batch_runner_preserves_selected_strategy_version_in_account_and_report(tmp_path):
-    bars = pd.DataFrame([
-        ("2024-01-01", 10, 10, 10, 10, 1000),
-        ("2024-01-02", 10, 10.1, 9.9, 10, 1000),
-    ], columns=["date", "open", "high", "low", "close", "volume"])
-    result = run_fixed_batch(
-        [{"bars": bars, "code": "AAA", "kind": "stock", "timeframe": "1d"}],
-        tmp_path, strategy_version=STRATEGY_VERSION_V1,
-    )
-    saved = json.loads(__import__("pathlib").Path(result["output"]["json"]).read_text())
-    assert result["strategy_version"] == STRATEGY_VERSION_V1
-    assert saved["results"][0]["strategy_version"] == STRATEGY_VERSION_V1
-    assert saved["strategy_version"] == STRATEGY_VERSION_V1
-
-
-def test_failed_account_preserves_completed_checkpoints(tmp_path):
-    bars = pd.DataFrame([("2024-01-01", 10, 10, 10, 10, 1000)],
-                        columns=["date", "open", "high", "low", "close", "volume"])
-    result = run_fixed_batch([
-        {"bars": bars, "code": "AAA", "kind": "stock"},
-        {"bars": pd.DataFrame({"wrong": [1]}), "code": "BROKEN", "kind": "stock"},
-    ], tmp_path)
-    assert result["batch_execution"]["status"] == "partial_failed"
-    assert result["batch_execution"]["completed_count"] == 1
-    saved = json.loads(__import__("pathlib").Path(result["output"]["json"]).read_text())
-    assert [row["code"] for row in saved["results"]] == ["AAA"]
+def test_legacy_serial_batch_executor_is_removed():
+    from caisen import fixed_batch
+    assert not hasattr(fixed_batch, 'run_fixed_batch')
 
 
 def test_multilabel_trade_is_one_trade_with_deduped_shape_tags():

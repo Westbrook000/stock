@@ -1,0 +1,417 @@
+{
+  "code": "159122",
+  "kind": "etf",
+  "provenance": {
+    "data_revision": "mtime_ns:1793700040876536000,size:13708",
+    "tick_size": 0.01
+  },
+  "signals": [
+    {
+      "signal_date": "2026-06-22",
+      "entry_date": "2026-06-23",
+      "pattern_types": [
+        "w_bottom"
+      ],
+      "patterns": [
+        {
+          "pattern_id": "159122:e75727a23417804b",
+          "pattern_type": "w_bottom",
+          "formed_at": "2025-12-16",
+          "key_points": {
+            "pivot_scale": "3atr_8pct",
+            "scale": "5y",
+            "support_lower": 0.937,
+            "support_upper": 0.95,
+            "first_trough_index": 31,
+            "first_trough_date": "2025-12-16",
+            "latest_anchor_index": 102,
+            "latest_anchor_date": "2026-04-07",
+            "neckline_test_indices": [
+              8,
+              58,
+              71,
+              86
+            ],
+            "pivot_1_index": 31,
+            "pivot_1_date": "2025-12-16",
+            "pivot_1": 0.937,
+            "pivot_1_kind": "low",
+            "pivot_2_index": 102,
+            "pivot_2_date": "2026-04-07",
+            "pivot_2": 0.95,
+            "pivot_2_kind": "low"
+          },
+          "evidence": [
+            {
+              "code": "main_structure",
+              "value": {
+                "role": "main",
+                "family": "w_bottom",
+                "scale": "5y",
+                "pivot_scale": "3atr_8pct",
+                "signal_eligible": true,
+                "eligibility_reason": "price_breakout_confirmed",
+                "support_lower": 0.937,
+                "support_upper": 0.95,
+                "neckline": {
+                  "slope": 0.0,
+                  "intercept": 1.1045
+                },
+                "frozen_at": "2026-04-16",
+                "frozen_at_index": 109,
+                "first_trough_date": "2025-12-16",
+                "latest_anchor_date": "2026-04-07",
+                "maturity_date": "2026-06-16",
+                "structure_end_date": "2026-06-16",
+                "minimum_duration_months": 6,
+                "signal_is_volume_independent": true,
+                "low_position": {
+                  "passed": true,
+                  "position_pass": true,
+                  "drawdown_pass": false,
+                  "history_end": "2026-06-16",
+                  "range_low": 0.937,
+                  "range_high": 1.209,
+                  "position_ratio": 0.0,
+                  "prepattern_high": 1.098,
+                  "prepattern_drawdown": 0.14663023679417123
+                },
+                "terminal_state": null,
+                "observed_date": "2026-06-22",
+                "neckline_at_observed": 1.1045,
+                "plan_stop_level": 0.937,
+                "neckline_rule_version": "pattern_matched_pressure_envelope_v6",
+                "neckline_effective_start": "2025-11-13",
+                "neckline_independent_test_count": 4,
+                "neckline_selection_rank": 1,
+                "neckline_selection_score": [
+                  -4.0,
+                  -78.0,
+                  0.5250000000000005,
+                  -90.0,
+                  8.0,
+                  86.0
+                ]
+              }
+            },
+            {
+              "code": "neckline_selection",
+              "value": {
+                "rule_version": "pattern_matched_pressure_envelope_v6",
+                "selected_candidate_id": "neckline-candidate-8-58-71-86",
+                "selected_rank": 1,
+                "selected_line": {
+                  "slope": 0.0,
+                  "intercept": 1.1045
+                },
+                "effective_start_date": "2025-11-13",
+                "freeze_date": "2026-04-16",
+                "line_frozen_at": "2026-03-19",
+                "structure_known_at": "2026-04-16",
+                "formation_coverage": {
+                  "passed": true,
+                  "start_index": 8,
+                  "end_index": 109,
+                  "maximum_excess": 0.0,
+                  "worst_index": 71,
+                  "reason": "formation_covered"
+                },
+                "decline_check": {
+                  "passed": true,
+                  "relative_decline": 0.0,
+                  "maximum_decline": 0.2,
+                  "start_index": 8,
+                  "end_index": 152
+                },
+                "independent_tests": [
+                  {
+                    "group_id": "neck-touch-8",
+                    "pair_id": "neckline-candidate-8-58-71-86",
+                    "pivot_index": 8,
+                    "pivot_date": "2025-11-13",
+                    "known_index": 13,
+                    "known_date": "2025-11-20",
+                    "pivot_scale": "3ATR|8%|neckline_test_2ATR",
+                    "level": 1.098,
+                    "departure_atr": 4.272989445069478,
+                    "tolerance": 0.02,
+                    "normalized_residual": 0.3249999999999975,
+                    "valid": true,
+                    "source_pivot_indices": [
+                      8
+                    ],
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "selection_rank": 1,
+                    "selection_score": [
+                      -4.0,
+                      -78.0,
+                      0.5250000000000005,
+                      -90.0,
+                      8.0,
+                      86.0
+                    ],
+                    "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                    "independent_test_count": 4,
+                    "test_span_bars": 78,
+                    "coverage_start_index": 8,
+                    "coverage_start_date": "2025-11-13",
+                    "coverage_end_index": 90,
+                    "coverage_end_date": "2026-03-19",
+                    "coverage_max_excess": 0.0,
+                    "candidate_count": 5
+                  },
+                  {
+                    "group_id": "neck-touch-58",
+                    "pair_id": "neckline-candidate-8-58-71-86",
+                    "pivot_index": 58,
+                    "pivot_date": "2026-01-26",
+                    "known_index": 60,
+                    "known_date": "2026-01-28",
+                    "pivot_scale": "3ATR|8%|neckline_test_2ATR",
+                    "level": 1.091,
+                    "departure_atr": 3.7649956294031814,
+                    "tolerance": 0.02,
+                    "normalized_residual": 0.6750000000000034,
+                    "valid": true,
+                    "source_pivot_indices": [
+                      58
+                    ],
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "selection_rank": 1,
+                    "selection_score": [
+                      -4.0,
+                      -78.0,
+                      0.5250000000000005,
+                      -90.0,
+                      8.0,
+                      86.0
+                    ],
+                    "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                    "independent_test_count": 4,
+                    "test_span_bars": 78,
+                    "coverage_start_index": 8,
+                    "coverage_start_date": "2025-11-13",
+                    "coverage_end_index": 90,
+                    "coverage_end_date": "2026-03-19",
+                    "coverage_max_excess": 0.0,
+                    "candidate_count": 5
+                  },
+                  {
+                    "group_id": "neck-touch-71",
+                    "pair_id": "neckline-candidate-8-58-71-86",
+                    "pivot_index": 71,
+                    "pivot_date": "2026-02-12",
+                    "known_index": 72,
+                    "known_date": "2026-02-13",
+                    "pivot_scale": "2ATR|5%|neckline_test_2ATR",
+                    "level": 1.111,
+                    "departure_atr": 3.7649956294031814,
+                    "tolerance": 0.02,
+                    "normalized_residual": 0.3249999999999975,
+                    "valid": true,
+                    "source_pivot_indices": [
+                      71
+                    ],
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "selection_rank": 1,
+                    "selection_score": [
+                      -4.0,
+                      -78.0,
+                      0.5250000000000005,
+                      -90.0,
+                      8.0,
+                      86.0
+                    ],
+                    "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                    "independent_test_count": 4,
+                    "test_span_bars": 78,
+                    "coverage_start_index": 8,
+                    "coverage_start_date": "2025-11-13",
+                    "coverage_end_index": 90,
+                    "coverage_end_date": "2026-03-19",
+                    "coverage_max_excess": 0.0,
+                    "candidate_count": 5
+                  },
+                  {
+                    "group_id": "neck-touch-86",
+                    "pair_id": "neckline-candidate-8-58-71-86",
+                    "pivot_index": 86,
+                    "pivot_date": "2026-03-13",
+                    "known_index": 90,
+                    "known_date": "2026-03-19",
+                    "pivot_scale": "2ATR|5%|neckline_test_2ATR",
+                    "level": 1.089,
+                    "departure_atr": 4.373803433306675,
+                    "tolerance": 0.02,
+                    "normalized_residual": 0.7750000000000035,
+                    "valid": true,
+                    "source_pivot_indices": [
+                      86
+                    ],
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "selection_rank": 1,
+                    "selection_score": [
+                      -4.0,
+                      -78.0,
+                      0.5250000000000005,
+                      -90.0,
+                      8.0,
+                      86.0
+                    ],
+                    "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                    "independent_test_count": 4,
+                    "test_span_bars": 78,
+                    "coverage_start_index": 8,
+                    "coverage_start_date": "2025-11-13",
+                    "coverage_end_index": 90,
+                    "coverage_end_date": "2026-03-19",
+                    "coverage_max_excess": 0.0,
+                    "candidate_count": 5
+                  }
+                ],
+                "coverage": {
+                  "passed": true,
+                  "start_date": "2025-11-13",
+                  "end_date": "2026-03-19",
+                  "maximum_excess": 0.0
+                },
+                "score_order": [
+                  "independent_test_count_desc",
+                  "test_span_desc",
+                  "normalized_residual_asc",
+                  "latest_test_desc",
+                  "anchor_dates_asc"
+                ],
+                "candidates": [
+                  {
+                    "candidate_id": "neckline-candidate-8-58-71-86",
+                    "rank": 1,
+                    "selected": true,
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "independent_test_count": 4,
+                    "test_span_bars": 78,
+                    "normalized_residual": 0.5250000000000005,
+                    "coverage_start_date": "2025-11-13",
+                    "coverage_end_date": "2026-03-19",
+                    "coverage_start_index": 8,
+                    "coverage_end_index": 90,
+                    "test_dates": [
+                      "2025-11-13",
+                      "2026-01-26",
+                      "2026-02-12",
+                      "2026-03-13"
+                    ],
+                    "reason": "selected_by_ordered_evidence"
+                  },
+                  {
+                    "candidate_id": "neckline-candidate-8-58-71",
+                    "rank": 2,
+                    "selected": false,
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "independent_test_count": 3,
+                    "test_span_bars": 63,
+                    "normalized_residual": 0.44166666666666615,
+                    "coverage_start_date": "2025-11-13",
+                    "coverage_end_date": "2026-02-13",
+                    "coverage_start_index": 8,
+                    "coverage_end_index": 72,
+                    "test_dates": [
+                      "2025-11-13",
+                      "2026-01-26",
+                      "2026-02-12"
+                    ],
+                    "reason": "fewer_independent_tests"
+                  },
+                  {
+                    "candidate_id": "neckline-candidate-58-71-86",
+                    "rank": 3,
+                    "selected": false,
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.101
+                    },
+                    "independent_test_count": 3,
+                    "test_span_bars": 28,
+                    "normalized_residual": 0.5333333333333338,
+                    "coverage_start_date": "2026-01-26",
+                    "coverage_end_date": "2026-03-19",
+                    "coverage_start_index": 58,
+                    "coverage_end_index": 90,
+                    "test_dates": [
+                      "2026-01-26",
+                      "2026-02-12",
+                      "2026-03-13"
+                    ],
+                    "reason": "fewer_independent_tests"
+                  },
+                  {
+                    "candidate_id": "neckline-candidate-58-71",
+                    "rank": 4,
+                    "selected": false,
+                    "line": {
+                      "slope": 0.0,
+                      "intercept": 1.101
+                    },
+                    "independent_test_count": 2,
+                    "test_span_bars": 13,
+                    "normalized_residual": 0.5000000000000004,
+                    "coverage_start_date": "2026-01-26",
+                    "coverage_end_date": "2026-02-13",
+                    "coverage_start_index": 58,
+                    "coverage_end_index": 72,
+                    "test_dates": [
+                      "2026-01-26",
+                      "2026-02-12"
+                    ],
+                    "reason": "fewer_independent_tests"
+                  }
+                ],
+                "diagnostics_as_of": "2026-06-16",
+                "rejection_counts": {},
+                "rejected_candidates": [],
+                "older_pressure_tests": [],
+                "retired_segments": [
+                  {
+                    "candidate_id": "neckline-candidate-8-58-71-86",
+                    "breakout_date": "2026-05-06",
+                    "state": "too_early"
+                  }
+                ],
+                "early_breakouts": [
+                  {
+                    "date": "2026-05-06",
+                    "index": 120,
+                    "close": 1.167,
+                    "frozen_neckline": 1.1045,
+                    "required_close": 1.1347160095680833,
+                    "atr14_previous": 0.030216009568083266,
+                    "tolerance": 0.030216009568083266,
+                    "candidate_id": "neckline-candidate-8-58-71-86"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

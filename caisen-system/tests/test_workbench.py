@@ -174,54 +174,37 @@ def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(
     assert api._jobs["shape-job"]["results"][0]["pattern_migration"]["families"]["m_top"]["status"] == "unsupported"
 
 
-def test_backtest_api_uses_date_window_and_returns_auditable_metadata(monkeypatch):
-    source = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
-    captured = {}
-    class FakeConnection:
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-        def execute(self, *args): pass
-    monkeypatch.setattr(api, "_market_data", lambda code, kind: source)
-    def run(bars, code, kind, timeframe, cash, start=None):
-        captured["dates"] = bars.date.dt.strftime("%Y-%m-%d").tolist()
-        return {"engine":"backtrader","commission":0,"slippage":0,"starting_cash":cash,
-                "available_cash":cash,"marked_position_value":0,"ending_equity":cash,
-                "trades":[],"order_events":[],"rejections":[],
-                "accounting_invariants":{"equity_equals_cash_plus_marked_position":True,"zero_commission":True},
-                "strategy_effectiveness":"deferred","limitations":["strategy not validated"]}
-    monkeypatch.setattr(api, "run_backtest", run)
-    monkeypatch.setattr(api, "connect", FakeConnection)
-
-    result = api.backtest(api.BacktestRequest(code="000001", start="2026-10-15", end="2026-10-15", cash=50000))
-
-    assert captured["dates"] == ["2026-10-15"]
-    assert result["starting_cash"] == 50000
-    assert result["analysis_window"] == {"from":"2026-10-15", "to":"2026-10-15",
-                                          "latest_available":"2026-10-16", "historical":True}
-    assert result["strategy_effectiveness"] == "deferred"
-
-
-def test_backtrader_page_exposes_inputs_progress_and_accounting_ledgers():
+def test_backtest_page_has_one_fixed_daily_research_entry():
     from pathlib import Path
     root = Path(__file__).parents[1] / "caisen" / "static"
     html = (root / "index.html").read_text(encoding="utf-8")
     js = (root / "app.js").read_text(encoding="utf-8")
-    for element_id in ("backtestCode", "backtestKind", "backtestTimeframe", "backtestStart", "backtestCash", "backtestBtn"):
-        assert f'id="{element_id}"' in html
-    assert 'data-panel="simulation"' in html
-    assert "/api/v1/backtests" in js
-    assert "正在运行本地模拟，请稍候" in js
-    for field in ("available_cash", "marked_position_value", "ending_equity", "order_events", "rejections"):
-        assert field in js
-    assert "策略效果未验证" in js
+    assert 'data-panel="daily-backtest"' in html
+    assert 'id="dailyBacktestBtn"' in html
+    assert 'id="backtestBtn"' not in html and 'id="fixedRunBtn"' not in html
+    assert 'id="fixedStrategyVersion"' not in html and 'id="fixedTimeframes"' not in html
+    assert "daily_800_stock_200_etf_v1" in js
+    assert "fetchJson('/api/v1/backtests'" in js
+    assert "fetchJson('/api/v1/fixed-backtests'" not in js
+    assert "strategy_version:$(`" not in js and "fixedStrategyVersion" not in js and "cash:100000" not in js
+    assert "日线策略回测" in html and "实际成交后按 8% 止损、20% 止盈" in html
+    assert "候选结构反转距离为 2×ATR" in html
+    assert "突破收盘需高于冻结颈线至少 1×前一根已完成 ATR" in html
+    assert "不启用试验性的 min3 颈线或开盘价过滤" in html
+    assert "实际使用的识别器、引擎版本和 worker 数" in html
+    assert "worker_source" in js and "execution_mode" in js and "识别器" in js
+    assert "期末按最后交易日收盘价平仓" in html
+    assert "到数据末日按收盘价估值" not in html
 
 
 def test_modified_workbench_assets_use_current_cache_version():
     from pathlib import Path
     html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
-    version = "20261029v7"
-    for asset in ("app.css", "refresh_report.js", "scan-filters.js", "pattern-chart.js", "http-client.js", "fixed-backtest-report.js", "app.js"):
-        assert f"/static/{asset}?v={version}" in html
+    for asset in ("pattern-chart.js", "app.js"):
+        expected_version = "20261105-backtest-effective-config-v2" if asset == "app.js" else "20261031-neckline-v2"
+        assert f"/static/{asset}?v={expected_version}" in html
+    for asset in ("app.css", "refresh_report.js", "scan-filters.js", "http-client.js", "fixed-backtest-report.js"):
+        assert f"/static/{asset}?v=20261029v7" in html
     assert "20261027v6" not in html
 
 
@@ -534,90 +517,21 @@ def test_history_ui_separates_new_scan_and_reads_saved_results_with_kind_and_ran
     assert "JSON.parse(body)" in http and "response.status" in http
 
 
-def test_fixed_batch_worker_builds_report_link_and_validates_inputs(monkeypatch, tmp_path):
-    from pathlib import Path
-    instrument = InstrumentFile("000001", "stock", "one.csv")
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "fixed.sqlite3"))
-    monkeypatch.setattr(api, "ROOT", str(tmp_path))
-    monkeypatch.setattr(api, "discover_instruments", lambda root: [instrument])
-    monkeypatch.setattr(api, "load_daily_bars", lambda item, root: MarketDataResult(item, bars=make_bars()))
-
-    def fake_batch(items, output_dir, development_cutoff=None, max_workers=1, progress_callback=None,
-                   strategy_version="pattern_fixed_8_20_main_parent_v2"):
-        assert strategy_version == "pattern_fixed_8_20_v1"
-        assert len(items) == 1 and items[0]["timeframe"] == "1d"
-        assert len(items[0]["bars"]) == 3 and items[0]["trade_start"] == "2026-10-15"
-        report_path = Path(output_dir) / "fixed-backtest-report.html"
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text('<script src="fixed-backtest-report.js"></script>', encoding="utf-8")
-        if progress_callback:
-            progress_callback({"completed": 1, "total": 1, "current": "000001", "timeframe": "1d"})
-        return {"strategy_version": "pattern_fixed_8_20_v1", "development_cutoff": "2026-10-15",
-                "summary": {"trade_count": 0}, "groups": [],
-                "output": {"html": str(report_path), "json": str(report_path.with_suffix(".json"))}}
-
-    monkeypatch.setattr(api, "run_fixed_batch", fake_batch)
-    api._fixed_backtest_jobs["fixed-fixture"] = {"job_id": "fixed-fixture", "job_type": "fixed_backtest",
-        "status": "queued", "output_dir": str(tmp_path / "state" / "fixed_backtests" / "fixed-fixture"),
-        "params": {"timeframes": ["1d"]}, "created_at": "2026-10-29T00:00:00+00:00"}
-    api._fixed_backtest_worker("fixed-fixture", {"kinds": ["stock"], "timeframes": ["1d"],
-                              "cash": 100000, "max_workers": 1,"date_from":"2026-10-15",
-                              "strategy_version":"pattern_fixed_8_20_v1"})
-
-    job = api.get_fixed_backtest_job("fixed-fixture")
-    report = api.fixed_backtest_report("fixed-fixture")
-    history = api.list_fixed_backtests(page=1)
-    assert job["status"] == "completed"
-    assert job["strategy_version"] == "pattern_fixed_8_20_v1"
-    assert job["report_url"] == "/api/v1/fixed-backtests/fixed-fixture/report"
-    assert history["total"] == 1 and history["items"][0]["job_id"] == "fixed-fixture"
-    assert b"/static/fixed-backtest-report.js" in report.body
-    api._fixed_backtest_jobs.pop("fixed-fixture")
-    assert api.get_fixed_backtest_job("fixed-fixture")["status"] == "completed"
-    assert b"/static/fixed-backtest-report.js" in api.fixed_backtest_report("fixed-fixture").body
-    with pytest.raises(HTTPException):
-        api.start_fixed_backtest({"kinds": ["crypto"]})
-    with pytest.raises(HTTPException):
-        api.start_fixed_backtest({"cash": 50000})
-    with pytest.raises(HTTPException):
-        api.start_fixed_backtest({"max_workers": 2})
-    with pytest.raises(HTTPException):
-        api.start_fixed_backtest({"scope": "recent100"})
+def test_fixed_backtest_post_is_retired(monkeypatch, tmp_path):
+    with pytest.raises(HTTPException) as error:
+        api.start_fixed_backtest({})
+    assert error.value.status_code == 410
 
 
-def test_fixed_backtest_request_selects_new_default_or_explicit_v1(monkeypatch, tmp_path):
-    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "strategy-version.sqlite3"))
-    monkeypatch.setattr(api, "ROOT", str(tmp_path))
-    monkeypatch.setattr(api, "discover_instruments", lambda root: [])
-    class NoStartThread:
-        def __init__(self, *args, **kwargs): pass
-        def start(self): pass
-    monkeypatch.setattr(api.threading, "Thread", NoStartThread)
-
-    latest = api.start_fixed_backtest({})
-    baseline = api.start_fixed_backtest({"strategy_version":"pattern_fixed_8_20_v1"})
-
-    assert api._fixed_backtest_jobs[latest["job_id"]]["params"]["strategy_version"] == "pattern_fixed_8_20_main_parent_v2"
-    assert api._fixed_backtest_jobs[baseline["job_id"]]["params"]["strategy_version"] == "pattern_fixed_8_20_v1"
-    with pytest.raises(HTTPException):
-        api.start_fixed_backtest({"strategy_version":"unknown"})
-
-
-def test_fixed_backtest_page_posts_to_async_batch_and_opens_report():
+def test_fixed_backtest_page_is_removed_but_old_report_routes_remain():
     from pathlib import Path
     html = (Path(api.WEB) / "index.html").read_text(encoding="utf-8")
     js = (Path(api.WEB) / "app.js").read_text(encoding="utf-8")
-    assert 'data-panel="fixed-simulation"' in html
-    assert 'id="fixedRunBtn"' in html and 'id="fixedCutoff"' in html and 'id="fixedScope"' in html
-    assert 'id="fixedStrategyVersion"' in html
-    assert 'strategy_version:$(' in js and "fixedStrategyVersion" in js
-    assert "fetchJson('/api/v1/fixed-backtests'" in js
-    assert "CaisenFixedBacktestReport" not in js
-    assert "fixed-backtests/${encodeURIComponent(jobId)}" in js
-    assert "job.report_url" in js and "打开完整回测报告" in js
-    assert 'id="fixedHistory"' in html and "/api/v1/fixed-backtests?page=" in js
-    assert "scope=$('fixedScope').value" in js and "全部可用历史" in html
-    assert "params.sample_scope_detail" in js and "混合范围样本" in js
+    assert 'data-panel="fixed-simulation"' not in html
+    assert 'data-panel="simulation"' not in html
+    assert 'id="dailyBacktestBtn"' in html
+    assert "/api/v1/fixed-backtests/${encodeURIComponent(jobId)}/report" not in js
+    assert "fetchJson('/api/v1/backtests'" in js
 
 
 def test_fixed_backtest_recovery_marks_active_task_interrupted_and_keeps_checkpoint(monkeypatch, tmp_path):

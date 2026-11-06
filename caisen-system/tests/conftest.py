@@ -14,7 +14,9 @@ def isolate_caisen_test_state(tmp_path, monkeypatch):
     if api is not None:
         api._jobs.clear()
         api._fixed_backtest_jobs.clear()
+        api._daily_backtest_jobs.clear()
     yield
     if api is not None:
         api._jobs.clear()
         api._fixed_backtest_jobs.clear()
+        api._daily_backtest_jobs.clear()

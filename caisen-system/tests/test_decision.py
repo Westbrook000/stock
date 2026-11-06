@@ -1,4 +1,4 @@
-from caisen.decision import rank_scan_results, synthesize_decision
+from caisen.decision import _label, rank_scan_results, synthesize_decision
 
 
 def pattern(pattern_type="w_bottom", direction="bullish", state="confirmed", targets=None, **extra):
@@ -22,19 +22,24 @@ def pattern(pattern_type="w_bottom", direction="bullish", state="confirmed", tar
     return result
 
 
-def test_confirmed_bullish_plan_becomes_candidate_with_zero_cost_and_warnings():
+def test_confirmed_bullish_plan_allows_unverified_volume_with_warnings():
     result = synthesize_decision(
         "000001", "stock", {"1d": [pattern()], "1w": []},
         {"1d": 10.0}, {"1d": "usable_with_warnings", "1w": "insufficient"},
     )
 
-    assert result["action"] == "WAIT"
-    assert result["selected_plan"] is None
-    assert "volume_data_unverified" in result["candidate_plans"][0]["reason_codes"]
+    assert result["action"] == "CONSIDER_BUY"
+    assert result["selected_plan"]["pattern_id"] == "id-w_bottom"
+    assert "volume_data_unverified" not in result["selected_plan"]["reason_codes"]
     assert result["data_quality"]["1w"] == "insufficient"
-    assert "volume unit or corporate-action adjustment is unverified" in result["candidate_plans"][0]["data_warnings"]
-    assert "研究观察" in result["explanation"]
+    assert "volume unit or corporate-action adjustment is unverified" in result["selected_plan"]["data_warnings"]
     assert "probability" not in result
+
+
+def test_complete_main_bottom_waiting_for_neckline_is_not_labeled_as_unformed():
+    candidate = pattern(state="forming", evidence=[{"code": "main_structure", "value": {"role": "main"}}])
+
+    assert _label(candidate) == "W底，已成型，等待颈线有效突破"
 
 
 def test_only_three_migrated_bullish_bottom_shapes_can_create_buy_plans():
@@ -73,7 +78,7 @@ def test_one_qualified_timeframe_is_sufficient_for_buy_recommendation():
     assert result["selected_plan"]["timeframe"] == "1d"
 
 
-def test_main_bottom_shapes_can_pass_without_volume_but_keep_all_price_risk_gates():
+def test_main_bottom_shapes_can_pass_without_volume_and_use_fixed_fill_risk():
     for pattern_type in ("w_bottom", "inverse_head_shoulders", "triangle_bottom"):
         candidate = pattern(
             pattern_type, volume_verified=False, execution_rules_verified=True,
@@ -89,8 +94,9 @@ def test_main_bottom_shapes_can_pass_without_volume_but_keep_all_price_risk_gate
         assert result["action"] == "CONSIDER_BUY", pattern_type
         assert result["selected_plan"]["pattern_id"] == candidate["pattern_id"]
         assert "volume_data_unverified" not in result["selected_plan"]["reason_codes"]
-        assert result["selected_plan"]["planned_risk_pct"] <= .07
-        assert result["selected_plan"]["reward_risk"] >= 2.0
+        assert result["selected_plan"]["planned_risk_pct"] == .08
+        assert result["selected_plan"]["reward_risk"] == 2.5
+        assert result["selected_plan"]["stop_basis"] == "actual_entry_fixed_fraction"
         assert result["selected_plan"]["data_warnings"]
 
 
@@ -189,20 +195,19 @@ def test_each_buy_candidate_stays_visible_and_waits_before_its_confirmation_brea
         assert "未确认" in result["patterns"][0]["display_label"], pattern_type
 
 
-def test_unsupported_bull_flag_is_not_used_by_the_new_decision_path():
+def test_bull_flag_plan_ignores_locked_measured_target_and_uses_fixed_actual_fill():
+    from caisen.plans import build_trade_plan
     locked_flag = pattern(
-        "bull_flag", volume_verified=True, execution_rules_verified=True,
+        "bull_flag", volume_verified=False, execution_rules_verified=True,
         evidence=[{"code": "measured_target_locked", "value": True}],
     )
-    result = synthesize_decision(
-        "000001", "stock", {"1d": [locked_flag]},
-        {"1d": 10.0}, {"1d": "usable"},
-    )
+    plan = build_trade_plan(locked_flag, 10.0)
 
-    assert result["action"] == "WAIT"
-    assert result["candidate_plans"] == []
-    assert result["reason_codes"] == ["no_current_pattern"]
-    assert result["patterns"] == []
+    assert plan["decision"] == "CONSIDER_BUY"
+    assert round(plan["stop"], 2) == 9.2
+    assert plan["targets"] == [12.0]
+    assert plan["stop_basis"] == "actual_entry_fixed_fraction"
+    assert "volume unit or corporate-action adjustment is unverified" in plan["data_warnings"]
 
 
 def test_unsupported_bearish_pattern_does_not_enter_new_path_conflict_logic():
@@ -212,7 +217,7 @@ def test_unsupported_bearish_pattern_does_not_enter_new_path_conflict_logic():
         {"1d": 10.0, "1w": 10.0}, {"1d": "usable", "1w": "usable"},
     )
 
-    assert result["action"] == "WAIT"
+    assert result["action"] == "CONSIDER_BUY"
     assert result["timeframe_conflict"] is False
     assert "timeframe_direction_conflict" not in result["reason_codes"]
     assert {item["pattern_type"] for item in result["patterns"]} == {"w_bottom"}
@@ -247,19 +252,20 @@ def test_bullish_structure_with_existing_position_can_be_hold():
     assert result["action"] == "HOLD"
 
 
-def test_excessive_risk_or_insufficient_first_target_space_waits():
-    too_risky = synthesize_decision(
-        "000001", "stock", {"1d": [pattern(invalidation=9.0)]},
+def test_fixed_8_20_execution_ignores_legacy_structural_risk_and_shape_target():
+    candidate = pattern(invalidation=9.0, targets=[10.9])
+    result = synthesize_decision(
+        "000001", "stock", {"1d": [candidate]},
         {"1d": 10.0}, {"1d": "usable"},
     )
-    too_close = synthesize_decision(
-        "000001", "stock", {"1d": [pattern(targets=[10.9])]},
-        {"1d": 10.0}, {"1d": "usable"},
-    )
-    assert too_risky["action"] == "WAIT"
-    assert "structural_risk_over_7pct" in too_risky["reason_codes"]
-    assert too_close["action"] == "WAIT"
-    assert "net_first_target_below_2R" in too_close["reason_codes"]
+    plan = result["selected_plan"]
+    assert result["action"] == "CONSIDER_BUY"
+    assert round(plan["stop"], 2) == 9.2
+    assert plan["targets"] == [12.0]
+    assert plan["shape_targets"] == [10.9]
+    assert plan["planned_risk_pct"] == .08
+    assert plan["reward_risk"] == 2.5
+    assert plan["highest_allowed_entry"] is None
 
 
 def test_missing_weekly_data_never_counts_as_a_confirmed_timeframe():
@@ -288,7 +294,7 @@ def test_buy_scan_sort_is_rule_based_and_stable():
     assert [item["code"] for item in rank_scan_results(records)] == ["000001", "000002", "000003"]
 
 
-def test_main_bottom_uses_frozen_neckline_stop_and_keeps_bottom_as_reference():
+def test_main_bottom_keeps_neckline_as_structure_reference_but_stop_uses_actual_fill():
     candidate = pattern(
         "w_bottom", pattern_id="main-stop", invalidation=8.0, targets=[16.0],
         evidence=[
@@ -306,8 +312,9 @@ def test_main_bottom_uses_frozen_neckline_stop_and_keeps_bottom_as_reference():
     plan = result["selected_plan"]
     assert plan["decision"] == "CONSIDER_BUY"
     assert plan["structure_level"] == 13.0
-    assert plan["stop"] == 12.98
-    assert plan["stop_basis"] == "frozen_neckline"
+    assert round(plan["stop"], 3) == 12.788
+    assert plan["targets"] == [16.68]
+    assert plan["stop_basis"] == "actual_entry_fixed_fraction"
     assert plan["main_bottom_reference"]["support_lower"] == 8.0
-    assert plan["planned_risk_pct"] <= .07
-    assert plan["reward_risk"] >= 2.0
+    assert plan["planned_risk_pct"] == .08
+    assert plan["reward_risk"] == 2.5

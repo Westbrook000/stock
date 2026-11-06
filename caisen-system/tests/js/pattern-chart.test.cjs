@@ -37,6 +37,16 @@ assert.equal(mg.markers.filter(p=>p.name.includes('颈线测试')).length,2);
 assert.equal(mg.markers.find(p=>p.name.includes('确认')).index,150);
 assert.equal(mg.markers.find(p=>p.name.includes('确认')).price,12.5);
 console.log('main-bottom chart maps actual dates, grouped neckline tests, and frozen breakout');
+const segmented={...main,chart_offset:100,confirmation_date:bars[150].date,evidence:[...main.evidence,{code:'neckline_selection',value:{
+ selected_candidate_id:'selected',selected_line:{slope:0,intercept:12},effective_start_date:bars[125].date,
+ freeze_date:bars[137].date,line_frozen_at:bars[131].date,coverage:{end_date:bars[131].date},
+ candidates:[{rank:1,selected:true,line:{slope:0,intercept:12},coverage_start_date:bars[125].date,coverage_end_date:bars[131].date},
+  {rank:2,selected:false,line:{slope:0,intercept:13},coverage_start_date:bars[140].date,coverage_end_date:bars[145].date}],retired_segments:[]}}]};
+const sg=patternGeometry({_bars:bars,_chart_offset:20},segmented);
+assert(sg.boundaries.some(item=>item.name==='已验证压力区间'&&item.points[0].index===125&&item.points[1].index===131));
+assert(sg.boundaries.some(item=>item.name==='冻结颈线延伸'&&item.points[0].index===131&&item.points[1].index===150));
+assert(sg.boundaries.some(item=>item.name==='备选压力线 2'));
+console.log('main-bottom chart separates validated pressure range, frozen extension, and alternatives');
 const mainW={...main,chart_offset:100,key_points:{pivot_1_index:2,pivot_1_date:bars[102].date,pivot_1:8,
  pivot_2_index:38,pivot_2_date:bars[138].date,pivot_2:9},evidence:[{code:'main_structure',value:{role:'main',support_lower:8,support_upper:9}}]};
 assert.deepEqual(patternGeometry({_bars:bars,_chart_offset:20},mainW).anchors.map(p=>p.name),['左底','右底']);

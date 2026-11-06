@@ -97,3 +97,26 @@ Plan boundary regression: ambiguous structures, non-allowlisted shapes, and lock
 - [x] Validate the Backtest API's inclusive date window and positive cash; resolve the existing `_market_data` call signature mismatch.
 
 Verification: 140 Caisen pytest tests pass when run from the stock workspace root (the legacy local-CSV test resolves `data/` relative to cwd); 5 Node tests pass; JavaScript syntax and Python compile checks pass. The HTTP page and `/api/v1/backtests` were exercised on an isolated local server with a temporary SQLite path; the response reported zero fees and both accounting invariants true. No network refresh or strategy-performance run is part of this work.
+
+## 2026-11-01 proposed: boundary-first pattern recognition
+
+Status: plan only; implementation waits for the revised `SPEC-pattern-engine.md` approval. See the matching section in `tasks/plan.md`.
+
+- [ ] Revise and approve the pattern-engine spec: causal boundary-first flow, nine non-Spring boundary mappings, Spring exception, lifecycle/IDs, and per-pattern confirmation rules.
+- [ ] Implement shared causal boundary discovery and stable IDs; test independent touches, coverage, invalidation, and prefix causality.
+- [ ] Link W bottom, inverse head-and-shoulders, and triangle bottom to shared boundaries; preserve 159718, 516630, 600108, loss cases, duration/low-position/slope rules, and 1ATR breakout behavior.
+- [ ] Migrate M top, ordinary false breakout, both flags, head-and-shoulders top, and triangle top. Keep Spring on its dedicated reclaim path.
+- [ ] Unify scan, detail, decision, `/api/v1/backtests`, and fixed Backtrader on the same event/IDs; reconcile the three currently coded versus four previously approved buy-candidate shapes; remove legacy runtime fallback.
+- [ ] Validate all ten catalog entries, causal prefix parity, blind recognition quality, and then the frozen rolling Backtrader cohort; report recognition and strategy metrics separately.
+- [ ] Checkpoint: all non-Spring patterns link to valid shape-specific boundaries; all consumers agree on signal date; no past event changes after future bars are appended.
+
+
+## 2026-11-01 user amendment: one fixed strategy and acceleration
+
+- [ ] Unify recommendations and all backtest entry points on new boundary-linked signals plus next-open entry / 8% stop / 20% target; remove the 7%/2R structural-plan strategy and executable strategy-v1 selector; keep versioned saved reports readable.
+- [ ] Benchmark the same fixed cohort by execution phase and memory with 1/2/4 process workers.
+- [ ] Reuse causal ATR/weekly aggregation and advance weekly recognition only for new completed weekly bars.
+- [ ] Add bounded symbol-level process parallelism with deterministic account results and lightweight progress persistence.
+- [ ] Implement incremental boundary/shape/event state with observation-time breakout, invalidation, maturity, and window-rollover checks; prove equivalence to historical-prefix reference cases.
+- [ ] Cache frozen-rule signal events by data revision/rule version and write account details once; invalidate revised history correctly.
+- [ ] Report measured elapsed time, peak memory, signal/trade parity, and accounting invariants before the large rolling run.

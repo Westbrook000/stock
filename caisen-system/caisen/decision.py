@@ -37,7 +37,7 @@ def _label(pattern):
     state = _value(pattern, "state")
     main_bottom = isinstance(_evidence_value(pattern, "main_structure"), dict)
     if state == "forming":
-        label = name + "，未确认"
+        label = name + ("，已成型，等待颈线有效突破" if main_bottom else "，未确认")
     elif state == "confirmed":
         label = name + ("，价格确认，量能仅作辅助" if main_bottom and not _value(pattern, "volume_verified", False)
                         else "，价格确认" if _value(pattern, "volume_verified", False)
@@ -123,9 +123,6 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
             if (_value(pattern, "pattern_type") not in BUY_CANDIDATE_PATTERN_TYPES
                     or _value(pattern, "direction") != "bullish"
                     or _value(pattern, "state") != "confirmed"):
-                continue
-            if (_value(pattern, "pattern_type") == "bull_flag"
-                    and _evidence_value(pattern, "measured_target_locked") is True):
                 continue
             if "ambiguous_structure" in (_value(pattern, "flags", []) or []):
                 continue
@@ -242,7 +239,7 @@ def _result(code, kind, action, reasons, patterns, qualities, selected, confirme
 
 def _explain(action, reasons):
     if action == "CONSIDER_BUY":
-        return "结构已价格确认，固定止损风险和首个有效目标空间通过零费用基线；请结合图表证据判断。"
+        return "结构已有效突破确认；下一交易日开盘介入，按实际成交价止损8%、止盈20%。"
     if action == "SELL_IF_HELD":
         return "检测到已确认的空头/顶部结构；若已有持仓，作为退出风险提示，不代表做空或自动卖出。"
     if action == "INSUFFICIENT_DATA":

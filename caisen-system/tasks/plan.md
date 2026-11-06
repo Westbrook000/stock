@@ -458,3 +458,71 @@ Each slice verifies its focused behavior; full suite is the final gate. No full-
 - [x] Fix Backtest API date slicing and its `_market_data` signature mismatch.
 
 Verification: 140 Caisen pytest tests pass from the stock workspace root; 5 Node tests, JavaScript syntax and Python compilation pass. The HTTP page and `/api/v1/backtests` pass on an isolated local service with temporary SQLite storage; zero-fee and ledger invariants are true. No live market refresh or strategy-effectiveness study is run.
+
+## 2026-11-01 proposed: boundary-first pattern recognition
+
+Status: planning only. This section extends the existing `pattern-engine` work; it does not authorize implementation. Revise `SPEC-pattern-engine.md` and obtain approval before changing detector behavior.
+
+### Current-state findings
+
+- The production scan currently calls `detect_main_bottoms` and supports only W bottom, inverse head-and-shoulders, and triangle bottom. It first creates shape sequences, then searches/selects pressure lines for each sequence in `_make_main_pattern`; it has no shared, stable boundary identity that shapes can link to.
+- The rule catalog contains ten active shapes, but seven are outside the new path. The ordinary scan therefore does not yet use the same ten-shape recognition scope as the catalog.
+- `/api/v1/backtests` uses `caisen.backtest.run_backtest`, which calls the legacy `detect_patterns` route. Fixed Backtrader v2 uses `detect_main_bottoms`. A signal in the scan and a signal in each backtest can therefore come from different recognition logic.
+- `BUY_CANDIDATE_PATTERN_TYPES` currently contains three shapes. The earlier approved scope listed four, including the bullish flag, so restore/reconcile that contract before migrating the flag.
+
+### Proposed architecture contract
+
+Treat “neckline” as a family-specific **structural boundary**. First generate causal boundary candidates; then match each eligible boundary to a complete shape. A boundary alone is never a pattern or a buy signal.
+
+```text
+OHLCV prefix -> confirmed swings -> boundary candidates -> shape/boundary matching
+             -> pattern lifecycle -> confirmation -> plan -> scan and Backtrader
+
+破底翻 -> existing dedicated support/range break-and-reclaim lifecycle
+```
+
+- Each boundary has a stable ID, type/role, anchors, valid interval, independent touch groups, line/zone fit, whole-interval coverage, known/frozen dates, and invalidation history.
+- Each pattern records the IDs and roles of its required boundary or boundaries. The matcher checks that anchors, reaction legs, duration, and boundary interval form one structure; a nearby pressure line cannot be attached merely because it fits the price series.
+- Use pattern-appropriate boundaries: neckline pressure/resistance for W and head-and-shoulders bottoms; support neckline for tops; both converging rails for triangles; channel rails for flags; and box edges for ordinary false breakouts. Keep their user-facing names accurate rather than calling every line a neckline.
+- Keep Spring/破底翻 on its existing dedicated support-break/reclaim algorithm; it does not need to pass through the shared neckline matcher.
+- Preserve approved pattern-confirmation rules: the three long-cycle bottoms keep their daily six-month / weekly twelve-month duration, low-position gate, independent tests, slope/coverage checks, and close above frozen neckline plus prior ATR. The user now specifies one execution policy: confirmed boundary-linked buy signal, next-session open entry, actual-fill-based 8% stop / 20% target, zero costs, unlimited holding duration, final-close liquidation. Remove the alternative 7% structural-risk / 2R entry gate and structural-stop/shape-target execution policy from active recommendations and backtests. Shape projections may remain explanatory evidence.
+- Keep a single event and decision contract for scan, detail, normal Backtrader, and fixed Backtrader. During migration, a shadow comparison may be used for validation, but no product route may fall back to legacy detection after cutover.
+- Preserve the prior approved four-shape buy-plan scope (W bottom, inverse head-and-shoulders, bullish flag, triangle bottom) unless a separate user decision changes it. The other non-Spring shapes can still create bearish/WAIT/SELL_IF_HELD evidence; bearish structures do not create short orders.
+
+### Implementation phases
+
+1. **Freeze the spec and rule map.** Add the boundary event contract, nine pattern-to-boundary mappings, Spring exception, causal/freeze rules, existing per-pattern confirmation buffers, and current three-versus-four buy-candidate discrepancy to `SPEC-pattern-engine.md`. Approval is the implementation gate.
+2. **Build boundary discovery first.** Reuse causal pivots and touch grouping; implement stable boundary IDs, level/channel/box types, coverage checks, independent-test grouping, lifecycle, and de-duplication. Unit-test false boundaries, repeated adjacent touches, interval breaches, and future-prefix invariance.
+3. **Migrate the three current long-cycle bottoms.** Match W, head-and-shoulders bottom, and triangle bottom to explicit boundary IDs. Regress 159718, 516630, 600108, the existing six loss examples, and the user's reviewed labels. Confirm no buy occurs before the applicable frozen-boundary breakout.
+4. **Migrate the other six non-Spring shapes.** Implement M top, ordinary false breakout, bullish/bearish flag, head-and-shoulders top, and triangle top against their specified boundary roles. Keep Spring's existing path unchanged.
+5. **Unify consumers and cut over.** Make scan, detail, decision ranking, `/api/v1/backtests`, and fixed Backtrader consume the same boundary-linked events and the single 8%/20% execution policy. Restore the approved bullish-flag candidate after its channel-break confirmation is proven; measured targets are explanatory and cannot silently restore the removed 2R gate. Remove the old strategy selector, executable v1 baseline, legacy detector entry paths, and structural-stop/target execution. Keep saved old reports readable with their original version.
+6. **Validate recognition, then strategy.** Run pattern-level fixtures for all nine shapes plus Spring regression; run causal prefix and API/backtest parity checks; collect a frozen blind sample with positive and confusing negative examples; then run the agreed rolling Backtrader cohort on the frozen rules. Report recognition quality separately from win rate/returns.
+
+### Acceptance criteria
+
+- Every one of the nine shared-path shapes has a linked, explainable boundary ID; Spring remains independently recognized and its existing reclaim behavior is unchanged.
+- A boundary that does not match the full topology produces no named pattern; a matched but unbroken shape remains WAIT; only its own rule's boundary break can confirm it.
+- Scan, detail, normal Backtrader, and fixed Backtrader agree on pattern ID, boundary ID, confirmation date, and suppression reason for the same historical prefix.
+- Appending future bars cannot change a past boundary's anchors/freeze date or a past confirmation/entry event.
+- 159718, 516630, and 600108 retain their accepted structures and causal buy dates; changes to other labels are reported as added, removed, earlier/later, or mismatched rather than hidden by filtering.
+- The blind recognition report separates false positives, missed shapes, wrong boundary associations, anchor/date error, and confirmation delay. Backtest profitability is not used as pattern ground truth.
+
+### Open assumption for review
+
+In the shared engine, “neckline” means a typed structural boundary. Charts and reports continue to label it as neckline, box edge, flag channel, or triangle rail according to the shape. This avoids implying that all nine patterns have the same geometry.
+
+
+### 2026-11-01 user decision: one execution strategy and faster causal replay
+
+The user selected the fixed 8% stop / 20% target strategy combined with the new boundary-first buy-signal plan, and requested removal of other execution strategies. This supersedes previous structural-stop/7%-risk/2R execution requirements. Use all available historical context, independent daily/weekly accounts of 100,000, next-session open entry, 100-unit lots, zero costs, no pyramiding, no maximum hold, and final-close liquidation. Keep detection evidence and order execution as distinct stages while exposing a single product strategy.
+
+Acceleration order:
+
+1. Benchmark a fixed, versioned short/medium/long-history cohort. Measure loading, weekly aggregation, ATR/pivots, boundary discovery/matching, signal generation, Backtrader, report writing, and peak memory separately. Compare 1/2/4 workers on the same inputs; choose the worker count from actual throughput and memory, not a fixed ten-thread target.
+2. Precompute causal ATR arrays and completed-week aggregates once per symbol. Weekly detection advances only when a new completed weekly bar is available; both timeframe accounts continue to use daily fills. Keep pre-trade-start history as context. Update low-position and duration evidence with the observed prefix only.
+3. Add bounded process workers at symbol level. Reuse one symbol's loaded daily history for both timeframes, run each account's time sequence serially, keep bounded queued work, and have the coordinator persist deterministic account results. No nested process/BLAS thread multiplication.
+4. Build the new boundary-first recognizer as an incremental state machine: maintain confirmed pivots plus an unconfirmed tail, touch groups, candidate boundaries, shape links, and frozen events. Append one bar instead of recomputing every prefix. Check coverage/invalidation, ATR-buffer crossing, minimum-duration maturity, rolling-window expiry, and shape selection at every relevant observation even without a new pivot. Handle five/ten-year window rollovers explicitly.
+5. Store reusable signal events separately from Backtrader fills, keyed by data revision, engine/rule version, symbol, timeframe, and requested range. Historical data revisions invalidate the affected dependent prefix; do not reintroduce whole-file hashes or accept stale caches after rule changes. During one frozen-rule run, reuse signal events for account/report generation.
+6. Persist each completed account once and throttle lightweight progress summaries. Avoid rebuilding and rewriting all detailed historical results after every completed account; assemble the full report at checkpoints and completion.
+
+Acceptance: fixed-cohort incremental and reference-prefix outputs agree on pattern/boundary IDs, confirmation dates, suppression reasons, entries/exits, and account equity. Preserve 159718, 516630, 600108, weak-breakout, holiday/week-boundary, maturity, invalidation, and window-rollover regressions. A full-history recognition pass followed by retroactively extracting historical signals is not an acceptable speed shortcut. Report measured speedup and memory; no speedup target is claimed before benchmarking.

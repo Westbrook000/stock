@@ -7,6 +7,7 @@ the full observed prefix as background for its quality gates.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 from collections import defaultdict
 
@@ -20,14 +21,18 @@ from .migration import migration_status
 
 STRATEGY_VERSION_V1 = "pattern_fixed_8_20_v1"
 STRATEGY_VERSION_V2 = "pattern_fixed_8_20_main_parent_v2"
-SUPPORTED_STRATEGY_VERSIONS = frozenset({STRATEGY_VERSION_V1, STRATEGY_VERSION_V2})
-STRATEGY_VERSION = STRATEGY_VERSION_V2
+STRATEGY_VERSION = "daily_four_patterns_fixed_8_20_v1"
+SUPPORTED_STRATEGY_VERSIONS = frozenset({STRATEGY_VERSION})
 MAIN_BOTTOM_TYPES = {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}
-PATTERN_TYPES = set(MAIN_BOTTOM_TYPES)
+PATTERN_TYPES = set(MAIN_BOTTOM_TYPES) | {"bull_flag"}
 LOT_SIZE = 100
 STARTING_CASH = 100000.0
 STOP_FRACTION = 0.08
 TARGET_FRACTION = 0.20
+EXPERIMENT_BASELINE = "baseline_four_type_v1"
+EXPERIMENT_OPEN_ADMISSION = "open_admission_four_tags_v1"
+EXPERIMENT_NECKLINE_MIN3 = "neckline_min3_v1"
+EXPERIMENT_PATTERN_TYPES = frozenset(PATTERN_TYPES)
 
 
 def _iso(value):
@@ -189,6 +194,9 @@ class _FixedRiskRewardStrategy(bt.Strategy):
                                         "return_pct": float(order.executed.price) / entry["entry_price"] - 1,
                                         "holding_sessions": max(exit_index - entry_index, 0),
                                         "holding_days": (exit_date - entry_date).days,
+                                        "same_bar_stop_target_touched": bool(
+                                            float(self.data.low[0]) <= entry["stop_price"]
+                                            and float(self.data.high[0]) >= entry["target_price"]),
                                         "exit_shares": abs(int(order.executed.size))})
                     self.position_meta = None
         elif order.status in (order.Canceled, order.Margin, order.Rejected, order.Expired):
@@ -216,7 +224,8 @@ def simulate_fixed_trades(bars, signals, cash=STARTING_CASH, lot_size=LOT_SIZE):
     frame = pd.concat([frame, pd.DataFrame([sentinel])], ignore_index=True)
     frame = frame.set_index("date")[["open", "high", "low", "close", "volume"]].astype(float)
     valid_dates = {_iso(value) for value in frame.index[:-1]}
-    dated_signals = [dict(signal, entry_date=_iso(signal["entry_date"])) for signal in signals]
+    dated_signals = [dict(signal, entry_date=_iso(signal["entry_date"]) if signal.get("entry_date") else None)
+                     for signal in signals]
     missing = [{"signal_date": signal["signal_date"], "entry_date": signal["entry_date"],
                 "pattern_ids": signal.get("pattern_ids", []), "reason": "no_next_t1_session"}
                for signal in dated_signals if signal["entry_date"] not in valid_dates or signal["entry_date"] == final_date]
@@ -236,7 +245,15 @@ def simulate_fixed_trades(bars, signals, cash=STARTING_CASH, lot_size=LOT_SIZE):
         curve[-1].update({"cash": ending, "invested_value": 0.0, "equity": ending, "shares": 0})
     return {"trades": strategy.trades, "rejections": strategy.rejections + missing,
             "order_events": strategy.order_events, "daily_equity": curve,
-            "ending_equity": ending, "engine": "backtrader_broker"}
+            "ending_equity": ending, "engine": "backtrader_broker",
+            "accounting_checks": {
+                "cash_plus_position_equals_equity": all(math.isclose(
+                    point["cash"] + point["invested_value"], point["equity"], rel_tol=1e-9, abs_tol=1e-6)
+                    for point in curve),
+                "realized_pnl_matches_ending_equity": math.isclose(
+                    float(cash) + sum(trade["pnl"] for trade in strategy.trades), ending,
+                    rel_tol=1e-9, abs_tol=1e-6),
+            }}
 
 
 def _quality_pass(pattern):
@@ -276,7 +293,7 @@ def _execution_suppressed(pattern):
 
 
 def _pattern_audit_tag(pattern):
-    return {
+    result = {
         "pattern_id": pattern.pattern_id,
         "pattern_type": pattern.pattern_type,
         "label": PATTERN_LABELS.get(pattern.pattern_type, pattern.pattern_type),
@@ -289,6 +306,22 @@ def _pattern_audit_tag(pattern):
         "weak_crossings": _evidence_value(pattern, "weak_crossings"),
         "execution_suppression": _evidence_value(pattern, "execution_suppression"),
     }
+    selection = _evidence_value(pattern, "neckline_selection")
+    if selection:
+        result.update({
+            "pattern_rule_version": getattr(pattern, "rule_version", None),
+            "source_rule_version": getattr(pattern, "source_rule_version", None),
+            "neckline_selection": {
+                key: selection.get(key) for key in (
+                    "rule_version", "selected_candidate_id", "selected_rank", "selected_line",
+                    "effective_start_date", "freeze_date", "line_frozen_at", "structure_known_at",
+                    "coverage", "score_order")
+            },
+            "neckline_tests": [{key: test.get(key) for key in (
+                "group_id", "pivot_date", "known_date", "level", "departure_atr", "valid")}
+                               for test in (_evidence_value(pattern, "neckline_tests") or [])],
+        })
+    return result
 
 
 def _eligible_main_patterns(patterns, observed_date):
@@ -314,109 +347,226 @@ def _eligible_main_patterns(patterns, observed_date):
     return eligible
 
 
-def _prefix_signals_v1(daily, timeframe, code, kind, calendar, trade_start=None):
-    """Replay the original v1 causal signal loop against frozen v16 code."""
-    from .v16_baseline.patterns import PATTERN_LABELS as v16_pattern_labels
-    from .v16_baseline.patterns import detect_patterns as v16_detect_patterns
-
-    v1_pattern_types = {"w_bottom", "inverse_head_shoulders", "triangle_bottom", "bull_flag"}
-    daily = daily.copy().reset_index(drop=True)
-    daily["date"] = pd.to_datetime(daily.date)
-    result = []
-    seen = set()
-    first_signal_index = (int(pd.to_datetime(daily.date).searchsorted(pd.Timestamp(trade_start), side="left"))
-                          if trade_start else 30)
-    for index in range(max(30, first_signal_index), len(daily)):
-        background = daily.iloc[:index + 1].copy()
-        if timeframe == "1w":
-            signal_frame = aggregate_weekly(background, calendar=calendar)
-            window = 520
-        else:
-            signal_frame = background
-            window = 500
-        if len(signal_frame) < 8:
-            continue
-        observed_date = pd.Timestamp(signal_frame.date.iloc[-1])
-        structure_window = signal_frame.tail(window).copy().reset_index(drop=True)
-        patterns = v16_detect_patterns(structure_window, code, kind, timeframe,
-                                       background_bars=background,
-                                       structure_window=window)
-        found = []
-        for pattern in patterns:
-            if pattern.pattern_type not in v1_pattern_types or pattern.direction != "bullish":
-                continue
-            if pattern.confirmation_date != _iso(observed_date) or pattern.pattern_id in seen:
-                continue
-            if not _quality_pass(pattern):
-                continue
-            seen.add(pattern.pattern_id)
-            found.append(pattern)
-        if not found:
-            continue
-        entry_index = int(pd.to_datetime(daily.date).searchsorted(observed_date, side="right"))
-        if entry_index >= len(daily):
-            continue
-        result.append({
-            "signal_date": _iso(observed_date),
-            "entry_date": _iso(daily.date.iloc[entry_index]),
-            "pattern_ids": sorted(pattern.pattern_id for pattern in found),
-            "pattern_types": sorted({pattern.pattern_type for pattern in found}),
-            "pattern_labels": sorted({v16_pattern_labels.get(pattern.pattern_type, pattern.pattern_type)
-                                       for pattern in found}),
-            "pattern_tags": [{"pattern_id": pattern.pattern_id, "pattern_type": pattern.pattern_type,
-                              "label": v16_pattern_labels.get(pattern.pattern_type, pattern.pattern_type)}
-                             for pattern in sorted(found, key=lambda item: (item.pattern_type, item.pattern_id))],
-        })
-    return result
+def _prefix_signals(daily, timeframe, code, kind, calendar=None, trade_start=None,
+                    strategy_version=STRATEGY_VERSION):
+    if strategy_version not in SUPPORTED_STRATEGY_VERSIONS:
+        raise ValueError("unsupported strategy: %s" % strategy_version)
+    if timeframe != "1d":
+        raise ValueError("backtests are daily only")
+    from .daily_incremental import generate_daily_signals
+    return generate_daily_signals(daily, code, kind, trade_start=trade_start)
 
 
-def _prefix_signals(daily, timeframe, code, kind, calendar, trade_start=None,
-                    strategy_version=STRATEGY_VERSION_V2):
-    if strategy_version == STRATEGY_VERSION_V1:
-        return _prefix_signals_v1(daily, timeframe, code, kind, calendar, trade_start)
-    if strategy_version != STRATEGY_VERSION_V2:
-        raise ValueError("unsupported fixed strategy version: %s" % strategy_version)
-    daily = daily.copy().reset_index(drop=True)
-    daily["date"] = pd.to_datetime(daily.date)
-    result = []
-    seen = set()
-    first_signal_index = int(pd.to_datetime(daily.date).searchsorted(pd.Timestamp(trade_start), side="left")) if trade_start else 30
-    for index in range(max(30, first_signal_index), len(daily)):
-        background = daily.iloc[:index + 1].copy()
-        if timeframe == "1w":
-            signal_frame = aggregate_weekly(background, calendar=calendar)
-            window = 520
-        else:
-            signal_frame = background
-            window = 500
-        if len(signal_frame) < 8:
+def _experiment_spec(experiment_id):
+    from .research_config import RecognitionExperimentConfig
+
+    if experiment_id == EXPERIMENT_BASELINE:
+        return None, "none"
+    if experiment_id == EXPERIMENT_OPEN_ADMISSION:
+        return (RecognitionExperimentConfig(experiment_id, admission_types=EXPERIMENT_PATTERN_TYPES),
+                "entry_open_within_projected_boundary_plus_3_signal_atr")
+    if experiment_id == EXPERIMENT_NECKLINE_MIN3:
+        return (RecognitionExperimentConfig(experiment_id, minimum_neckline_tests=3,
+                                            admission_types=EXPERIMENT_PATTERN_TYPES),
+                "current_four_type_admission")
+    raise ValueError("unsupported research experiment: %s" % experiment_id)
+
+
+def _wilder_atr_by_index(bars):
+    """Return causal Wilder ATR values using the daily recognizer recurrence."""
+    values = []
+    previous_close = None
+    atr = None
+    for row in bars.to_dict("records"):
+        high, low, close = float(row["high"]), float(row["low"]), float(row["close"])
+        true_range = max(high - low,
+                         abs(high - previous_close) if previous_close is not None else 0.0,
+                         abs(low - previous_close) if previous_close is not None else 0.0)
+        atr = true_range if atr is None else atr + (true_range - atr) / 14.0
+        values.append(float(atr))
+        previous_close = close
+    return values
+
+
+def _pattern_evidence(pattern, code):
+    for item in pattern.get("evidence", []) or []:
+        if item.get("code") == code:
+            return item.get("value")
+    return None
+
+
+def _tag_admission_reason(pattern, tag, signal, bars, date_to_index, atr_values):
+    pattern_id = str(tag.get("pattern_id") or "")
+    pattern_type = tag.get("pattern_type")
+    signal_date = str(signal.get("signal_date"))
+    entry_date = signal.get("entry_date")
+    if pattern_type not in EXPERIMENT_PATTERN_TYPES:
+        return None, "unsupported_pattern_type"
+    if not pattern_id or pattern.get("pattern_id") != pattern_id:
+        return None, "missing_or_mismatched_pattern_id"
+    if pattern.get("pattern_type") != pattern_type or pattern.get("direction") != "bullish":
+        return None, "pattern_type_or_direction_mismatch"
+    if pattern.get("state") != "confirmed" or pattern.get("confirmation_date") != signal_date:
+        return None, "not_confirmed_on_signal_date"
+    evidence_code = "flag_breakout" if pattern_type == "bull_flag" else "neckline_breakout"
+    breakout = _pattern_evidence(pattern, evidence_code) or {}
+    if breakout.get("date") != signal_date:
+        return None, "missing_signal_day_breakout_evidence"
+    suppression = _pattern_evidence(pattern, "execution_suppression") or {}
+    if suppression.get("suppressed"):
+        return None, "execution_suppressed"
+    if pattern.get("parent_id"):
+        return None, "nested_child_not_admitted"
+    if signal_date not in date_to_index:
+        return None, "signal_date_missing_from_bars"
+    if not entry_date or entry_date not in date_to_index:
+        return None, "no_next_t1_session"
+    signal_index, entry_index = date_to_index[signal_date], date_to_index[entry_date]
+    signal_atr = atr_values[signal_index]
+    if not math.isfinite(signal_atr) or signal_atr <= 0:
+        return None, "signal_day_atr_unavailable"
+    boundary = breakout.get("frozen_neckline", breakout.get("frozen_boundary"))
+    line = pattern.get("neckline")
+    if boundary is None or not isinstance(line, dict) or line.get("slope") is None:
+        return None, "frozen_boundary_evidence_missing"
+    try:
+        projected = float(boundary) + float(line["slope"]) * (entry_index - signal_index)
+    except (TypeError, ValueError):
+        return None, "frozen_boundary_projection_invalid"
+    opening = float(bars.iloc[entry_index].open)
+    upper = projected + 3.0 * signal_atr
+    if opening < projected:
+        return None, "entry_open_below_projected_boundary"
+    if opening > upper:
+        return None, "entry_open_above_three_signal_atr"
+    return {"reason": "entry_open_within_projected_boundary_and_three_signal_atr",
+            "entry_open": opening, "projected_frozen_boundary": projected,
+            "upper_open_limit": upper, "signal_day_atr14": signal_atr,
+            "signal_date": signal_date, "entry_date": entry_date}, None
+
+
+def _open_admission_gate(bars, signals):
+    """Keep only emitted tags whose actual T+1 open fits the causal price band."""
+    date_to_index = {_iso(value): index for index, value in enumerate(bars.date)}
+    atr_values = _wilder_atr_by_index(bars)
+    accepted, decisions = [], []
+    for original in signals:
+        signal = deepcopy(original)
+        snapshots = {item.get("pattern_id"): item for item in signal.get("patterns", [])
+                     if isinstance(item, dict)}
+        kept_patterns, kept_tags, rejected = [], [], []
+        for tag in signal.get("pattern_tags", []) or []:
+            snapshot = snapshots.get(tag.get("pattern_id"))
+            if snapshot is None:
+                rejected.append({"pattern_id": tag.get("pattern_id"),
+                                 "pattern_type": tag.get("pattern_type"),
+                                 "reason": "emitted_pattern_snapshot_missing"})
+                continue
+            details, reason = _tag_admission_reason(snapshot, tag, signal, bars,
+                                                    date_to_index, atr_values)
+            if reason:
+                rejected.append({"pattern_id": tag.get("pattern_id"),
+                                 "pattern_type": tag.get("pattern_type"), "reason": reason})
+                continue
+            admitted_tag = deepcopy(tag)
+            admitted_tag["admission"] = details
+            kept_tags.append(admitted_tag)
+            admitted_pattern = deepcopy(snapshot)
+            admitted_pattern.setdefault("evidence", []).append({"code": "entry_admission",
+                                                                  "value": deepcopy(details)})
+            kept_patterns.append(admitted_pattern)
+        decisions.append({"signal_date": signal.get("signal_date"),
+                          "entry_date": signal.get("entry_date"),
+                          "admitted_pattern_ids": [p["pattern_id"] for p in kept_patterns],
+                          "rejected_tags": rejected})
+        if not kept_patterns:
             continue
-        observed_date = pd.Timestamp(signal_frame.date.iloc[-1])
-        structure_window = signal_frame.tail(window).copy().reset_index(drop=True)
-        main_events = _main_bottom_detector().detect_main_bottoms(
-            signal_frame, code=code, kind=kind, timeframe=timeframe,
-            **({"background_bars": background} if timeframe == "1w" else {}))
-        observed_iso = _iso(observed_date)
-        found = _eligible_main_patterns(main_events, observed_iso)
-        found = [pattern for pattern in found if pattern.pattern_id not in seen]
-        for pattern in found:
-            seen.add(pattern.pattern_id)
-        if not found:
-            continue
-        entry_index = int(pd.to_datetime(daily.date).searchsorted(observed_date, side="right"))
-        if entry_index >= len(daily):
-            continue
-        result.append({
-            "signal_date": _iso(observed_date),
-            "entry_date": _iso(daily.date.iloc[entry_index]),
-            "pattern_ids": sorted(pattern.pattern_id for pattern in found),
-            "pattern_types": sorted({pattern.pattern_type for pattern in found}),
-            "pattern_labels": sorted({PATTERN_LABELS.get(pattern.pattern_type, pattern.pattern_type)
-                                       for pattern in found}),
-            "pattern_tags": [_pattern_audit_tag(pattern) for pattern in
-                             sorted(found, key=lambda item: (item.pattern_type, item.pattern_id))],
-        })
-    return result
+        signal["patterns"] = kept_patterns
+        signal["pattern_tags"] = kept_tags
+        signal["pattern_ids"] = [p["pattern_id"] for p in kept_patterns]
+        signal["pattern_types"] = [p["pattern_type"] for p in kept_patterns]
+        signal["pattern_labels"] = [PATTERN_LABELS.get(p["pattern_type"], p["pattern_type"])
+                                    for p in kept_patterns]
+        signal["pattern"] = deepcopy(kept_patterns[0])
+        signal["admission_gate"] = "entry_open_within_projected_boundary_plus_3_signal_atr"
+        accepted.append(signal)
+    return accepted, decisions
+
+
+def _normalize_evaluation_windows(evaluation_windows):
+    windows = []
+    for index, item in enumerate(evaluation_windows or []):
+        if not isinstance(item, dict) or not item.get("start") or not item.get("end"):
+            raise ValueError("each evaluation window needs start and end")
+        start, end = _iso(item["start"]), _iso(item["end"])
+        if end < start:
+            raise ValueError("evaluation window end precedes start")
+        windows.append({"name": str(item.get("name") or "period_%d" % (index + 1)),
+                        "start": start, "end": end})
+    if not windows:
+        raise ValueError("at least one evaluation window is required")
+    return windows
+
+
+def run_strategy_experiment(bars, code, kind, experiment_id, evaluation_windows,
+                            cash=STARTING_CASH, lot_size=LOT_SIZE):
+    """Run a research-only variant in fresh accounts for each date window.
+
+    Recognition always sees the complete supplied history, so candidates can
+    mature before a window opens. Broker replay sees only that window, and each
+    window starts with an independent account and no carried position.
+    """
+    if not math.isclose(float(cash), STARTING_CASH, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("research replay requires exactly %.0f initial cash per account" % STARTING_CASH)
+    frame = bars.copy().reset_index(drop=True)
+    if frame.empty:
+        raise ValueError("research replay needs non-empty bars")
+    frame["date"] = pd.to_datetime(frame.date, errors="coerce")
+    frame = frame.dropna(subset=["date"]).sort_values("date", kind="mergesort")
+    frame = frame.drop_duplicates("date", keep="last").reset_index(drop=True)
+    spec, admission_policy = _experiment_spec(experiment_id)
+    from .research_config import recognition_experiment
+    with recognition_experiment(spec):
+        signals = _prefix_signals(frame, "1d", str(code), str(kind), trade_start=None,
+                                  strategy_version=STRATEGY_VERSION)
+    gate_decisions = []
+    if experiment_id == EXPERIMENT_OPEN_ADMISSION:
+        signals, gate_decisions = _open_admission_gate(frame, signals)
+    windows = _normalize_evaluation_windows(evaluation_windows)
+    periods = []
+    for window in windows:
+        period_bars = frame[(frame.date.dt.date.astype(str) >= window["start"])
+                            & (frame.date.dt.date.astype(str) <= window["end"])].copy().reset_index(drop=True)
+        period_signals = [deepcopy(signal) for signal in signals
+                          if signal.get("entry_date") is not None
+                          and window["start"] <= str(signal["entry_date"]) <= window["end"]]
+        simulation = simulate_fixed_trades(period_bars, period_signals,
+                                           cash=cash, lot_size=lot_size)
+        metrics = calculate_metrics(simulation["trades"], cash, simulation["ending_equity"],
+                                    simulation["daily_equity"])
+        periods.append({"name": window["name"], "start": window["start"], "end": window["end"],
+                        "data_sessions": len(period_bars), "starting_cash": float(cash),
+                        "ending_equity": simulation["ending_equity"],
+                        "signal_count": len(period_signals), "signals": period_signals,
+                        "trades": simulation["trades"], "rejections": simulation["rejections"],
+                        "order_events": simulation["order_events"], "metrics": metrics,
+                        "accounting_checks": simulation.get("accounting_checks", {})})
+    return {"experiment_id": experiment_id, "code": str(code), "kind": str(kind),
+            "strategy_version": STRATEGY_VERSION, "research_only": True,
+            "recognition_config": (spec.cache_key() if spec is not None else None),
+            "admission_policy": admission_policy, "evaluation_windows": windows,
+            "gate_decisions": gate_decisions, "periods": periods}
+
+
+def run_strategy_experiment_suite(bars, code, kind, evaluation_windows,
+                                  experiments=(EXPERIMENT_BASELINE,
+                                               EXPERIMENT_OPEN_ADMISSION,
+                                               EXPERIMENT_NECKLINE_MIN3)):
+    """Run requested research variants with the same frozen bars and windows."""
+    return {"code": str(code), "kind": str(kind), "research_only": True,
+            "variants": [run_strategy_experiment(bars, code, kind, experiment_id,
+                                                 evaluation_windows)
+                         for experiment_id in experiments]}
 
 
 def _default_split_date(bars, development_cutoff=None):
@@ -430,12 +580,14 @@ def _default_split_date(bars, development_cutoff=None):
 
 def run_fixed_backtest(bars, code, kind, timeframe="1d", cash=STARTING_CASH,
                        calendar=None, development_cutoff=None, trade_start=None,
-                       strategy_version=STRATEGY_VERSION_V2):
+                       strategy_version=STRATEGY_VERSION):
     """Run one isolated security/timeframe fixed-risk account."""
     if strategy_version not in SUPPORTED_STRATEGY_VERSIONS:
         raise ValueError("unsupported fixed strategy version: %s" % strategy_version)
     if not math.isclose(float(cash), STARTING_CASH, rel_tol=0.0, abs_tol=1e-9):
         raise ValueError("%s requires exactly %.0f initial cash per account" % (strategy_version, STARTING_CASH))
+    if timeframe != "1d":
+        raise ValueError("backtests are daily only")
     daily = bars.copy().reset_index(drop=True)
     if daily.empty:
         sim = simulate_fixed_trades(daily, [], cash=cash)
@@ -468,7 +620,7 @@ def run_fixed_backtest(bars, code, kind, timeframe="1d", cash=STARTING_CASH,
 
 
 def _result_payload(sim, code, kind, timeframe, starting_cash, signals, split_date,
-                    strategy_version=STRATEGY_VERSION_V2):
+                    strategy_version=STRATEGY_VERSION):
     metrics = calculate_metrics(sim["trades"], starting_cash, sim["ending_equity"], sim["daily_equity"])
     by_split = {}
     for label in ("development", "historical_holdout_exposed"):
@@ -486,12 +638,12 @@ def _result_payload(sim, code, kind, timeframe, starting_cash, signals, split_da
                    "weekly_requires_completed_bars": True,
                    "annualization": "CAGR over observed trade period; less than one year remains labeled in metrics",
                    "capital_returns_are_independent_and_must_not_be_summed": True}
-    if strategy_version == STRATEGY_VERSION_V2:
+    if strategy_version == STRATEGY_VERSION:
         assumptions.update({"bottom_signal_source": "causal_selected_main_parent",
                             "bottom_signal_gates": ["selected_main_parent", "six_calendar_month_structure_gate",
                                                     "close_above_frozen_neckline_by_max_two_ticks_or_previous_atr14"],
                             "legacy_detector_fallback": False,
-                            "supported_pattern_types": sorted(MAIN_BOTTOM_TYPES)})
+                            "supported_pattern_types": sorted(PATTERN_TYPES)})
     return {
         "strategy_version": strategy_version,
         "engine": sim.get("engine", "backtrader_broker"),

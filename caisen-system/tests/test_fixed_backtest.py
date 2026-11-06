@@ -122,8 +122,8 @@ def test_no_trade_and_no_loss_metrics_are_valid_nulls():
 
 
 def test_strategy_version_is_explicit():
-    assert STRATEGY_VERSION == STRATEGY_VERSION_V2 == "pattern_fixed_8_20_main_parent_v2"
-    assert STRATEGY_VERSION_V1 == "pattern_fixed_8_20_v1"
+    assert STRATEGY_VERSION == "daily_four_patterns_fixed_8_20_v1"
+    assert fixed_backtest_module.SUPPORTED_STRATEGY_VERSIONS == {STRATEGY_VERSION}
 
 
 def test_main_bottom_signals_require_selected_eligible_parent_and_same_day_breakout():
@@ -165,60 +165,26 @@ def test_main_bottom_signals_require_selected_eligible_parent_and_same_day_break
 
 
 def test_new_strategy_never_calls_legacy_detector_for_bull_flag_fallback(monkeypatch):
-    dates = pd.date_range("2024-01-01", periods=36, freq="D")
-    frame = pd.DataFrame({"date": dates, "open": 10.0, "high": 10.2,
-                          "low": 9.8, "close": 10.0, "volume": 1000})
-    def legacy_detector(*args, **kwargs):
-        raise AssertionError("v2 must not call the legacy detector")
-
-    class MainBottoms:
-        @staticmethod
-        def detect_main_bottoms(*args, **kwargs):
-            return []
-    monkeypatch.setattr(fixed_backtest_module, "_main_bottom_detector", lambda: MainBottoms)
-    monkeypatch.setattr(patterns_module, "detect_patterns", legacy_detector)
-    result = fixed_backtest_module._prefix_signals(frame, "1d", "AAA", "stock", object())
-
-    assert result == []
+    from caisen import daily_incremental
+    frame = bars([("2024-01-01",10,10,10,10,1000)])
+    monkeypatch.setattr(patterns_module,"detect_patterns",lambda *a,**k: (_ for _ in ()).throw(AssertionError("legacy")))
+    monkeypatch.setattr(daily_incremental,"generate_daily_signals",lambda *a,**k: [])
+    assert fixed_backtest_module._prefix_signals(frame,"1d","AAA","stock") == []
 
 
-def test_v1_replays_frozen_detector_for_all_four_legacy_entry_shapes(monkeypatch):
-    dates = pd.date_range("2024-01-01", periods=37, freq="D")
-    frame = pd.DataFrame({"date": dates, "open": 10.0, "high": 10.2,
-                          "low": 9.8, "close": 10.0, "volume": 1000})
-    observed_date = str(dates[-2].date())
-
-    def recognize(window, code, kind, timeframe, background_bars, structure_window):
-        return [baseline_patterns_module.Pattern(
-            pattern_id=f"v1-{ptype}", code=code, kind=kind, timeframe=timeframe,
-            pattern_type=ptype, direction="bullish", state="confirmed", formed_at="2024-01-01",
-            confirmed_at=len(window) - 1, confirmation_date=observed_date,
-                evidence=[{"code": "pattern_quality_pass", "value": True}],
-        ) for ptype in ("w_bottom", "bull_flag")]
-
-    monkeypatch.setattr(baseline_patterns_module, "detect_patterns", recognize)
-    monkeypatch.setattr(fixed_backtest_module, "_main_bottom_detector",
-                        lambda: (_ for _ in ()).throw(AssertionError("v1 must not call v2 engine")))
-    signals = fixed_backtest_module._prefix_signals(
-        frame, "1d", "AAA", "stock", object(), strategy_version=STRATEGY_VERSION_V1)
-
-    assert len(signals) == 1
-    assert signals[0]["signal_date"] == observed_date
-    assert signals[0]["entry_date"] == str(dates[-1].date())
-    assert signals[0]["pattern_types"] == ["bull_flag", "w_bottom"]
-    assert signals[0]["pattern_tags"] == [
-        {"pattern_id": "v1-bull_flag", "pattern_type": "bull_flag", "label": "下飘旗形上涨中继"},
-        {"pattern_id": "v1-w_bottom", "pattern_type": "w_bottom", "label": "W底"},
-    ]
+def test_retired_v1_cannot_be_replayed():
+    import pytest
+    with pytest.raises(ValueError,match="unsupported"):
+        fixed_backtest_module._prefix_signals(pd.DataFrame(),"1d","AAA","stock",strategy_version=STRATEGY_VERSION_V1)
 
 
-def test_v1_159136_replay_matches_archived_signals_orders_trades_and_equity():
+def test_v1_159136_archived_reports_remain_readable_after_retirement():
     from pathlib import Path
 
-    repo = Path(__file__).resolve().parents[1]
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "fixed_backtest_archives"
     archive_paths = [
-        repo / "state/fixed_backtest_samples/fixed-backtest-20261029T050519Z-a1f404/fixed-backtest-results.json",
-        repo / "state/fixed_backtest_samples/fixed-backtest-20261029T054651Z-b46fad/fixed-backtest-results.json",
+        fixtures / "fixed-backtest-20261029T050519Z-a1f404.json",
+        fixtures / "fixed-backtest-20261029T054651Z-b46fad.json",
     ]
     archives = [json.loads(path.read_text(encoding="utf-8")) for path in archive_paths]
     archived = [next(row for row in report["results"]
@@ -238,25 +204,6 @@ def test_v1_159136_replay_matches_archived_signals_orders_trades_and_equity():
         else:
             assert archived[0][source_key] == archived[1][source_key]
 
-    source_path = repo.parent / "data/etfs/159136.csv"
-    source = pd.read_csv(source_path, encoding="utf-8-sig")
-    source.columns = [str(column).lower() for column in source.columns]
-    replay_bars = source.loc[
-        source.date.between("2025-12-25", "2026-10-26"),
-        ["date", "open", "high", "low", "close", "volume"],
-    ].copy()
-    replay = fixed_backtest_module.run_fixed_backtest(
-        replay_bars, "159136", "etf", "1d", cash=100000,
-        development_cutoff="2016-05-13", trade_start="2025-12-25",
-        strategy_version=STRATEGY_VERSION_V1,
-    )
-    assert replay["strategy_version"] == STRATEGY_VERSION_V1
-    for field in fields:
-        source_key = "order_events" if field == "orders" else field
-        if field == "orders":
-            assert normalized_order_events(replay[source_key]) == normalized_order_events(archived[0][source_key])
-        else:
-            assert replay[source_key] == archived[0][source_key], field
 
 
 def test_execution_suppression_blocks_nested_bull_flag():
@@ -271,77 +218,26 @@ def test_execution_suppression_blocks_nested_bull_flag():
     assert fixed_backtest_module._execution_suppressed(nested_flag)
 
 
-def test_new_main_parent_signal_reaches_backtrader_only_at_next_open(monkeypatch):
-    dates = pd.date_range("2024-01-01", periods=38, freq="D")
-    frame = pd.DataFrame({"date": dates, "open": 10.0, "high": 10.2,
-                          "low": 9.8, "close": 10.0, "volume": 1000})
-    cutoff = "2024-02-05"
-    main = patterns_module.Pattern(
-        pattern_id="main-parent", code="AAA", kind="stock", timeframe="1d",
-        pattern_type="w_bottom", direction="bullish", state="confirmed", formed_at="2023-07-01",
-        confirmed_at=35, confirmation_date=cutoff,
-        evidence=[
-            {"code": "main_structure", "value": {"role": "main", "selected": True,
-             "signal_eligible": True, "family": "w_bottom"}},
-            {"code": "main_selection", "value": {"selected": True, "decided_at": cutoff,
-             "primary_pattern_id": "main-parent"}},
-            {"code": "neckline_breakout", "value": {"date": cutoff, "frozen_neckline": 10.0}},
-        ],
-    )
-
-    class MainBottoms:
-        @staticmethod
-        def detect_main_bottoms(rows, **kwargs):
-            return [main] if str(pd.Timestamp(rows.date.iloc[-1]).date()) == cutoff else []
-
-        @staticmethod
-        def link_main_bottom_children(main_events, legacy_patterns, **kwargs):
-            return list(main_events) + list(legacy_patterns)
-
-    monkeypatch.setattr(fixed_backtest_module, "_main_bottom_detector", lambda: MainBottoms)
-    monkeypatch.setattr(patterns_module, "detect_patterns", lambda *args, **kwargs: [])
-    signals = fixed_backtest_module._prefix_signals(frame, "1d", "AAA", "stock", object())
-
-    assert len(signals) == 1
-    assert signals[0]["signal_date"] == cutoff
-    assert signals[0]["entry_date"] == "2024-02-06"
-    simulated = simulate_fixed_trades(frame, signals)
-    assert simulated["trades"][0]["signal_date"] == cutoff
-    assert simulated["trades"][0]["entry_date"] == "2024-02-06"
-    assert simulated["order_events"][0]["role"] == "entry"
+def test_incremental_signal_reaches_backtrader_only_at_next_open(monkeypatch):
+    from caisen import daily_incremental
+    frame=bars([("2024-02-05",10,10,10,10,1000),
+                ("2024-02-06",10.2,10.3,10.1,10.2,1000),
+                ("2024-02-07",10.3,10.4,10.2,10.3,1000)])
+    source=[dict(signal_date="2024-02-05",entry_date="2024-02-06",pattern_ids=["main"],
+                 pattern_types=["w_bottom"],pattern_tags=[dict(pattern_id="main",neckline_selection=dict(selected_candidate_id="neck-1"))])]
+    monkeypatch.setattr(daily_incremental,"generate_daily_signals",lambda *a,**k: source)
+    signals=fixed_backtest_module._prefix_signals(frame,"1d","AAA","stock")
+    result=simulate_fixed_trades(frame,signals)
+    assert signals[0]["pattern_tags"][0]["neckline_selection"]["selected_candidate_id"]=="neck-1"
+    assert result["trades"][0]["signal_date"]=="2024-02-05"
+    assert result["trades"][0]["entry_date"]=="2024-02-06"
+    assert result["trades"][0]["entry_price"]==10.2
 
 
-def test_weekly_main_engine_receives_full_daily_background_without_legacy_recognizer(monkeypatch):
-    frame = pd.DataFrame([(_date, 10, 10.2, 9.8, 10, 1000)
-                          for _date in pd.date_range("2024-01-01", periods=40)],
-                         columns=["date", "open", "high", "low", "close", "volume"])
-    received = []
-    main_received = []
-
-    def weekly(rows, calendar=None):
-        return rows.iloc[::5].copy().reset_index(drop=True)
-
-    def recognize(window, code, kind, timeframe, background_bars, structure_window):
-        received.append((timeframe, len(window), len(background_bars),
-                         str(background_bars.date.iloc[-1].date())))
-        return []
-
-    class MainBottoms:
-        @staticmethod
-        def detect_main_bottoms(rows, **kwargs):
-            main_received.append(len(rows))
-            return []
-
-        @staticmethod
-        def link_main_bottom_children(main_events, existing_patterns, **kwargs):
-            return list(main_events) + list(existing_patterns)
-
-    monkeypatch.setattr(fixed_backtest_module, "aggregate_weekly", weekly)
-    monkeypatch.setattr(fixed_backtest_module, "_main_bottom_detector", lambda: MainBottoms)
-    monkeypatch.setattr(patterns_module, "detect_patterns", recognize)
-    fixed_backtest_module._prefix_signals(frame, "1w", "AAA", "stock", object())
-    assert received == []
-    assert main_received[-1] == 8
+def test_weekly_backtest_is_rejected_before_recognition():
+    import pytest
+    with pytest.raises(ValueError,match="daily"):
+        fixed_backtest_module._prefix_signals(pd.DataFrame(),"1w","AAA","stock")
 
 
 def test_trade_start_restricts_evaluation_curve_but_retains_full_data_start():

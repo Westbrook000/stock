@@ -1,0 +1,20 @@
+{
+  "process_exit_code": 0,
+  "status": "complete",
+  "date_to": "2026-10-30",
+  "recognizer": "boundary_first",
+  "workers": 8,
+  "execution_mode": "spawn",
+  "signal_cache_used": false,
+  "wall_seconds_load_through_report_write": 5019.363719958,
+  "process_tree_peak_bytes": 3030450176,
+  "process_tree_memory_cap_bytes": 12884901888,
+  "runner_timings": {
+    "load_seconds": 5.2318690720179335,
+    "recognition_seconds": 39579.06366685007,
+    "backtrader_seconds": 333.4499295360041,
+    "total_seconds": 5013.574739167,
+    "write_seconds": 1.0948800420001135
+  },
+  "report_path": "/Users/sotawest/OpenCode/stock/caisen-system/reports/daily-research/full-cold-20261105-v8-boundary-w8-spawnfix/daily-research.json"
+}

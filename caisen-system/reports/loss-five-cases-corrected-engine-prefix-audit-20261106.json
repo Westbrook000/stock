@@ -1,0 +1,1005 @@
+{
+  "status": "complete",
+  "source_version": {
+    "engine_version": "caisen-daily-continuous-v5",
+    "source_rule_version": "caisen-main-bottoms-v9",
+    "main_bottoms_sha256": "c0a9b0491f9e89c9368a7af34119306d64fd18ef3bef1eb566f54e39034e0988",
+    "daily_incremental_sha256": "0daaca79948a20188a57f8548167728ae9b4193efd7832d6c9bb2c6b2469d21a",
+    "rules_sha256": "9ce04d63a7e43ef11af51cd791e50209ca534e326afaee68687bea58a9510bcb",
+    "recognizer": "boundary_first"
+  },
+  "method": "boundary_first causal replay over each frozen input prefix ending exactly at the old baseline signal date; no later bars included",
+  "results": [
+    {
+      "case_id": "premature_recross",
+      "kind": "etf",
+      "code": "159122",
+      "prefix_cutoff": "2026-06-22",
+      "snapshot_input_path": "/Users/sotawest/OpenCode/stock/caisen-system/reports/daily-research/paired-input-snapshot-20261105-v1/data/etfs/159122.csv",
+      "snapshot_input_sha256": "405cfa29764327689eae329026146459112afcaca06c4eeccffb3b4c840d4d57",
+      "tick_size": 0.01,
+      "original_pattern_id": "159122:e75727a23417804b",
+      "original_pattern_key_points": {
+        "pivot_scale": "3atr_8pct",
+        "scale": "5y",
+        "support_lower": 0.937,
+        "support_upper": 0.95,
+        "first_trough_index": 31,
+        "first_trough_date": "2025-12-16",
+        "latest_anchor_index": 102,
+        "latest_anchor_date": "2026-04-07",
+        "neckline_test_indices": [
+          8,
+          58,
+          71,
+          86
+        ],
+        "pivot_1_index": 31,
+        "pivot_1_date": "2025-12-16",
+        "pivot_1": 0.937,
+        "pivot_1_kind": "low",
+        "pivot_2_index": 102,
+        "pivot_2_date": "2026-04-07",
+        "pivot_2": 0.95,
+        "pivot_2_kind": "low"
+      },
+      "original_pattern_emitted_dates_on_prefix": [],
+      "original_pattern_emitted_on_signal_date": false,
+      "original_pattern_geometry_emitted_on_signal_date": false,
+      "any_eligible_signal_on_signal_date": false,
+      "same_date_signal_event_count": 0,
+      "same_date_pattern_types": [],
+      "same_date_signals": [],
+      "elapsed_seconds": 0.054,
+      "source_version": {
+        "engine_version": "caisen-daily-continuous-v5",
+        "source_rule_version": "caisen-main-bottoms-v9",
+        "main_bottoms_sha256": "c0a9b0491f9e89c9368a7af34119306d64fd18ef3bef1eb566f54e39034e0988",
+        "daily_incremental_sha256": "0daaca79948a20188a57f8548167728ae9b4193efd7832d6c9bb2c6b2469d21a",
+        "rules_sha256": "9ce04d63a7e43ef11af51cd791e50209ca534e326afaee68687bea58a9510bcb",
+        "recognizer": "boundary_first"
+      },
+      "other_prefix_signals": [
+        {
+          "date": "2026-05-06",
+          "types": [
+            "w_bottom",
+            "inverse_head_shoulders"
+          ],
+          "events": [
+            {
+              "pattern_ids": [
+                "159122:80f0735abab80b76",
+                "159122:7f6bfabd15bbbce3"
+              ],
+              "pattern_types": [
+                "w_bottom",
+                "inverse_head_shoulders"
+              ],
+              "patterns": [
+                {
+                  "pattern_id": "159122:80f0735abab80b76",
+                  "pattern_type": "w_bottom",
+                  "formed_at": "2025-11-05",
+                  "key_points": {
+                    "pivot_scale": "2atr_5pct",
+                    "scale": "5y",
+                    "support_lower": 0.95,
+                    "support_upper": 0.991,
+                    "first_trough_index": 2,
+                    "first_trough_date": "2025-11-05",
+                    "latest_anchor_index": 102,
+                    "latest_anchor_date": "2026-04-07",
+                    "neckline_test_indices": [
+                      8,
+                      58,
+                      71,
+                      86
+                    ],
+                    "pivot_1_index": 2,
+                    "pivot_1_date": "2025-11-05",
+                    "pivot_1": 0.991,
+                    "pivot_1_kind": "low",
+                    "pivot_2_index": 102,
+                    "pivot_2_date": "2026-04-07",
+                    "pivot_2": 0.95,
+                    "pivot_2_kind": "low"
+                  },
+                  "neckline_selection": {
+                    "rule_version": "pattern_matched_pressure_envelope_v7",
+                    "consumed_boundary_phase_rule": "same_structure_equivalent_frozen_neckline_v1",
+                    "selected_candidate_id": "neckline-candidate-8-58-71-86",
+                    "selected_rank": 1,
+                    "selected_line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "effective_start_date": "2025-11-13",
+                    "freeze_date": "2026-04-16",
+                    "line_frozen_at": "2026-03-19",
+                    "structure_known_at": "2026-04-16",
+                    "formation_coverage": {
+                      "passed": true,
+                      "start_index": 2,
+                      "end_index": 109,
+                      "maximum_excess": 0.0,
+                      "worst_index": 71,
+                      "reason": "formation_covered",
+                      "start_date": "2025-11-05",
+                      "end_date": "2026-04-16"
+                    },
+                    "decline_check": {
+                      "passed": true,
+                      "relative_decline": 0.0,
+                      "maximum_decline": 0.2,
+                      "start_index": 8,
+                      "end_index": 120
+                    },
+                    "independent_tests": [
+                      {
+                        "group_id": "neck-touch-8",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 8,
+                        "pivot_date": "2025-11-13",
+                        "known_index": 13,
+                        "known_date": "2025-11-20",
+                        "pivot_scale": "3ATR|8%|neckline_test_2ATR",
+                        "level": 1.098,
+                        "departure_atr": 4.272989445069478,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.3249999999999975,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          8
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 5
+                      },
+                      {
+                        "group_id": "neck-touch-58",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 58,
+                        "pivot_date": "2026-01-26",
+                        "known_index": 60,
+                        "known_date": "2026-01-28",
+                        "pivot_scale": "3ATR|8%|neckline_test_2ATR",
+                        "level": 1.091,
+                        "departure_atr": 3.7649956294031814,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.6750000000000034,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          58
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 5
+                      },
+                      {
+                        "group_id": "neck-touch-71",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 71,
+                        "pivot_date": "2026-02-12",
+                        "known_index": 72,
+                        "known_date": "2026-02-13",
+                        "pivot_scale": "2ATR|5%|neckline_test_2ATR",
+                        "level": 1.111,
+                        "departure_atr": 3.7649956294031814,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.3249999999999975,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          71
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 5
+                      },
+                      {
+                        "group_id": "neck-touch-86",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 86,
+                        "pivot_date": "2026-03-13",
+                        "known_index": 90,
+                        "known_date": "2026-03-19",
+                        "pivot_scale": "2ATR|5%|neckline_test_2ATR",
+                        "level": 1.089,
+                        "departure_atr": 4.373803433306675,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.7750000000000035,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          86
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 5
+                      }
+                    ],
+                    "coverage": {
+                      "passed": true,
+                      "start_date": "2025-11-13",
+                      "end_date": "2026-03-19",
+                      "maximum_excess": 0.0
+                    },
+                    "score_order": [
+                      "independent_test_count_desc",
+                      "test_span_desc",
+                      "normalized_residual_asc",
+                      "latest_test_desc",
+                      "anchor_dates_asc"
+                    ],
+                    "candidates": [
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71-86",
+                        "rank": 1,
+                        "selected": true,
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "normalized_residual": 0.5250000000000005,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_start_index": 8,
+                        "coverage_end_index": 90,
+                        "test_dates": [
+                          "2025-11-13",
+                          "2026-01-26",
+                          "2026-02-12",
+                          "2026-03-13"
+                        ],
+                        "reason": "selected_by_ordered_evidence"
+                      },
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71",
+                        "rank": 2,
+                        "selected": false,
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "independent_test_count": 3,
+                        "test_span_bars": 63,
+                        "normalized_residual": 0.44166666666666615,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_date": "2026-02-13",
+                        "coverage_start_index": 8,
+                        "coverage_end_index": 72,
+                        "test_dates": [
+                          "2025-11-13",
+                          "2026-01-26",
+                          "2026-02-12"
+                        ],
+                        "reason": "fewer_independent_tests"
+                      },
+                      {
+                        "candidate_id": "neckline-candidate-58-71-86",
+                        "rank": 3,
+                        "selected": false,
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.101
+                        },
+                        "independent_test_count": 3,
+                        "test_span_bars": 28,
+                        "normalized_residual": 0.5333333333333338,
+                        "coverage_start_date": "2026-01-26",
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_start_index": 58,
+                        "coverage_end_index": 90,
+                        "test_dates": [
+                          "2026-01-26",
+                          "2026-02-12",
+                          "2026-03-13"
+                        ],
+                        "reason": "fewer_independent_tests"
+                      },
+                      {
+                        "candidate_id": "neckline-candidate-58-71",
+                        "rank": 4,
+                        "selected": false,
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.101
+                        },
+                        "independent_test_count": 2,
+                        "test_span_bars": 13,
+                        "normalized_residual": 0.5000000000000004,
+                        "coverage_start_date": "2026-01-26",
+                        "coverage_end_date": "2026-02-13",
+                        "coverage_start_index": 58,
+                        "coverage_end_index": 72,
+                        "test_dates": [
+                          "2026-01-26",
+                          "2026-02-12"
+                        ],
+                        "reason": "fewer_independent_tests"
+                      }
+                    ],
+                    "diagnostics_as_of": "2026-05-06",
+                    "rejection_counts": {},
+                    "rejected_candidates": [],
+                    "older_pressure_tests": [],
+                    "retired_segments": [
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71-86",
+                        "breakout_date": "2026-05-06",
+                        "state": "confirmed"
+                      }
+                    ],
+                    "early_breakouts": [],
+                    "consumed_boundary_phases": [
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71-86",
+                        "consumed_index": 120,
+                        "consumed_date": "2026-05-06",
+                        "reason": "buffered_breakout",
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        }
+                      }
+                    ]
+                  }
+                },
+                {
+                  "pattern_id": "159122:7f6bfabd15bbbce3",
+                  "pattern_type": "inverse_head_shoulders",
+                  "formed_at": "2025-11-05",
+                  "key_points": {
+                    "pivot_scale": "2atr_5pct",
+                    "scale": "5y",
+                    "support_lower": 0.937,
+                    "support_upper": 0.993,
+                    "first_trough_index": 2,
+                    "first_trough_date": "2025-11-05",
+                    "latest_anchor_index": 93,
+                    "latest_anchor_date": "2026-03-24",
+                    "neckline_test_indices": [
+                      8,
+                      58,
+                      71,
+                      86
+                    ],
+                    "pivot_1_index": 2,
+                    "pivot_1_date": "2025-11-05",
+                    "pivot_1": 0.991,
+                    "pivot_1_kind": "low",
+                    "pivot_2_index": 31,
+                    "pivot_2_date": "2025-12-16",
+                    "pivot_2": 0.937,
+                    "pivot_2_kind": "low",
+                    "pivot_3_index": 93,
+                    "pivot_3_date": "2026-03-24",
+                    "pivot_3": 0.993,
+                    "pivot_3_kind": "low"
+                  },
+                  "neckline_selection": {
+                    "rule_version": "pattern_matched_pressure_envelope_v7",
+                    "consumed_boundary_phase_rule": "same_structure_equivalent_frozen_neckline_v1",
+                    "selected_candidate_id": "neckline-candidate-8-58-71-86",
+                    "selected_rank": 1,
+                    "selected_line": {
+                      "slope": 0.0,
+                      "intercept": 1.1045
+                    },
+                    "effective_start_date": "2025-11-13",
+                    "freeze_date": "2026-04-16",
+                    "line_frozen_at": "2026-03-19",
+                    "structure_known_at": "2026-04-16",
+                    "formation_coverage": {
+                      "passed": true,
+                      "start_index": 2,
+                      "end_index": 109,
+                      "maximum_excess": 0.0,
+                      "worst_index": 71,
+                      "reason": "formation_covered",
+                      "start_date": "2025-11-05",
+                      "end_date": "2026-04-16"
+                    },
+                    "decline_check": {
+                      "passed": true,
+                      "relative_decline": 0.0,
+                      "maximum_decline": 0.2,
+                      "start_index": 8,
+                      "end_index": 120
+                    },
+                    "independent_tests": [
+                      {
+                        "group_id": "neck-touch-8",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 8,
+                        "pivot_date": "2025-11-13",
+                        "known_index": 13,
+                        "known_date": "2025-11-20",
+                        "pivot_scale": "3ATR|8%|neckline_test_2ATR",
+                        "level": 1.098,
+                        "departure_atr": 4.272989445069478,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.3249999999999975,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          8
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 6
+                      },
+                      {
+                        "group_id": "neck-touch-58",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 58,
+                        "pivot_date": "2026-01-26",
+                        "known_index": 60,
+                        "known_date": "2026-01-28",
+                        "pivot_scale": "3ATR|8%|neckline_test_2ATR",
+                        "level": 1.091,
+                        "departure_atr": 3.7649956294031814,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.6750000000000034,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          58
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 6
+                      },
+                      {
+                        "group_id": "neck-touch-71",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 71,
+                        "pivot_date": "2026-02-12",
+                        "known_index": 72,
+                        "known_date": "2026-02-13",
+                        "pivot_scale": "2ATR|5%|neckline_test_2ATR",
+                        "level": 1.111,
+                        "departure_atr": 3.7649956294031814,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.3249999999999975,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          71
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 6
+                      },
+                      {
+                        "group_id": "neck-touch-86",
+                        "pair_id": "neckline-candidate-8-58-71-86",
+                        "pivot_index": 86,
+                        "pivot_date": "2026-03-13",
+                        "known_index": 90,
+                        "known_date": "2026-03-19",
+                        "pivot_scale": "2ATR|5%|neckline_test_2ATR",
+                        "level": 1.089,
+                        "departure_atr": 4.373803433306675,
+                        "tolerance": 0.02,
+                        "normalized_residual": 0.7750000000000035,
+                        "valid": true,
+                        "source_pivot_indices": [
+                          86
+                        ],
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "selection_rank": 1,
+                        "selection_score": [
+                          -4.0,
+                          -78.0,
+                          0.5250000000000005,
+                          -90.0,
+                          8.0,
+                          86.0
+                        ],
+                        "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "coverage_start_index": 8,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_index": 90,
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_max_excess": 0.0,
+                        "candidate_count": 6
+                      }
+                    ],
+                    "coverage": {
+                      "passed": true,
+                      "start_date": "2025-11-13",
+                      "end_date": "2026-03-19",
+                      "maximum_excess": 0.0
+                    },
+                    "score_order": [
+                      "independent_test_count_desc",
+                      "test_span_desc",
+                      "normalized_residual_asc",
+                      "latest_test_desc",
+                      "anchor_dates_asc"
+                    ],
+                    "candidates": [
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71-86",
+                        "rank": 1,
+                        "selected": true,
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "independent_test_count": 4,
+                        "test_span_bars": 78,
+                        "normalized_residual": 0.5250000000000005,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_date": "2026-03-19",
+                        "coverage_start_index": 8,
+                        "coverage_end_index": 90,
+                        "test_dates": [
+                          "2025-11-13",
+                          "2026-01-26",
+                          "2026-02-12",
+                          "2026-03-13"
+                        ],
+                        "reason": "selected_by_ordered_evidence"
+                      },
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71",
+                        "rank": 2,
+                        "selected": false,
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        },
+                        "independent_test_count": 3,
+                        "test_span_bars": 63,
+                        "normalized_residual": 0.44166666666666615,
+                        "coverage_start_date": "2025-11-13",
+                        "coverage_end_date": "2026-02-13",
+                        "coverage_start_index": 8,
+                        "coverage_end_index": 72,
+                        "test_dates": [
+                          "2025-11-13",
+                          "2026-01-26",
+                          "2026-02-12"
+                        ],
+                        "reason": "fewer_independent_tests"
+                      }
+                    ],
+                    "diagnostics_as_of": "2026-05-06",
+                    "rejection_counts": {},
+                    "rejected_candidates": [],
+                    "older_pressure_tests": [],
+                    "retired_segments": [
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71-86",
+                        "breakout_date": "2026-05-06",
+                        "state": "confirmed"
+                      }
+                    ],
+                    "early_breakouts": [],
+                    "consumed_boundary_phases": [
+                      {
+                        "candidate_id": "neckline-candidate-8-58-71-86",
+                        "consumed_index": 120,
+                        "consumed_date": "2026-05-06",
+                        "reason": "buffered_breakout",
+                        "line": {
+                          "slope": 0.0,
+                          "intercept": 1.1045
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "rapid_false_break",
+      "kind": "stock",
+      "code": "002117",
+      "prefix_cutoff": "2019-04-30",
+      "snapshot_input_path": "/Users/sotawest/OpenCode/stock/caisen-system/reports/daily-research/paired-input-snapshot-20261105-v1/data/stocks/002117.csv",
+      "snapshot_input_sha256": "2300d2bc3d81006d28306188de737e66571fe924ce48b4215dc9c5a7aa15ad44",
+      "tick_size": 0.01,
+      "original_pattern_id": "002117:204d28ca2de2671f",
+      "original_pattern_key_points": {
+        "pivot_scale": "3atr_8pct",
+        "scale": "5y",
+        "support_lower": 5.88,
+        "support_upper": 6.38,
+        "first_trough_index": 2803,
+        "first_trough_date": "2018-10-25",
+        "latest_anchor_index": 2869,
+        "latest_anchor_date": "2019-01-29",
+        "neckline_test_indices": [
+          2676,
+          2884
+        ],
+        "pivot_1_index": 2803,
+        "pivot_1_date": "2018-10-25",
+        "pivot_1": 5.88,
+        "pivot_1_kind": "low",
+        "pivot_2_index": 2869,
+        "pivot_2_date": "2019-01-29",
+        "pivot_2": 6.38,
+        "pivot_2_kind": "low"
+      },
+      "original_pattern_emitted_dates_on_prefix": [],
+      "original_pattern_emitted_on_signal_date": false,
+      "original_pattern_geometry_emitted_on_signal_date": false,
+      "any_eligible_signal_on_signal_date": false,
+      "same_date_signal_event_count": 0,
+      "same_date_pattern_types": [],
+      "same_date_signals": [],
+      "elapsed_seconds": 26.913,
+      "source_version": {
+        "engine_version": "caisen-daily-continuous-v5",
+        "source_rule_version": "caisen-main-bottoms-v9",
+        "main_bottoms_sha256": "c0a9b0491f9e89c9368a7af34119306d64fd18ef3bef1eb566f54e39034e0988",
+        "daily_incremental_sha256": "0daaca79948a20188a57f8548167728ae9b4193efd7832d6c9bb2c6b2469d21a",
+        "rules_sha256": "9ce04d63a7e43ef11af51cd791e50209ca534e326afaee68687bea58a9510bcb",
+        "recognizer": "boundary_first"
+      }
+    },
+    {
+      "case_id": "extended_entry",
+      "kind": "stock",
+      "code": "002242",
+      "prefix_cutoff": "2025-11-13",
+      "snapshot_input_path": "/Users/sotawest/OpenCode/stock/caisen-system/reports/daily-research/paired-input-snapshot-20261105-v1/data/stocks/002242.csv",
+      "snapshot_input_sha256": "e7f96af4bcc338daa4ea6fc73e2b345becc0d1b514e7f1bd3838d60fdb096a2f",
+      "tick_size": 0.01,
+      "original_pattern_id": "002242:3ee542ff00519564",
+      "original_pattern_key_points": {
+        "pivot_scale": "3atr_8pct",
+        "scale": "5y",
+        "support_lower": 8.44,
+        "support_upper": 9.07,
+        "first_trough_index": 4059,
+        "first_trough_date": "2025-04-08",
+        "latest_anchor_index": 4183,
+        "latest_anchor_date": "2025-10-13",
+        "neckline_test_indices": [
+          3960,
+          3990,
+          4156
+        ],
+        "pivot_1_index": 4059,
+        "pivot_1_date": "2025-04-08",
+        "pivot_1": 8.44,
+        "pivot_1_kind": "low",
+        "pivot_2_index": 4183,
+        "pivot_2_date": "2025-10-13",
+        "pivot_2": 9.07,
+        "pivot_2_kind": "low"
+      },
+      "original_pattern_emitted_dates_on_prefix": [
+        "2025-11-13"
+      ],
+      "original_pattern_emitted_on_signal_date": true,
+      "original_pattern_geometry_emitted_on_signal_date": true,
+      "any_eligible_signal_on_signal_date": true,
+      "same_date_signal_event_count": 1,
+      "same_date_pattern_types": [
+        "w_bottom"
+      ],
+      "same_date_signals": [
+        {
+          "pattern_id": "002242:3ee542ff00519564",
+          "pattern_type": "w_bottom",
+          "formed_at": "2025-04-08",
+          "confirmation_date": "2025-11-13",
+          "key_points": {
+            "pivot_scale": "3atr_8pct",
+            "scale": "5y",
+            "support_lower": 8.44,
+            "support_upper": 9.07,
+            "first_trough_index": 4059,
+            "first_trough_date": "2025-04-08",
+            "latest_anchor_index": 4183,
+            "latest_anchor_date": "2025-10-13",
+            "neckline_test_indices": [
+              3960,
+              3990,
+              4156
+            ],
+            "pivot_1_index": 4059,
+            "pivot_1_date": "2025-04-08",
+            "pivot_1": 8.44,
+            "pivot_1_kind": "low",
+            "pivot_2_index": 4183,
+            "pivot_2_date": "2025-10-13",
+            "pivot_2": 9.07,
+            "pivot_2_kind": "low"
+          },
+          "selected_candidate_id": "neckline-candidate-3960-3990-4156"
+        }
+      ],
+      "elapsed_seconds": 29.828,
+      "source_version": {
+        "engine_version": "caisen-daily-continuous-v5",
+        "source_rule_version": "caisen-main-bottoms-v9",
+        "main_bottoms_sha256": "c0a9b0491f9e89c9368a7af34119306d64fd18ef3bef1eb566f54e39034e0988",
+        "daily_incremental_sha256": "0daaca79948a20188a57f8548167728ae9b4193efd7832d6c9bb2c6b2469d21a",
+        "rules_sha256": "9ce04d63a7e43ef11af51cd791e50209ca534e326afaee68687bea58a9510bcb",
+        "recognizer": "boundary_first"
+      }
+    },
+    {
+      "case_id": "mfe_then_stop",
+      "kind": "stock",
+      "code": "600281",
+      "prefix_cutoff": "2017-02-15",
+      "snapshot_input_path": "/Users/sotawest/OpenCode/stock/caisen-system/reports/daily-research/paired-input-snapshot-20261105-v1/data/stocks/600281.csv",
+      "snapshot_input_sha256": "d1c148d4021e9afcada4c079726c32d9ce253aefd72f3b75b5aebb2cf49b26c0",
+      "tick_size": 0.01,
+      "original_pattern_id": "600281:d9261fe4a1139548",
+      "original_pattern_key_points": {
+        "pivot_scale": "3atr_8pct",
+        "scale": "5y",
+        "support_lower": 5.4,
+        "support_upper": 5.79,
+        "first_trough_index": 3632,
+        "first_trough_date": "2016-05-20",
+        "latest_anchor_index": 3681,
+        "latest_anchor_date": "2016-08-01",
+        "neckline_test_indices": [
+          3449,
+          3519
+        ],
+        "pivot_1_index": 3632,
+        "pivot_1_date": "2016-05-20",
+        "pivot_1": 5.4,
+        "pivot_1_kind": "low",
+        "pivot_2_index": 3681,
+        "pivot_2_date": "2016-08-01",
+        "pivot_2": 5.79,
+        "pivot_2_kind": "low"
+      },
+      "original_pattern_emitted_dates_on_prefix": [
+        "2017-02-15"
+      ],
+      "original_pattern_emitted_on_signal_date": true,
+      "original_pattern_geometry_emitted_on_signal_date": true,
+      "any_eligible_signal_on_signal_date": true,
+      "same_date_signal_event_count": 1,
+      "same_date_pattern_types": [
+        "w_bottom"
+      ],
+      "same_date_signals": [
+        {
+          "pattern_id": "600281:d9261fe4a1139548",
+          "pattern_type": "w_bottom",
+          "formed_at": "2016-05-20",
+          "confirmation_date": "2017-02-15",
+          "key_points": {
+            "pivot_scale": "3atr_8pct",
+            "scale": "5y",
+            "support_lower": 5.4,
+            "support_upper": 5.79,
+            "first_trough_index": 3632,
+            "first_trough_date": "2016-05-20",
+            "latest_anchor_index": 3681,
+            "latest_anchor_date": "2016-08-01",
+            "neckline_test_indices": [
+              3449,
+              3519
+            ],
+            "pivot_1_index": 3632,
+            "pivot_1_date": "2016-05-20",
+            "pivot_1": 5.4,
+            "pivot_1_kind": "low",
+            "pivot_2_index": 3681,
+            "pivot_2_date": "2016-08-01",
+            "pivot_2": 5.79,
+            "pivot_2_kind": "low"
+          },
+          "selected_candidate_id": "neckline-candidate-3449-3519"
+        }
+      ],
+      "elapsed_seconds": 27.783,
+      "source_version": {
+        "engine_version": "caisen-daily-continuous-v5",
+        "source_rule_version": "caisen-main-bottoms-v9",
+        "main_bottoms_sha256": "c0a9b0491f9e89c9368a7af34119306d64fd18ef3bef1eb566f54e39034e0988",
+        "daily_incremental_sha256": "0daaca79948a20188a57f8548167728ae9b4193efd7832d6c9bb2c6b2469d21a",
+        "rules_sha256": "9ce04d63a7e43ef11af51cd791e50209ca534e326afaee68687bea58a9510bcb",
+        "recognizer": "boundary_first"
+      }
+    },
+    {
+      "case_id": "gap_stop",
+      "kind": "stock",
+      "code": "600359",
+      "prefix_cutoff": "2022-04-12",
+      "snapshot_input_path": "/Users/sotawest/OpenCode/stock/caisen-system/reports/daily-research/paired-input-snapshot-20261105-v1/data/stocks/600359.csv",
+      "snapshot_input_sha256": "e33d8a77f1e1963e0a1eb5b5ba32454634d30a6d8653f4ab67a12b3b4d07f6cb",
+      "tick_size": 0.01,
+      "original_pattern_id": "600359:09fe7516c7cfd107",
+      "original_pattern_key_points": {
+        "pivot_scale": "5atr_12pct",
+        "scale": "5y",
+        "support_lower": 6.93,
+        "support_upper": 7.47,
+        "first_trough_index": 5029,
+        "first_trough_date": "2020-11-02",
+        "latest_anchor_index": 5228,
+        "latest_anchor_date": "2021-08-23",
+        "neckline_test_indices": [
+          5074,
+          5130,
+          5256
+        ],
+        "pivot_1_index": 5029,
+        "pivot_1_date": "2020-11-02",
+        "pivot_1": 7.47,
+        "pivot_1_kind": "low",
+        "pivot_2_index": 5098,
+        "pivot_2_date": "2021-02-08",
+        "pivot_2": 6.93,
+        "pivot_2_kind": "low",
+        "pivot_3_index": 5228,
+        "pivot_3_date": "2021-08-23",
+        "pivot_3": 7.16,
+        "pivot_3_kind": "low"
+      },
+      "original_pattern_emitted_dates_on_prefix": [],
+      "original_pattern_emitted_on_signal_date": false,
+      "original_pattern_geometry_emitted_on_signal_date": false,
+      "any_eligible_signal_on_signal_date": false,
+      "same_date_signal_event_count": 0,
+      "same_date_pattern_types": [],
+      "same_date_signals": [],
+      "elapsed_seconds": 54.394,
+      "source_version": {
+        "engine_version": "caisen-daily-continuous-v5",
+        "source_rule_version": "caisen-main-bottoms-v9",
+        "main_bottoms_sha256": "c0a9b0491f9e89c9368a7af34119306d64fd18ef3bef1eb566f54e39034e0988",
+        "daily_incremental_sha256": "0daaca79948a20188a57f8548167728ae9b4193efd7832d6c9bb2c6b2469d21a",
+        "rules_sha256": "9ce04d63a7e43ef11af51cd791e50209ca534e326afaee68687bea58a9510bcb",
+        "recognizer": "boundary_first"
+      }
+    }
+  ]
+}

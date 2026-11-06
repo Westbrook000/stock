@@ -1,0 +1,31 @@
+{
+  "universe_id": "daily_800_stock_200_etf_v1",
+  "date_to": "2026-11-01",
+  "role": "additional fixed regression cases; outside the fixed 800/200 universe",
+  "symbols": [
+    {
+      "kind": "stock",
+      "code": "600108",
+      "sessions": 6985,
+      "data_revision": "mtime_ns:1793697719681125108,size:386107",
+      "first_date": "1997-08-18",
+      "last_date": "2026-11-03"
+    },
+    {
+      "kind": "etf",
+      "code": "159718",
+      "sessions": 1171,
+      "data_revision": "mtime_ns:1793700269233642085,size:67215",
+      "first_date": "2021-12-28",
+      "last_date": "2026-11-02"
+    },
+    {
+      "kind": "etf",
+      "code": "516630",
+      "sessions": 1246,
+      "data_revision": "mtime_ns:1793700589908488230,size:71059",
+      "first_date": "2021-09-03",
+      "last_date": "2026-11-02"
+    }
+  ]
+}

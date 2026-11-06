@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import re
 import threading
@@ -9,18 +8,15 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import replace
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from multiprocessing import get_context
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from pathlib import Path
 import pandas as pd
 
-from .backtest import run_backtest
-from .fixed_batch import run_fixed_batch
-from .fixed_backtest import STRATEGY_VERSION, SUPPORTED_STRATEGY_VERSIONS
 from .market import (InstrumentFile, aggregate_weekly, default_china_calendar,
                      discover_instruments, load_daily_bars)
 from .patterns import BOOK_PATTERNS, PATTERN_LABELS, current_pattern_snapshot, detect_patterns
@@ -35,6 +31,7 @@ from . import RULE_VERSION, __version__
 from .data_refresh import refresh_one
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WEB = os.path.join(os.path.dirname(__file__), "static")
 
 
@@ -43,6 +40,7 @@ async def _lifespan(_app):
     import_legacy_scan_jobs()
     interrupt_active_scan_runs()
     _recover_fixed_backtests()
+    _recover_daily_backtests()
     try:
         yield
     finally:
@@ -54,6 +52,7 @@ app = FastAPI(title="蔡森量价结构研究系统", version=__version__,
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 _jobs = {}
 _fixed_backtest_jobs = {}
+_daily_backtest_jobs = {}
 _active_scan_executors = {}
 _scan_executors_lock = threading.Lock()
 
@@ -79,15 +78,6 @@ def _load_job_payload(job_id):
     with connect() as db:
         row=db.execute("SELECT payload FROM jobs WHERE job_id=?",(job_id,)).fetchone()
     return json.loads(row[0]) if row else None
-
-
-class BacktestRequest(BaseModel):
-    code: str
-    kind: str = "stock"
-    timeframe: str = "1d"
-    start: str = None
-    end: str = None
-    cash: float = 100000
 
 
 def _bars(code, kind, timeframe):
@@ -269,7 +259,8 @@ def _analyze_scan_instrument(instrument, params, root=None):
             label=PATTERN_LABELS.get(p.pattern_type,p.pattern_type)
             if is_main:
                 label="主结构 · "+label
-            state_label=("，未确认" if p.state=="forming" else
+            state_label=("，已成型，等待颈线有效突破" if p.state=="forming" and is_main else
+                         "，未确认" if p.state=="forming" else
                          "，价格确认，量能仅作辅助" if p.state=="confirmed" and is_main and not p.volume_verified else
                          "，价格确认，量能未核验" if p.state=="confirmed" and not p.volume_verified else
                          "，已失效" if p.state=="invalidated" else
@@ -343,97 +334,6 @@ def _refresh_worker(job_id, params):
         payload.update(status="completed",progress=1)
     except Exception as error:
         payload.update(status="failed",error=str(error))
-
-
-def _fixed_backtest_worker(job_id, params):
-    job=_fixed_backtest_jobs[job_id]
-    try:
-        job.update(status="running",progress=0,completed=0)
-        _persist_job(job_id,job)
-        instruments=discover_instruments(ROOT)
-        instruments=[item for item in instruments if item.kind in params["kinds"]]
-        if params.get("limit") is not None:
-            instruments=instruments[:params["limit"]]
-        requested=params["timeframes"]
-        job.update(status="running",total=len(instruments)*len(requested),progress=0,
-                   completed=0,failures=[])
-        items=[]
-        eligible_dates=set()
-        trade_starts=[]
-        for index,instrument in enumerate(instruments):
-            try:
-                result=load_daily_bars(instrument,root=ROOT)
-                daily=result.bars.copy()
-                if params.get("date_to"):
-                    daily=daily.loc[pd.to_datetime(daily.date).dt.date<=date.fromisoformat(params["date_to"])].copy()
-                daily.attrs.update(result.bars.attrs)
-                dates=pd.to_datetime(daily.date,errors="coerce").dropna().drop_duplicates().sort_values().reset_index(drop=True)
-                if params.get("date_from"):
-                    trade_start=params["date_from"]
-                elif params.get("scope")=="recent300" and not dates.empty:
-                    trade_start=dates.iloc[max(0,len(dates)-300)].date().isoformat()
-                else:
-                    trade_start=None
-                if trade_start:
-                    trade_starts.append(trade_start)
-                    eligible_dates.update(value.date().isoformat() for value in dates if value.date().isoformat()>=trade_start)
-                for timeframe in requested:
-                    items.append({"code":instrument.code,"kind":instrument.kind,"timeframe":timeframe,
-                                  "bars":daily.copy(),"cash":100000.0,"calendar":default_china_calendar(),
-                                  "trade_start":trade_start})
-            except Exception as error:
-                for timeframe in requested:
-                    job["failures"].append({"code":instrument.code,"kind":instrument.kind,
-                                             "timeframe":timeframe,"error":str(error)})
-            job.update(completed=min((index+1)*len(requested),job["total"]),
-                       progress=.2*(index+1)/max(len(instruments),1))
-            if (index+1)%10==0 or index+1==len(instruments):
-                _persist_job(job_id,job)
-        if not items:
-            job.update(status="failed",progress=1,error="所选标的没有可用于回测的行情",completed=job["total"])
-            return
-        development_cutoff=params.get("development_cutoff")
-        recent_window=bool(params.get("date_from") or params.get("scope")=="recent300")
-        if development_cutoff is None and eligible_dates and recent_window:
-            ordered_dates=sorted(eligible_dates)
-            development_cutoff=ordered_dates[min(len(ordered_dates)-1,math.floor(len(ordered_dates)*.7))]
-        job.update(development_cutoff=development_cutoff,
-                   trade_start_policy=("explicit" if params.get("date_from") else
-                                       "last_300_observations" if params.get("scope")=="recent300" else "all_history"),
-                   trade_window={"from":min(trade_starts) if trade_starts else None,
-                                 "to":max(pd.to_datetime(item["bars"].date).max().date().isoformat()
-                                          for item in items if not item["bars"].empty) if any(not item["bars"].empty for item in items) else None})
-        _persist_job(job_id,job)
-        output_dir=Path(ROOT)/"state"/"fixed_backtests"/job_id
-        def report_progress(snapshot):
-            total=max(int(snapshot.get("total",0)),1)
-            completed=int(snapshot.get("completed",0))
-            job.update(completed=min(job["total"],int(job["total"]*.2)+completed),
-                       progress=.2+.8*completed/total,
-                       current={"code":snapshot.get("current"),"timeframe":snapshot.get("timeframe")})
-            paths=_find_fixed_backtest_artifacts(job.get("output_dir"))
-            if paths:
-                job["output"]=paths
-            _persist_job(job_id,job)
-        strategy_version=params.get("strategy_version", STRATEGY_VERSION)
-        report=run_fixed_batch(items,output_dir,development_cutoff=development_cutoff,
-                               max_workers=params["max_workers"],progress_callback=report_progress,
-                               strategy_version=strategy_version)
-        failures=report.get("batch_execution",{}).get("errors",[])
-        job["failures"].extend(failures)
-        status="partial_failed" if job["failures"] or failures else "completed"
-        job.update(status=status,progress=1,completed=job["total"],
-                   strategy_version=report.get("strategy_version"),development_cutoff=report.get("development_cutoff"),
-                   summary=report.get("summary",{}),groups=report.get("groups",[]),
-                   output=report.get("output",{}))
-        _persist_job(job_id,job)
-    except Exception as error:
-        job.update(status="failed",progress=1,error=str(error))
-        paths=_find_fixed_backtest_artifacts(job.get("output_dir"))
-        if paths:
-            job["output"]=paths
-            job["status"]="partial_failed"
-        _persist_job(job_id,job)
 
 
 def _find_fixed_backtest_artifacts(output_dir):
@@ -787,85 +687,209 @@ def pattern_detail(pattern_id: str):
     return pattern
 
 
-@app.post("/api/v1/backtests")
-def backtest(request: BacktestRequest):
-    if request.kind not in ("stock","etf") or request.timeframe not in ("1d","1w"):
-        raise HTTPException(400,"kind must be stock/etf and timeframe must be 1d/1w")
-    if not math.isfinite(request.cash) or request.cash <= 0:
-        raise HTTPException(400,"cash must be a positive finite amount")
-    for value in (request.start,request.end):
-        if value:
-            try: date.fromisoformat(value)
-            except ValueError: raise HTTPException(400,"start/end must use YYYY-MM-DD")
-    if request.start and request.end and request.start > request.end:
-        raise HTTPException(400,"start must not be later than end")
-    market_result=_market_data(request.code,request.kind)
-    bars=market_result.bars.copy()
-    latest_available=str(pd.to_datetime(bars.date).max().date()) if not bars.empty else None
-    if request.start:
-        bars=bars.loc[pd.to_datetime(bars.date).dt.date >= date.fromisoformat(request.start)].copy()
-    if request.end:
-        bars=bars.loc[pd.to_datetime(bars.date).dt.date <= date.fromisoformat(request.end)].copy()
-    analysis_window={"from":str(pd.to_datetime(bars.date).min().date()) if not bars.empty else None,
-                     "to":str(pd.to_datetime(bars.date).max().date()) if not bars.empty else None,
-                     "latest_available":latest_available,
-                     "historical":bool(not bars.empty and latest_available and str(pd.to_datetime(bars.date).max().date()) < latest_available)}
-    result=run_backtest(bars,request.code,request.kind,request.timeframe,request.cash,start=request.start)
-    result["analysis_window"]=analysis_window
-    bt_id=uuid.uuid4().hex
-    with connect() as db: db.execute("INSERT INTO backtests(backtest_id,payload) VALUES(?,?)",(bt_id,json.dumps(result,ensure_ascii=False)))
-    result["backtest_id"]=bt_id
+def _daily_backtest_worker(job_id, params):
+    job=_daily_backtest_jobs[job_id]
+    try:
+        from .daily_research import run_daily_research
+        job.update(status="running",progress=0)
+        _persist_job(job_id,job)
+        output_dir=Path(params["output_dir"])
+        def on_progress(snapshot):
+            total=max(int(snapshot.get("total",0)),1)
+            completed=max(0,int(snapshot.get("completed",0)))
+            stage=snapshot.get("stage")
+            progress=min(.98, .05 + .9*completed/total) if total else .05
+            active=[dict(item) for item in snapshot.get("active_symbols", [])
+                    if isinstance(item, dict)]
+            current=(dict(active[0], symbol=active[0].get("code")) if active else
+                     ({"symbol": snapshot.get("symbol")} if snapshot.get("symbol") else {}))
+            job.update(status="running",progress=progress,stage=stage,
+                       completed=completed,total=int(snapshot.get("total",0)),
+                       current=current,active_symbols=active,
+                       elapsed_seconds=snapshot.get("elapsed_seconds"))
+            _persist_job(job_id,job)
+        result=run_daily_research(
+            universe_path=PROJECT_ROOT/"research"/"universes"/"daily_800_stock_200_etf_v1.json",
+            output_dir=output_dir,date_to=params["date_to"],trade_start=params["trade_start"],
+            workers=params["workers"],
+            progress_callback=on_progress,recognizer=params["recognizer"],
+            execution_mode=params["execution_mode"],worker_source_override=params["worker_source"])
+        for field in ("strategy_version","recognizer_version","engine_version","source_rule_version","versions"):
+            if result.get(field) != params.get(field):
+                raise RuntimeError("effective backtest configuration changed before execution: %s" % field)
+        artifacts=result.get("artifacts") or {}
+        summary=result.get("summary",{})
+        universe=result.get("universe") or {}
+        total=max(0,int(universe.get("selected_account_count",job.get("total",0))))
+        reported_completed=max(0,int(summary.get("account_count",job.get("completed",0))))
+        completed=min(reported_completed,total)
+        status={"complete":"completed"}.get(result.get("status"),result.get("status","completed"))
+        if reported_completed != total and status == "completed":
+            status="partial_failed"
+        job.update(status=status,progress=1,completed=completed,total=total,
+                   current={},active_symbols=[],
+                   universe=universe,parameters=result.get("parameters"),
+                   summary=summary,artifacts=artifacts,timings=result.get("timings",{}),
+                   run_id=result.get("run_id"),strategy_version=result.get("strategy_version"),
+                   recognizer_version=result.get("recognizer_version"),engine_version=result.get("engine_version"),
+                   source_rule_version=result.get("source_rule_version"),
+                   versions=result.get("versions"),
+                   recognition_rules=result.get("recognition_rules"),
+                   trading_rules=result.get("trading_rules"),
+                   effective_parameters=result.get("parameters"),
+                   account_files=result.get("account_files",[]))
+        _persist_job(job_id,job)
+    except Exception as error:
+        job.update(status="failed",progress=1,error="%s: %s" % (type(error).__name__, error),
+                   current={},active_symbols=[])
+        _persist_job(job_id,job)
+
+
+def _recover_daily_backtests():
+    with connect() as db:
+        rows=db.execute("SELECT job_id,payload FROM jobs WHERE status IN ('queued','running')").fetchall()
+    for row in rows:
+        try: job=json.loads(row["payload"])
+        except (TypeError,ValueError): continue
+        if job.get("job_type")!="daily_backtest": continue
+        job.update(status="interrupted",error="服务重启时任务仍在运行；已保留任务记录，需重新运行")
+        _daily_backtest_jobs[row["job_id"]]=job
+        _persist_job(row["job_id"],job)
+
+
+def _daily_job_or_404(job_id):
+    job=_daily_backtest_jobs.get(job_id)
+    if job is None:
+        try: job=_load_job_payload(job_id)
+        except (TypeError,ValueError): job=None
+        if not isinstance(job,dict) or job.get("job_type")!="daily_backtest": job=None
+        if job: _daily_backtest_jobs[job_id]=job
+    if job is None: raise HTTPException(404,"daily backtest task not found")
+    return job
+
+
+@app.post("/api/v1/backtests",status_code=202)
+def start_daily_backtest(params: dict):
+    if params:
+        raise HTTPException(400,"daily backtest configuration is fixed")
+    from .daily_research import resolve_daily_research_config
+    try:
+        effective = resolve_daily_research_config(execution_mode="spawn")
+    except Exception as error:
+        raise HTTPException(503,"cannot resolve current daily research configuration: %s: %s" %
+                            (type(error).__name__, error)) from error
+    job_id=uuid.uuid4().hex
+    output_dir=PROJECT_ROOT/"state"/"daily_backtests"/job_id
+    normalized={"universe_id":"daily_800_stock_200_etf_v1",
+                "date_to":datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+                "trade_start":None,"trade_start_policy":"all_history",
+                **effective,
+                "strategy":effective["strategy_version"],
+                "initial_cash_per_symbol":effective["trading_rules"]["initial_cash_per_symbol"],
+                "stop_pct":effective["trading_rules"]["stop_fraction"],
+                "target_pct":effective["trading_rules"]["target_fraction"],
+                "commission":effective["trading_rules"]["commission"],
+                "slippage":effective["trading_rules"]["slippage"],
+                "max_hold":effective["trading_rules"]["max_hold_sessions"],
+                "end_close":effective["trading_rules"]["end_of_period_close"],
+                "output_dir":str(output_dir.resolve())}
+    job={"job_id":job_id,"job_type":"daily_backtest","status":"queued","progress":0,
+         "completed":0,"total":1000,"params":normalized,
+         "strategy_version":effective["strategy_version"],
+         "recognizer_version":effective["recognizer_version"],
+         "engine_version":effective["engine_version"],
+         "source_rule_version":effective["source_rule_version"],
+         "versions":effective["versions"],
+         "recognition_rules":effective["recognition_rules"],
+         "trading_rules":effective["trading_rules"],
+         "created_at":datetime.now(timezone.utc).isoformat()}
+    _daily_backtest_jobs[job_id]=job
+    _persist_job(job_id,job)
+    threading.Thread(target=_daily_backtest_worker,args=(job_id,normalized),daemon=True).start()
+    return {"job_id":job_id,"status":"queued","params":normalized,
+            "strategy_version":effective["strategy_version"],
+            "recognizer_version":effective["recognizer_version"],
+            "engine_version":effective["engine_version"],
+            "source_rule_version":effective["source_rule_version"],
+            "versions":effective["versions"]}
+
+
+@app.get("/api/v1/backtests")
+def list_daily_backtests(page: int = 1):
+    if page<1: raise HTTPException(400,"page must be a positive integer")
+    with connect() as db:
+        rows=db.execute("SELECT job_id,payload,created_at FROM jobs WHERE json_valid(payload) "
+                        "AND json_extract(payload,'$.job_type')='daily_backtest' "
+                        "ORDER BY created_at DESC,job_id DESC LIMIT 50 OFFSET ?",((page-1)*50,)).fetchall()
+        total=db.execute("SELECT COUNT(*) FROM jobs WHERE json_valid(payload) "
+                         "AND json_extract(payload,'$.job_type')='daily_backtest'").fetchone()[0]
+    items=[]
+    for row in rows:
+        try: job=json.loads(row["payload"])
+        except (TypeError,ValueError): continue
+        item={key:job.get(key) for key in ("job_id","status","progress","completed","total","params",
+                                             "created_at","universe","summary","error","strategy_version",
+                                             "recognizer_version","engine_version","source_rule_version",
+                                             "recognition_rules","trading_rules","effective_parameters","versions")}
+        item["created_at"]=item.get("created_at") or row["created_at"]
+        if job.get("artifacts",{}).get("html_path"):
+            item["report_url"]="/api/v1/backtests/%s/report"%row["job_id"]
+        items.append(item)
+    return {"items":items,"total":total,"page":page,"page_size":50}
+
+
+@app.get("/api/v1/backtests/{job_id}")
+def get_daily_backtest(job_id: str):
+    job=_daily_job_or_404(job_id)
+    result={key:value for key,value in job.items() if key!="job_type"}
+    if job.get("artifacts",{}).get("html_path"):
+        result["report_url"]="/api/v1/backtests/%s/report"%job_id
     return result
 
 
-@app.post("/api/v1/fixed-backtests",status_code=202)
-def start_fixed_backtest(params: dict):
-    strategy_version=params.get("strategy_version", STRATEGY_VERSION)
-    if strategy_version not in SUPPORTED_STRATEGY_VERSIONS:
-        raise HTTPException(400,"unsupported fixed strategy version")
-    kinds=params.get("kinds",["stock","etf"])
-    if not isinstance(kinds,list) or not kinds or any(kind not in ("stock","etf") for kind in kinds):
-        raise HTTPException(400,"kinds must contain stock and/or etf")
-    kinds=list(dict.fromkeys(kinds))
-    timeframes=params.get("timeframes",["1d","1w"])
-    if not isinstance(timeframes,list) or not timeframes or any(tf not in ("1d","1w") for tf in timeframes):
-        raise HTTPException(400,"timeframes may contain only 1d and 1w")
-    timeframes=list(dict.fromkeys(timeframes))
-    limit=params.get("limit")
-    if limit is not None and (not isinstance(limit,int) or isinstance(limit,bool) or limit<1 or limit>10000):
-        raise HTTPException(400,"limit must be an integer from 1 to 10000")
-    for key in ("date_from","date_to","development_cutoff"):
-        value=params.get(key)
-        if value:
-            try: date.fromisoformat(value)
-            except (TypeError,ValueError): raise HTTPException(400,f"{key} must use YYYY-MM-DD")
-    if params.get("date_from") and params.get("date_to") and params["date_from"]>params["date_to"]:
-        raise HTTPException(400,"date_from must not be later than date_to")
-    cash=params.get("cash",100000)
-    if not isinstance(cash,(int,float)) or isinstance(cash,bool) or not math.isfinite(cash) or cash!=100000:
-        raise HTTPException(400,"fixed strategy uses exactly 100000 per independent account")
-    max_workers=params.get("max_workers",1)
-    if not isinstance(max_workers,int) or isinstance(max_workers,bool) or max_workers!=1:
-        raise HTTPException(400,"fixed strategy currently runs serially with one worker")
-    scope=params.get("scope","all_history")
-    if scope not in ("all_history","recent300"):
-        raise HTTPException(400,"scope must be all_history or recent300")
-    normalized={"kinds":kinds,"timeframes":timeframes,"cash":100000.0,
-                "max_workers":1,"scope":scope,
-                "trade_start_policy":"explicit" if params.get("date_from") else scope,
-                "strategy_version":strategy_version}
-    for key in ("limit","date_from","date_to","development_cutoff"):
-        if params.get(key) is not None:
-            normalized[key]=params[key]
-    job_id=uuid.uuid4().hex
-    output_dir=Path(ROOT)/"state"/"fixed_backtests"/job_id
-    _fixed_backtest_jobs[job_id]={"job_id":job_id,"job_type":"fixed_backtest","status":"queued","progress":0,
-                                  "completed":0,"total":0,"failures":[],"params":normalized,
-                                  "strategy_version":strategy_version,
-                                  "output_dir":str(output_dir),"created_at":datetime.now(timezone.utc).isoformat()}
-    _persist_job(job_id,_fixed_backtest_jobs[job_id])
-    threading.Thread(target=_fixed_backtest_worker,args=(job_id,normalized),daemon=True).start()
-    return {"job_id":job_id,"status":"queued"}
+@app.get("/api/v1/backtests/{job_id}/accounts/{filename}")
+def daily_backtest_account(job_id: str, filename: str):
+    job=_daily_job_or_404(job_id)
+    if not re.fullmatch(r"(?:stock|etf)-\d{6}\.json",filename):
+        raise HTTPException(404,"daily backtest account not found")
+    artifacts=job.get("artifacts") or {}
+    account_directory=artifacts.get("account_directory")
+    if not account_directory:
+        raise HTTPException(404,"daily backtest account not found")
+    expected_root=(PROJECT_ROOT/"state"/"daily_backtests"/job_id/"accounts").resolve()
+    try: root=Path(account_directory).resolve(strict=True)
+    except OSError: raise HTTPException(404,"daily backtest account not found")
+    if root!=expected_root or not root.is_dir():
+        raise HTTPException(404,"daily backtest account not found")
+    path=root/filename
+    try: resolved=path.resolve(strict=True)
+    except OSError: raise HTTPException(404,"daily backtest account not found")
+    if resolved.parent!=root or not resolved.is_file():
+        raise HTTPException(404,"daily backtest account not found")
+    if "account_files" in job:
+        members=set()
+        for item in job.get("account_files") or []:
+            member=Path(item)
+            if not member.is_absolute(): member=root/member
+            try: members.add(member.resolve(strict=True))
+            except OSError: continue
+        if resolved not in members:
+            raise HTTPException(404,"daily backtest account not found")
+    return FileResponse(str(resolved),media_type="application/json")
+
+
+@app.get("/api/v1/backtests/{job_id}/report")
+def daily_backtest_report(job_id: str):
+    job=_daily_job_or_404(job_id)
+    if job.get("status") not in ("completed","partial_failed","interrupted") or not job.get("artifacts",{}).get("html_path"):
+        raise HTTPException(409,"daily backtest report is not ready")
+    try: return HTMLResponse(Path(job["artifacts"]["html_path"]).read_text(encoding="utf-8"))
+    except OSError: raise HTTPException(404,"daily backtest report is unavailable")
+
+
+@app.post("/api/v1/fixed-backtests",status_code=410)
+def start_fixed_backtest(_params: dict):
+    raise HTTPException(410,"fixed backtest submissions are retired; use /api/v1/backtests")
 
 
 @app.get("/api/v1/fixed-backtests")

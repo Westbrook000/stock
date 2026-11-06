@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -58,7 +59,7 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(result.iloc[0]["date"], pd.Timestamp("2026-01-08"))
 
     def test_local_loader_reads_existing_chinese_csv_schema(self):
-        result = load_local_history("000001", "stock", root=".")
+        result = load_local_history("000001", "stock", root=Path(__file__).parents[2])
         self.assertIsNotNone(result)
         self.assertIn("volume", result.columns)
         self.assertEqual(result.attrs["provenance"]["source"], "legacy_csv")

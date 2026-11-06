@@ -23,6 +23,7 @@
       const value=e.value||{};
       const tests=e.code==='neckline_test'?[value]:e.code==='neckline_tests'?(Array.isArray(value)?value:[]):[];
       for(const test of tests){const index=byDate.get(test.pivot_date||test.date);if(index!==undefined)markers.push({index,price:Number(test.level??bars[index].close),name:`颈线测试 · ${test.group_id||'未分组'}`})}
+      if(e.code==='neckline_selection'){for(const test of value.older_pressure_tests||[]){const index=byDate.get(test.date);if(index!==undefined)markers.push({index,price:Number(test.level??bars[index].close),name:'更早压力参考'})}}
       if(e.code==='neckline_breakout'){const index=byDate.get(value.date);if(index!==undefined&&!markers.some(marker=>marker.index===index&&marker.name.includes('确认')))markers.push({index,price:Number(value.close??bars[index].close),name:'颈线收盘确认'})}
       if(e.code==='weak_crossings'){for(const crossing of Array.isArray(value)?value:[]){const index=byDate.get(crossing.date);if(index!==undefined)markers.push({index,price:Number(crossing.close??crossing.price??bars[index].close),name:'弱穿越'})}}
     }
@@ -32,9 +33,44 @@
     }
     const start=anchors[0].index,end=Math.max(...anchors.map(p=>p.index),...markers.map(p=>p.index));
     const pad=Math.max(10,Math.ceil((end-start+1)*.12));
-    const neckline=pattern.neckline?Array.from({length:end-start+1},(_,i)=>({index:start+i,price:pattern.neckline.slope*(start+i-offset)+pattern.neckline.intercept})):[];
+    let neckline=pattern.neckline?Array.from({length:end-start+1},(_,i)=>({index:start+i,price:pattern.neckline.slope*(start+i-offset)+pattern.neckline.intercept})):[];
     const boundaries=neckline.length?[{name:'颈线 / 边界',points:neckline}]:[];
     const values=Object.fromEntries(evidence.map(e=>[e.code,e.value]));
+    const selection=values.neckline_selection,mainStructure=values.main_structure||{};
+    if(selection?.selected_line){
+      const line=selection.selected_line;
+      const startIndex=byDate.get(selection.effective_start_date)??(Number.isInteger(selection.coverage?.start_index)?selection.coverage.start_index+offset:start);
+      const coverageEndDate=selection.coverage?.end_date||selection.independent_tests?.[0]?.coverage_end_date;
+      const coverageEndIndex=byDate.get(coverageEndDate)??(Number.isInteger(selection.coverage?.end_index)?selection.coverage.end_index+offset:startIndex);
+      const lineFrozenIndex=byDate.get(selection.line_frozen_at||selection.freeze_date)??coverageEndIndex;
+      const eventEnd=pattern.confirmation_date?byDate.get(pattern.confirmation_date):byDate.get(mainStructure.observed_date);
+      const projectedEnd=eventEnd??bars.length-1;
+      const priceAt=index=>Number(line.slope)*(index-offset)+Number(line.intercept);
+      const makeSegment=(from,to,name,color,width,type)=>({name,color,width,type,points:[
+        {index:from,price:priceAt(from)},{index:to,price:priceAt(to)}
+      ]});
+      neckline=[];boundaries.length=0;
+      if(coverageEndIndex>=startIndex)boundaries.push(makeSegment(startIndex,coverageEndIndex,'已验证压力区间','#5d4eaa',3,'solid'));
+      if(projectedEnd>lineFrozenIndex)boundaries.push(makeSegment(lineFrozenIndex,projectedEnd,'冻结颈线延伸','#7b73ae',2,'dashed'));
+      for(const candidate of (selection.candidates||[]).filter(item=>!item.selected).slice(0,3)){
+        const from=byDate.get(candidate.coverage_start_date),to=byDate.get(candidate.coverage_end_date);
+        if(from===undefined||to===undefined||to<from||!candidate.line)continue;
+        const altAt=index=>Number(candidate.line.slope)*(index-offset)+Number(candidate.line.intercept);
+        boundaries.push({name:`备选压力线 ${candidate.rank}`,color:'#94a0aa',width:1,type:'dotted',points:[
+          {index:from,price:altAt(from)},{index:to,price:altAt(to)}
+        ]});
+      }
+      for(const retired of (selection.retired_segments||[]).slice(-3)){
+        const candidate=retired.candidate,tests=candidate?.tests||[];
+        if(!candidate?.line||!tests.length)continue;
+        const from=byDate.get(tests[0].coverage_start_date),to=byDate.get(tests[0].coverage_end_date);
+        if(from===undefined||to===undefined||to<from)continue;
+        const oldAt=index=>Number(candidate.line.slope)*(index-offset)+Number(candidate.line.intercept);
+        boundaries.push({name:`失效压力段 ${retired.breakout_date||''}`,color:'#d27a73',width:1,type:'dotted',points:[
+          {index:from,price:oldAt(from)},{index:to,price:oldAt(to)}
+        ]});
+      }
+    }
     if(Number.isFinite(values.box_upper)&&Number.isFinite(values.box_lower)){
       boundaries.length=0;
       for(const [key,name] of [['box_upper','箱体上沿'],['box_lower','箱体下沿']])boundaries.push({name,points:[{index:start,price:values[key]},{index:end,price:values[key]}]});
@@ -42,7 +78,6 @@
       const a=pattern.pattern_type.endsWith('_flag')?anchors[2]:anchors[0],b=anchors.at(-1);
       if(b.index>a.index){const slope=(b.price-a.price)/(b.index-a.index);boundaries.push({name:'另一侧结构边界',points:Array.from({length:end-start+1},(_,i)=>({index:start+i,price:a.price+slope*(start+i-a.index)}))})}
     }
-    const mainStructure=values.main_structure||{};
     if(mainStructure.support_lower!==undefined&&mainStructure.support_upper!==undefined){
       for(const [price,name] of [[mainStructure.support_lower,'主结构支撑下沿'],[mainStructure.support_upper,'主结构支撑上沿']])boundaries.push({name,points:[{index:start,price:Number(price)},{index:end,price:Number(price)}]});
     }

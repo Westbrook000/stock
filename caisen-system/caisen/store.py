@@ -134,7 +134,7 @@ def _save_scan_result(db, run_id, ordinal, payload, patterns=None):
 
 
 def _is_legacy_scan_job(payload):
-    if not isinstance(payload, dict) or payload.get("job_type") in ("fixed_backtest", "data_refresh"):
+    if not isinstance(payload, dict) or payload.get("job_type") in ("fixed_backtest", "daily_backtest", "data_refresh"):
         return False
     return (isinstance(payload.get("inventory"), dict)
             and isinstance(payload.get("results"), list)
@@ -164,6 +164,7 @@ def import_legacy_scan_jobs():
                  AND instr(jobs.payload,'\"total\"')>0
                  AND instr(jobs.payload,'\"results\"')>0
                  AND instr(jobs.payload,'\"job_type\":\"fixed_backtest\"')=0
+                 AND instr(jobs.payload,'\"job_type\":\"daily_backtest\"')=0
                  AND instr(jobs.payload,'\"job_type\":\"data_refresh\"')=0
                ORDER BY jobs.created_at,jobs.job_id"""
         )

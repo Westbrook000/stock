@@ -620,9 +620,10 @@
     }
   ],
   "main_structure_extension": {
-    "source_rule_version": "caisen-main-bottoms-v9",
+    "source_rule_version": "caisen-main-bottoms-v11",
     "neckline_selection_rule_version": "pattern_matched_pressure_envelope_v7",
-    "main_pattern_rule_version": "caisen-v22-main-bottom-v1",
+    "main_pattern_rule_version": "caisen-v24-main-bottom-v1",
+    "breakout_candidate_rule": "candidate_own_frozen_neckline_v1",
     "neckline_selection_order": [
       "independent_test_count_desc",
       "test_span_desc",

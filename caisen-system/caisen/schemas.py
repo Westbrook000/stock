@@ -39,6 +39,13 @@ class Pattern:
     last_observed_date: Optional[str] = None
     confirmation_date: Optional[str] = None
     source_rule_version: str = "caisen-rules-v7"
+    structure_key: Optional[str] = None
+    boundary_version_id: Optional[str] = None
+    paired_at: Optional[str] = None
+    selection_reason: Optional[str] = None
+    recognition_schema_version: Optional[str] = None
+    state_schema_version: Optional[str] = None
+    multiscale_evidence: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)

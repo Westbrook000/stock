@@ -348,13 +348,14 @@ def _eligible_main_patterns(patterns, observed_date):
 
 
 def _prefix_signals(daily, timeframe, code, kind, calendar=None, trade_start=None,
-                    strategy_version=STRATEGY_VERSION):
+                    strategy_version=STRATEGY_VERSION, recognizer="boundary_first"):
     if strategy_version not in SUPPORTED_STRATEGY_VERSIONS:
         raise ValueError("unsupported strategy: %s" % strategy_version)
     if timeframe != "1d":
         raise ValueError("backtests are daily only")
     from .daily_incremental import generate_daily_signals
-    return generate_daily_signals(daily, code, kind, trade_start=trade_start)
+    return generate_daily_signals(daily, code, kind, trade_start=trade_start,
+                                  recognizer=recognizer)
 
 
 def _experiment_spec(experiment_id):

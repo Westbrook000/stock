@@ -48,6 +48,15 @@ UNIVERSE_DATE = "2026-11-01"
 UNIVERSE_SEED = 20261101
 DEFAULT_DATE_TO = None
 DEFAULT_RECOGNIZER = "boundary_first"
+
+
+class _CachedSignalStream(list):
+    """Preserve recognition audit events when signals pass through the cache."""
+
+    def __init__(self, signals=(), instance_events=(), entry_events=()):
+        super().__init__(signals)
+        self.instance_events = list(instance_events)
+        self.entry_events = list(entry_events)
 RECOGNIZER_VERSION = DAILY_ENGINE_VERSION
 ENGINE_VERSION = DAILY_ENGINE_VERSION
 BENCHMARK_PATH = (Path(__file__).resolve().parents[1] / "reports" / "daily-research" /
@@ -464,20 +473,25 @@ def _read_signal_cache(path, expected_key):
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return None
-    if (not isinstance(payload, dict) or payload.get("cache_schema") != 1
+    if (not isinstance(payload, dict) or payload.get("cache_schema") != 2
             or payload.get("key") != expected_key
             or not isinstance(payload.get("signals"), list)
+            or not isinstance(payload.get("instance_events"), list)
             or not isinstance(payload.get("recognition_stats"), dict)):
         return None
     return payload
 
 
 def _write_signal_cache(path, key, identity, signals, recognition_stats):
-    payload = {"cache_schema": 1, "key": key, "identity": identity,
-               "signals": signals, "recognition_stats": recognition_stats}
+    instance_events = list(getattr(signals, "instance_events", []))
+    entry_events = list(getattr(signals, "entry_events", []))
+    payload = {"cache_schema": 2, "key": key, "identity": identity,
+               "signals": list(signals), "instance_events": instance_events,
+               "entry_events": entry_events, "recognition_stats": recognition_stats}
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_json_default)
     _atomic_write(path, encoded)
-    return json.loads(encoded)["signals"]
+    saved = json.loads(encoded)
+    return _CachedSignalStream(saved["signals"], saved["instance_events"], saved["entry_events"])
 
 
 def _rss_peak_bytes():
@@ -514,7 +528,7 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
         if progress_callback:
             progress_callback({"phase": "no_data", "bars_completed": 0, "bars_total": 0})
         return {"code": instrument.code, "kind": instrument.kind, "status": "no_data",
-                "bars": bars, "signals": [], "provenance": provenance,
+                "bars": bars, "signals": [], "instance_events": [], "entry_events": [], "provenance": provenance,
                 "load_seconds": load_seconds, "recognition_seconds": 0.0,
                 "recognition_stats": {}, "recognizer": recognizer,
                 "recognition_config": recognition_config}
@@ -527,7 +541,7 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
         if progress_callback:
             progress_callback({"phase": "no_bars_before_cutoff", "bars_completed": 0, "bars_total": 0})
         return {"code": instrument.code, "kind": instrument.kind, "status": "no_bars_before_cutoff",
-                "bars": bars, "signals": [], "provenance": provenance,
+                "bars": bars, "signals": [], "instance_events": [], "entry_events": [], "provenance": provenance,
                 "load_seconds": load_seconds, "recognition_seconds": 0.0,
                 "recognition_stats": {}, "recognizer": recognizer,
                 "recognition_config": recognition_config}
@@ -545,7 +559,8 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
         cache_path = Path(signal_cache_dir) / (cache_key + ".json")
     cached = _read_signal_cache(cache_path, cache_key) if cache_path is not None else None
     if cached is not None:
-        signals = cached["signals"]
+        signals = _CachedSignalStream(cached["signals"], cached["instance_events"],
+                                      cached.get("entry_events", []))
         recognition_stats.update(cached["recognition_stats"])
         recognition_stats["cache_hit"] = True
     else:
@@ -570,7 +585,9 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
         signals = _write_signal_cache(cache_path, cache_key, cache_identity, signals, recognition_stats)
     recognition_seconds = time.perf_counter() - recognized
     return {"code": instrument.code, "kind": instrument.kind, "status": "ready",
-            "bars": bars, "signals": signals, "provenance": provenance,
+            "bars": bars, "signals": signals,
+            "instance_events": list(getattr(signals, "instance_events", [])),
+            "entry_events": list(getattr(signals, "entry_events", [])), "provenance": provenance,
             "load_seconds": load_seconds, "recognition_seconds": recognition_seconds,
             "recognition_stats": recognition_stats, "recognizer": recognizer,
             "recognition_config": recognition_config}
@@ -602,6 +619,8 @@ def _account_from_prepared(prepared, code, kind):
                "recognizer": prepared.get("recognizer", "v7"),
                "starting_cash": STARTING_CASH, "ending_equity": STARTING_CASH,
                "signals": prepared["signals"], "trades": [], "daily_equity": [],
+               "instance_events": list(prepared.get("instance_events", [])),
+               "entry_events": list(prepared.get("entry_events", [])),
                "rejections": [], "order_events": [], "provenance": prepared["provenance"],
                "timings": {"load_seconds": prepared["load_seconds"],
                            "recognition_seconds": prepared["recognition_seconds"],
@@ -623,11 +642,26 @@ def _account_from_prepared(prepared, code, kind):
     return _finalize_account(account)
 
 
+def _account_instance_metadata(account):
+    from .pattern_instances import derive_instance_metadata
+    return [derive_instance_metadata(event) for event in account.get("instance_events", [])]
+
+
 def _account_summary_row(account, account_path, output_dir):
     row = {key: account.get(key) for key in ("code", "kind", "status", "provenance", "metrics", "timings",
         "accounting_checks", "error", "strategy_version", "recognizer_version", "engine_version",
         "source_rule_version", "recognition_stats", "recognizer")}
+    state_counts = {}
+    for event in account.get("instance_events", []):
+        state = event.get("state", "unknown")
+        state_counts[state] = state_counts.get(state, 0) + 1
     row.update({"signal_count": len(account["signals"]), "trade_count": len(account["trades"]),
+                "run_id": account.get("run_id"),
+                "pattern_instance_event_count": len(account.get("instance_events", [])),
+                "pattern_instance_metadata_count": len(account.get("pattern_instance_metadata", [])),
+                "entry_event_count": sum(bool(event.get("entry_eligible"))
+                                          for event in account.get("instance_events", [])),
+                "pattern_instance_state_counts": state_counts,
                 "starting_cash": float(account["starting_cash"]), "ending_equity": float(account["ending_equity"]),
                 "account_json": str(Path(account_path).resolve()),
                 "account_json_relative": Path(account_path).resolve().relative_to(
@@ -641,7 +675,7 @@ def _account_summary_row(account, account_path, output_dir):
 
 def _complete_account_task(instrument, root, date_to, trade_start, account_path, recognizer="v7",
                            signal_cache_dir=None, recognition_config=None,
-                           require_signal_cache=False):
+                           require_signal_cache=False, run_id=None):
     """Run and atomically persist one account; return only its compact summary over IPC."""
     prepared = _prepare_account(instrument, root, date_to, trade_start,
                                 progress_callback=_worker_progress_callback(instrument.kind, instrument.code),
@@ -649,6 +683,14 @@ def _complete_account_task(instrument, root, date_to, trade_start, account_path,
                                 recognition_config=recognition_config,
                                 require_signal_cache=require_signal_cache)
     account = _account_from_prepared(prepared, instrument.code, instrument.kind)
+    if run_id:
+        account["run_id"] = str(run_id)
+        account["pattern_instance_metadata"] = _account_instance_metadata(account)
+        from .store import save_pattern_instance_events, save_pattern_instance_metadata
+        save_pattern_instance_events(run_id, instrument.code, instrument.kind,
+                                     account.get("instance_events", []))
+        save_pattern_instance_metadata(run_id, instrument.code, instrument.kind,
+                                       account["pattern_instance_metadata"])
     _atomic_write(account_path, json.dumps(account, ensure_ascii=False, indent=2, default=_json_default))
     return _account_summary_row(account, account_path, Path(account_path).parent.parent)
 
@@ -714,6 +756,13 @@ def _summarize(accounts, trades, capital, ending, curve):
         "failed_account_count": sum(account.get("status") not in ("complete", "no_data", "no_bars_before_cutoff") for account in accounts),
         "no_data_account_count": sum(account.get("status") in ("no_data", "no_bars_before_cutoff") for account in accounts),
         "signal_count": sum(int(account.get("signal_count", 0)) for account in accounts),
+        "pattern_instance_event_count": sum(int(account.get("pattern_instance_event_count", 0)) for account in accounts),
+        "entry_event_count": sum(int(account.get("entry_event_count", 0)) for account in accounts),
+        "pattern_instance_state_counts": {
+            state: sum(int((account.get("pattern_instance_state_counts") or {}).get(state, 0))
+                       for account in accounts)
+            for state in sorted({state for account in accounts
+                                 for state in (account.get("pattern_instance_state_counts") or {})})},
         "distinct_traded_patterns": len(distinct_patterns),
         "multi_tag_trade_count": sum(len(set(trade.get("pattern_types", []))) > 1 for trade in trades),
         "starting_capital": capital,
@@ -728,19 +777,207 @@ def _group_metrics(rows):
     pnls = [float(row.get("pnl", 0)) for row in rows]
     wins = [pnl for pnl in pnls if pnl > 0]
     losses = -sum(pnl for pnl in pnls if pnl < 0)
+    exits = defaultdict(int)
+    for row in rows:
+        exits[str(row.get("exit_reason", "unknown"))] += 1
     return {"trade_count": len(rows), "net_pnl": sum(pnls),
             "win_rate": len(wins) / len(pnls) if pnls else None,
-            "profit_factor": sum(wins) / losses if losses else None}
+            "profit_factor": sum(wins) / losses if losses else None,
+            "expectancy": sum(pnls) / len(pnls) if pnls else None,
+            "average_holding_days": (sum(int(row.get("holding_days", 0)) for row in rows) / len(rows)
+                                     if rows else None),
+            "exit_reason_counts": dict(sorted(exits.items()))}
+
+
+def _case_chart_svg(bars, pattern, event, code):
+    """Render a small actual-OHLC case chart with frozen line and pivot anchors."""
+    if bars is None or bars.empty:
+        return None
+    bars = bars.reset_index(drop=True)
+    offset = int(pattern.get("chart_offset", 0) or 0)
+    points = pattern.get("key_points") or {}
+    anchors = []
+    for key, value in points.items():
+        if not re.fullmatch(r"pivot_\d+_index", key) or not isinstance(value, int):
+            continue
+        ordinal = int(re.search(r"\d+", key).group())
+        date_value = points.get(key.replace("_index", "_date"))
+        index = next((i for i, item in enumerate(bars.date)
+                      if date_value and pd.Timestamp(item).date().isoformat() == str(date_value)), value + offset)
+        if 0 <= index < len(bars):
+            price_value = points.get("pivot_%d" % ordinal, points.get("pivot_%d_price" % ordinal))
+            price = price_value.get("price") if isinstance(price_value, dict) else price_value
+            try:
+                anchors.append({"index": int(index), "price": float(price), "label": "P%d" % ordinal})
+            except (TypeError, ValueError):
+                continue
+    if not anchors:
+        return None
+    event_index = next((i for i, item in enumerate(bars.date)
+                        if pd.Timestamp(item).date().isoformat() == str(event.get("event_date"))), None)
+    first = max(0, min(point["index"] for point in anchors) - 18)
+    last = min(len(bars) - 1, max(max(point["index"] for point in anchors) + 20,
+                                  event_index if event_index is not None else 0))
+    if last - first > 100:
+        first = max(0, last - 100)
+    visible = bars.iloc[first:last + 1]
+    low = float(visible.low.min()); high = float(visible.high.max())
+    if not math.isfinite(low) or not math.isfinite(high):
+        return None
+    spread = high - low or max(abs(high) * 0.02, 0.01)
+    low -= spread * 0.08; high += spread * 0.08
+    width, height, left, top = 760, 210, 28, 20
+    plot_w, plot_h = width - 48, height - 50
+    x = lambda index: left + (index - first) * plot_w / max(last - first, 1)
+    y = lambda price: top + (high - price) * plot_h / (high - low)
+    pitch = plot_w / max(len(visible), 1)
+    candles = []
+    for index, row in visible.iterrows():
+        color = "#c84a46" if float(row.close) >= float(row.open) else "#168366"
+        xx = x(index); yo, yc = y(float(row.open)), y(float(row.close))
+        body_y = min(yo, yc); body_h = max(1.2, abs(yc - yo)); body_w = max(1.4, pitch * 0.56)
+        candles.append(f'<line x1="{xx:.2f}" y1="{y(float(row.high)):.2f}" x2="{xx:.2f}" y2="{y(float(row.low)):.2f}" stroke="{color}"/><rect x="{xx-body_w/2:.2f}" y="{body_y:.2f}" width="{body_w:.2f}" height="{body_h:.2f}" fill="{color}"/>')
+    geometry = event.get("frozen_geometry") or {}
+    line = geometry.get("neckline") or pattern.get("neckline") or {}
+    neckline = ""
+    if line and line.get("slope") is not None and line.get("intercept") is not None:
+        def line_y(index):
+            return y(float(line["slope"]) * (index - offset) + float(line["intercept"]))
+        neckline = f'<line x1="{x(first):.2f}" y1="{line_y(first):.2f}" x2="{x(last):.2f}" y2="{line_y(last):.2f}" stroke="#6756a5" stroke-width="2.5"/><text x="{left+4}" y="{max(12,line_y(first)-5):.2f}" fill="#6756a5" font-size="11">冻结边界</text>'
+    pivot_svg = "".join(f'<circle cx="{x(point["index"]):.2f}" cy="{y(point["price"]):.2f}" r="4" fill="#e1a12c"/><text x="{x(point["index"])+4:.2f}" y="{y(point["price"])-6:.2f}" font-size="10" fill="#684a12">{point["label"]}</text>' for point in anchors)
+    confirm = ""
+    if event_index is not None:
+        confirm = f'<line x1="{x(event_index):.2f}" y1="{top}" x2="{x(event_index):.2f}" y2="{top+plot_h}" stroke="#a53d62" stroke-dasharray="4 3"/><text x="{x(event_index)+3:.2f}" y="{top+12}" fill="#a53d62" font-size="10">{html.escape(str(event.get("state")))}</text>'
+    start_date = visible.date.iloc[0].date().isoformat(); end_date = visible.date.iloc[-1].date().isoformat()
+    return (f'<svg class="case-chart" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(str(code))} K线、冻结边界和结构点">'
+            f'<rect width="100%" height="100%" fill="#fbfcfd"/><line x1="{left}" y1="{top+plot_h}" x2="{left+plot_w}" y2="{top+plot_h}" stroke="#cbd5dc"/>'
+            f'{"".join(candles)}{neckline}{pivot_svg}{confirm}<text x="{left}" y="{height-10}" font-size="10" fill="#61717d">{start_date} — {end_date}</text></svg>')
+
+
+def _report_event_cases(payload):
+    """Read a small, traceable set of account event timelines for the HTML report."""
+    accounts = list(payload.get("account_summaries", []))
+    by_key = {(row.get("kind"), str(row.get("code"))): row for row in accounts}
+    selected = []
+    for key in (("stock", "000538"), ("stock", "600108"), ("etf", "159718"), ("etf", "516630")):
+        row = by_key.get(key)
+        if row:
+            selected.append(row)
+    for row in sorted(accounts, key=lambda item: (-int(item.get("pattern_instance_event_count", 0)),
+                                                   item.get("kind", ""), item.get("code", ""))):
+        if row not in selected and int(row.get("pattern_instance_event_count", 0)):
+            selected.append(row)
+        if len(selected) >= 8:
+            break
+    cases = []
+    root = Path(__file__).resolve().parents[2]
+    instruments = {(item.kind, str(item.code)): item for item in discover_instruments(root)}
+    bars_by_key = {}
+    for row in selected[:8]:
+        try:
+            with open(row["account_json"], encoding="utf-8") as handle:
+                account = json.load(handle)
+        except (OSError, ValueError, KeyError):
+            continue
+        events = account.get("instance_events", [])
+        metadata_by_event = {(str(item.get("instance_id")), int(item.get("event_seq", 0))): item
+                             for item in account.get("pattern_instance_metadata", [])}
+        timeline = []
+        chart_svg = None
+        chart_notice = None
+        for event in events[:200]:
+            pattern = event.get("pattern") or {}
+            from .pattern_instances import derive_instance_metadata
+            contract = metadata_by_event.get((str(event.get("instance_id")), int(event.get("event_seq", 0))))
+            if contract is None:
+                contract = derive_instance_metadata(event)
+            if chart_svg is None and chart_notice is None and pattern.get("key_points"):
+                key = (row.get("kind"), str(row.get("code")))
+                try:
+                    if key not in bars_by_key:
+                        instrument = instruments.get(key)
+                        loaded = load_research_bars(instrument, root=root) if instrument else None
+                        frame = loaded["bars"] if loaded else pd.DataFrame()
+                        cutoff = payload.get("date_to") or (payload.get("parameters") or {}).get("date_to")
+                        if cutoff and not frame.empty:
+                            frame = frame.loc[frame.date.dt.date <= date.fromisoformat(str(cutoff))].copy()
+                        bars_by_key[key] = (frame, loaded.get("data_revision") if loaded else None)
+                    frame, current_revision = bars_by_key[key]
+                    expected_revision = (row.get("provenance") or {}).get("data_revision")
+                    if expected_revision and current_revision and expected_revision == current_revision:
+                        chart_svg = _case_chart_svg(frame, pattern, event, row.get("code"))
+                        if chart_svg is None:
+                            chart_notice = "账户行情修订一致，但该事件缺少可绘制的结构锚点。"
+                    else:
+                        chart_notice = ("行情版本不一致，未将当前 CSV 绘成回测证据。账户修订：%s；当前修订：%s。" %
+                                        (expected_revision or "未记录", current_revision or "不可用"))
+                except (OSError, ValueError, KeyError, TypeError):
+                    chart_svg = None
+                    chart_notice = "无法核对回测时点行情版本，已隐藏当前行情图。"
+            evidence = {item.get("code"): item.get("value") for item in pattern.get("evidence", [])
+                        if isinstance(item, dict)}
+            selection = evidence.get("neckline_selection") or {}
+            geometry = event.get("frozen_geometry") or {}
+            timeline.append({"instance_id": event.get("instance_id"),
+                             "event_id": event.get("event_id"),
+                             "event_seq": event.get("event_seq"),
+                             "event_date": event.get("event_date"),
+                             "state": event.get("state"),
+                             "entry_eligible": bool(event.get("entry_eligible")),
+                             "pattern_type": pattern.get("pattern_type"),
+                             "structure_key": contract.get("structure_key"),
+                             "boundary_version_id": contract.get("boundary_version_id"),
+                             "paired_at": contract.get("paired_at"),
+                             "state_at": contract.get("state_at"),
+                             "selection_reason": contract.get("selection_reason"),
+                             "metadata_source": contract.get("metadata_source"),
+                             "boundary_id": selection.get("selected_candidate_id"),
+                             "frozen_line": geometry.get("neckline") or pattern.get("neckline")})
+        cases.append({"code": row.get("code"), "kind": row.get("kind"),
+                      "account_json_relative": row.get("account_json_relative"),
+                      "events": timeline, "chart_svg": chart_svg,
+                      "chart_notice": chart_notice})
+    return cases
 
 
 def _report_html(payload):
-    embedded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    data = dict(payload)
+    data["event_cases"] = _report_event_cases(payload)
+    embedded = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=_json_default).replace("</", "<\\/")
     summary = payload["summary"]
     cards = "".join("<article><b>%s</b><span>%s</span></article>" %
-                    (html.escape(str(summary[key])), html.escape(label))
-                    for key, label in (("account_count", "账户数"), ("trade_count", "成交数"),
+                    (html.escape(str(summary.get(key, "—"))), html.escape(label))
+                    for key, label in (("account_count", "账户数"),
+                                       ("pattern_instance_event_count", "形态状态事件"),
+                                       ("entry_event_count", "首次突破买入事件"),
+                                       ("trade_count", "成交数"), ("net_pnl", "净盈亏"),
+                                       ("expectancy", "净期望 / 平均单笔"),
+                                       ("profit_factor", "盈利因子"),
+                                       ("average_holding_days", "平均持有天数"),
                                        ("cumulative_return", "累计收益率"), ("maximum_drawdown", "最大回撤")))
-    return """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>固定日线研究报告</title><style>body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:30px auto;padding:0 16px;color:#182230;background:#f5f7fa}h1{font-size:24px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}article,section{padding:14px;background:white;border:1px solid #dde3e9;border-radius:8px}article b{display:block;font-size:22px}section{margin-top:14px}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%%}td,th{text-align:left;padding:7px;border-bottom:1px solid #e7eaee}</style><main><h1>固定日线研究报告</h1><p>本地固定股票与 ETF 样本；每个标的独立账户，统一报告按已完成交易汇总。</p><div class="cards">%s</div><section><h2>分组结果</h2><pre id="groups"></pre></section><section><h2>账户和数据版本</h2><div id="accounts"></div></section></main><script type="application/json" id="data">%s</script><script>const d=JSON.parse(document.getElementById('data').textContent);document.getElementById('groups').textContent=JSON.stringify(d.groups,null,2);document.getElementById('accounts').innerHTML='<table><thead><tr><th>标的</th><th>类型</th><th>状态</th><th>信号</th><th>交易</th><th>数据修订</th><th>账户文件</th></tr></thead><tbody>'+d.account_summaries.map(a=>'<tr><td>'+a.code+'</td><td>'+a.kind+'</td><td>'+a.status+'</td><td>'+a.signal_count+'</td><td>'+a.trade_count+'</td><td>'+((a.provenance||{}).data_revision||'')+'</td><td><a href="'+a.account_json_relative+'">JSON</a></td></tr>').join('')+'</tbody></table>'</script></html>""" % (cards, embedded)
+    template = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>固定日线研究报告</title><style>
+      body{font:15px/1.5 system-ui,sans-serif;max-width:1280px;margin:28px auto;padding:0 16px;color:#182230;background:#f5f7fa}h1{font-size:25px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}article,section{padding:14px;background:white;border:1px solid #dde3e9;border-radius:8px}article b{display:block;font-size:22px}section{margin-top:14px}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:7px;border-bottom:1px solid #e7eaee;vertical-align:top}th{background:#f4f7f9;position:sticky;top:0}td{font-size:13px}.scroll{overflow:auto;max-height:560px}.muted{color:#62717c;font-size:13px}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px}.meta div{padding:7px;background:#f6f9fa;border-radius:5px}.case{margin:10px 0;border:1px solid #dce3e9;border-radius:7px;padding:10px}.case summary{cursor:pointer;font-weight:700}.state{font-weight:700}.BUY{color:#176848}.invalidated{color:#a23a38}.focus{color:#58488f}.fail{color:#a23a38}.groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.case-chart{display:block;width:min(100%,760px);height:auto;margin:10px 0;border:1px solid #e0e6eb;border-radius:5px}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:#176b87}</style></head><body><main>
+      <h1>固定日线研究报告</h1><p>冻结股票/ETF样本，逐标的独立账户回放。实例事件保存了结构快照、配对冻结边界、首次确认和后续状态。</p>
+      <div class="cards">__CARDS__</div><section><h2>版本、数据范围与运行方式</h2><div id="meta" class="meta"></div></section>
+      <section><h2>股票 / ETF 与形态分组</h2><div id="groups" class="groups"></div></section>
+      <section><h2>实例事件时间线（点击账户看完整事件）</h2><div id="cases"></div></section>
+      <section><h2>账户明细与版本</h2><div id="accounts" class="scroll"></div></section>
+      <section><h2>运行耗时、内存和失败明细</h2><div id="runtime"></div><div id="failures"></div></section>
+      </main><script type="application/json" id="data">__DATA__</script><script>
+      const d=JSON.parse(document.getElementById('data').textContent),esc=v=>String(v??'—').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c])),pct=v=>v==null?'—':(Number(v)*100).toFixed(2)+'%';
+      const meta=d.universe||{},p=d.parameters||{},versions=d.versions||{};
+      const im=d.instance_metadata||{};
+      document.getElementById('meta').innerHTML=[['样本',`${esc(meta.id)} · 股票 ${esc(meta.stock_count)} / ETF ${esc(meta.etf_count)} · 账号 ${esc(meta.selected_account_count)}`],['数据截止',`${esc(p.date_to||d.date_to)}${p.trade_start?' · 交易起点 '+esc(p.trade_start):''}`],['识别引擎',`${esc(p.recognizer)} · ${esc(d.engine_version)} · 规则 ${esc(d.source_rule_version)}`],['策略 / 识别版本',`${esc(d.strategy_version)} / ${esc(d.recognizer_version)}`],['数据版本',esc(JSON.stringify(versions))],['事件元数据',`${esc(im.schema_version||'run完成后生成')} · ${esc(im.event_count||0)}条 · 原始schema ${esc(im.source_event_schema_version||'native')} · 派生 ${esc(im.derived_event_count||0)} / 原生 ${esc(im.native_event_count||0)} · 原始事件未改写`],['运行状态',`${esc(d.status)} · run ${esc(d.run_id)}`]].map(([k,v])=>`<div><b>${k}</b><br>${v}</div>`).join('');
+      const exitCounts=m=>Object.entries(m.exit_reason_counts||{}).map(([reason,count])=>`${esc(reason)} ${esc(count)}`).join('、')||'—';
+      const metric=(m)=>`交易 ${esc(m.trade_count)} · 净盈亏 ${esc(m.net_pnl)} · 净期望/平均单笔 ${esc(m.expectancy)} · 胜率 ${pct(m.win_rate)} · 盈利因子 ${esc(m.profit_factor)} · 平均持有 ${esc(m.average_holding_days)} 天 · 退出 ${exitCounts(m)}`;
+      const kindNames={stock:'股票',etf:'ETF'},shapeNames={w_bottom:'W底',inverse_head_shoulders:'头肩底',triangle_bottom:'三角形底部',bull_flag:'上升旗形'};
+      document.getElementById('groups').innerHTML=Object.entries(d.groups||{}).map(([group,values])=>`<div><h3>${group==='kind'?'标的类型':'形态类型'}</h3><table><thead><tr><th>分组</th><th>结果</th></tr></thead><tbody>${Object.entries(values||{}).map(([key,value])=>`<tr><td>${esc(group==='kind'?(kindNames[key]||key):(shapeNames[key]||key))}</td><td>${metric(value)}</td></tr>`).join('')}</tbody></table></div>`).join('');
+      document.getElementById('cases').innerHTML=(d.event_cases||[]).map(c=>`<details class="case"><summary>${esc(c.code)} · ${esc(kindNames[c.kind]||c.kind)} · ${c.events.length} 事件 <a href="${esc(c.account_json_relative)}">账户完整记录</a></summary>${c.chart_svg||''}${c.chart_notice?`<p class="muted">${esc(c.chart_notice)}</p>`:''}<div class="scroll"><table><thead><tr><th>序号 / 日期 / event ID</th><th>实例 / 结构键</th><th>形态 / 状态</th><th>BUY</th><th>边界版本 / 配对时间</th><th>选择原因 / 元数据来源</th><th>冻结线</th></tr></thead><tbody>${c.events.map(e=>`<tr><td>${esc(e.event_seq)} · ${esc(e.event_date)}<div title="${esc(e.event_id)}">${esc(e.event_id)}</div></td><td>${esc(e.instance_id)}<div>${esc(e.structure_key)}</div></td><td>${esc(shapeNames[e.pattern_type]||e.pattern_type)} · <span class="state ${esc(e.state)}">${esc(e.state)}</span></td><td>${e.entry_eligible?'BUY':'—'}</td><td>${esc(e.boundary_version_id)}<div>${esc(e.paired_at)} → ${esc(e.state_at)}</div></td><td>${esc(e.selection_reason)}<div>${esc(e.metadata_source)}</div></td><td>${esc(JSON.stringify(e.frozen_line))}</td></tr>`).join('')}</tbody></table></div></details>`).join('')||'<p class="muted">当前没有可展示的账户事件记录。</p>';
+      document.getElementById('accounts').innerHTML='<table><thead><tr><th>标的</th><th>类型</th><th>状态 / 失败原因</th><th>信号 / 交易</th><th>实例事件 / 首次买入</th><th>旁路元数据</th><th>识别引擎 / 规则</th><th>数据修订</th><th>账户事件和交易明细</th></tr></thead><tbody>'+d.account_summaries.map(a=>`<tr><td>${esc(a.code)}</td><td>${esc(kindNames[a.kind]||a.kind)}</td><td>${esc(a.status)}${a.error?'<div class="fail">'+esc(a.error)+'</div>':''}</td><td>${esc(a.signal_count)} / ${esc(a.trade_count)}</td><td>${esc(a.pattern_instance_event_count)} / ${esc(a.entry_event_count)}</td><td>${esc(a.pattern_instance_metadata_count)}</td><td>${esc(a.recognizer)}<div>${esc(a.engine_version)} · ${esc(a.source_rule_version)}</div></td><td>${esc(a.provenance?.data_revision)}</td><td><a href="${esc(a.account_json_relative)}">JSON</a></td></tr>`).join('')+'</tbody></table>';
+      document.getElementById('runtime').innerHTML=`<div class="meta"><div>总耗时：${esc(d.timings?.total_seconds)} 秒</div><div>读数据：${esc(d.timings?.load_seconds)} 秒</div><div>识别：${esc(d.timings?.recognition_seconds)} 秒</div><div>回放：${esc(d.timings?.backtrader_seconds)} 秒</div><div>峰值内存：${esc(d.memory?.rss_peak_bytes)} bytes</div><div>完成账号：${esc(d.summary?.successful_account_count)} / ${esc(d.summary?.account_count)}</div><div>失败账号：${esc(d.summary?.failed_account_count)} · 无数据：${esc(d.summary?.no_data_account_count)}</div></div>`;
+      document.getElementById('failures').innerHTML=(d.errors||[]).length?'<h3>失败明细</h3><table><thead><tr><th>标的</th><th>类型</th><th>原因</th></tr></thead><tbody>'+d.errors.map(e=>`<tr><td>${esc(e.code)}</td><td>${esc(kindNames[e.kind]||e.kind)}</td><td class="fail">${esc(e.error)}</td></tr>`).join('')+'</tbody></table>':'<p>没有失败账号。</p>';
+      </script></body></html>"""
+    return template.replace("__CARDS__", cards).replace("__DATA__", embedded)
 
 
 def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade_start=None,
@@ -898,9 +1135,14 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
         code, kind = str(account["code"]), str(account["kind"])
         safe_code = re.sub(r"[^A-Za-z0-9_-]", "_", code)
         account_path = account_dir / ("%s-%s.json" % (kind, safe_code))
+        account["run_id"] = run_id
         account.setdefault("recognizer", recognizer)
         _stamp_recognition_experiment(account, recognition_config)
         _finalize_account(account)
+        account["pattern_instance_metadata"] = _account_instance_metadata(account)
+        from .store import save_pattern_instance_events, save_pattern_instance_metadata
+        save_pattern_instance_events(run_id, code, kind, account.get("instance_events", []))
+        save_pattern_instance_metadata(run_id, code, kind, account["pattern_instance_metadata"])
         _atomic_write(account_path, json.dumps(account, ensure_ascii=False, indent=2, default=_json_default))
         accept_summary(_account_summary_row(account, account_path, output_dir))
 
@@ -908,6 +1150,7 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
         return {"code": code, "kind": kind, "status": status,
                 "starting_cash": STARTING_CASH, "ending_equity": STARTING_CASH,
                 "signals": list(signals or []), "trades": [], "daily_equity": [],
+                "instance_events": [], "entry_events": [],
                 "rejections": [], "order_events": [], "provenance": provenance or {},
                 "accounting_checks": {"cash_plus_position_equals_equity": True,
                                       "realized_pnl_matches_ending_equity": True},
@@ -957,7 +1200,7 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
                         future = executor.submit(_complete_account_task, instrument, str(root), date_to,
                                                  trade_start, str(account_path), recognizer,
                                                  str(signal_cache_dir) if signal_cache_dir is not None else None,
-                                                 recognition_config, require_signal_cache)
+                                                 recognition_config, require_signal_cache, run_id)
                     else:
                         future = executor.submit(_prepare_account, instrument, root, date_to, trade_start,
                                                  callback, recognizer, signal_cache_dir, recognition_config,

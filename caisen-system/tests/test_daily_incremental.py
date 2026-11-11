@@ -6,7 +6,8 @@ from caisen.daily_incremental import DailyRecognitionSession, generate_daily_sig
 from caisen.main_bottoms import MAIN_RULES
 
 
-def test_session_one_atr_reference_is_causal_and_emits_each_confirmation_once(monkeypatch):
+def test_session_one_atr_changed_neckline_can_emit_new_instance_entry(monkeypatch):
+    # Legacy diagnostic sensitivity only; production recognition uses 2 ATR.
     monkeypatch.setitem(MAIN_RULES["neckline_tests"], "candidate_reversal_atr_multiple", 1.0)
     source = Path(__file__).parents[2] / "data" / "etfs" / "159718.csv"
     bars = pd.read_csv(source, parse_dates=["date"])
@@ -19,14 +20,29 @@ def test_session_one_atr_reference_is_causal_and_emits_each_confirmation_once(mo
         signals.extend(emitted)
         assert all(item["signal_date"] <= str(pd.Timestamp(bar["date"]).date()) for item in emitted)
 
-    breakout = [item for item in signals if item["signal_date"] == "2025-05-29"]
-    assert len(breakout) == 1
-    assert breakout[0]["entry_date"] is None
-    assert "inverse_head_shoulders" in breakout[0]["pattern_types"]
-    assert sum(item["signal_date"] == "2025-05-29" for item in signals) == 1
+    # Revisions share bottom/shoulder anchors but own a distinct frozen line
+    # and can confirm only after that line is known.
+    revised = [item for item in signals
+               if item["signal_date"] in {"2025-05-21", "2025-05-29"}
+               and "inverse_head_shoulders" in item["pattern_types"]]
+    assert [item["signal_date"] for item in revised] == ["2025-05-21", "2025-05-29"]
+    first_signal = next(item for item in signals if item["signal_date"] == "2025-04-01"
+                        and "inverse_head_shoulders" in item["pattern_types"])
+    first_ids = {pattern["pattern_id"] for pattern in first_signal["patterns"]
+                 if pattern["pattern_type"] == "inverse_head_shoulders"}
+    assert all(not (first_ids & set(item["pattern_ids"])) for item in revised)
+    revised_entries = [event for event in session.instance_events()
+                       if event["entry_eligible"]
+                       and event["instance_id"] not in first_ids
+                       and event["pattern"].get("pattern_type") == "inverse_head_shoulders"
+                       and [event["pattern"]["key_points"].get(f"pivot_{number}_date")
+                            for number in (1, 2, 3)] == [
+                                "2023-08-22", "2024-04-19", "2025-01-13"]]
+    assert {event["event_date"] for event in revised_entries} == {
+        "2025-05-21", "2025-05-29"}
 
 
-def test_session_consumes_159718_same_ihs_boundary_after_earlier_mature_cross():
+def test_session_suppresses_nested_159718_ihs_and_allows_same_anchor_line_revision():
     source = Path(__file__).parents[2] / "data" / "etfs" / "159718.csv"
     bars = pd.read_csv(source, parse_dates=["date"])
     bars = bars[bars.date <= "2025-05-30"].reset_index(drop=True)
@@ -39,43 +55,47 @@ def test_session_consumes_159718_same_ihs_boundary_after_earlier_mature_cross():
 
     assert any(item["signal_date"] == "2025-04-01"
                and "inverse_head_shoulders" in item["pattern_types"] for item in signals)
-    assert not any(item["signal_date"] == "2025-05-21"
+    revised_signal = next(item for item in signals
+                          if item["signal_date"] == "2025-05-21"
+                          and "inverse_head_shoulders" in item["pattern_types"])
+    assert not any(item["signal_date"] == "2025-05-29"
                    and "inverse_head_shoulders" in item["pattern_types"] for item in signals)
-    assert any(item["signal_date"] == "2025-05-29"
-               and "w_bottom" in item["pattern_types"] for item in signals)
-
-    dates = bars.date.dt.date.astype(str).tolist()
-    consumed_key = next(key for key in session.consumed_neckline_phases
-                        if key[0] == "inverse_head_shoulders"
-                        and [dates[int(index)] for index, _kind in key[1]] ==
-                        ["2023-09-22", "2024-02-05", "2024-11-22"])
-    earlier_phase = next(phase for phase in session.consumed_neckline_phases[consumed_key]
-                         if dates[phase["consumed_index"]] == "2025-04-01")
-    assert earlier_phase["line"] == {
-        "slope": -0.00024299065420560769,
-        "intercept": 0.9125607476635516,
-    }
-    later_boundary = {
-        "line": {"slope": -0.0002826747720364741,
-                 "intercept": 0.9492036474164133},
-        "tests": [{"pivot_index": index, "tolerance": 0.02,
-                   "coverage_start_index": 450, "coverage_end_index": 779}
-                  for index in (450, 669, 779)],
-    }
-    from caisen.main_bottoms import _same_neckline_boundary_phase
-    assert _same_neckline_boundary_phase(earlier_phase, later_boundary, tick_size=0.01)
-    may_21 = dates.index("2025-05-21")
-    assert bars.close.iloc[may_21] == 0.744
+    first_ihs_signal = next(item for item in signals
+                           if item["signal_date"] == "2025-04-01"
+                           and "inverse_head_shoulders" in item["pattern_types"])
+    ihs_ids = {pattern["pattern_id"] for pattern in first_ihs_signal["patterns"]
+               if pattern["pattern_type"] == "inverse_head_shoulders"}
+    same_instance_confirmations = [event for event in session.instance_events()
+        if event["instance_id"] in ihs_ids and event["state"] == "confirmed"
+        and event["entry_eligible"]]
+    # Each independently frozen boundary keeps its own instance. The changed
+    # boundary gets fresh IDs and its own post-freeze BUY; strictly contained
+    # candidates remain suppressed.
+    assert len(ihs_ids) == 3
+    assert {event["instance_id"] for event in same_instance_confirmations} == ihs_ids
+    assert [event["event_date"] for event in same_instance_confirmations] == ["2025-04-01"] * 3
+    assert [item["signal_date"] for item in signals
+            if ihs_ids.intersection(item["pattern_ids"])] == ["2025-04-01"]
+    revised_ids = {pattern["pattern_id"] for pattern in revised_signal["patterns"]
+                   if pattern["pattern_type"] == "inverse_head_shoulders"}
+    assert len(revised_ids) == 3
+    assert not (ihs_ids & revised_ids)
+    revised_confirmations = [event for event in session.instance_events()
+        if event["instance_id"] in revised_ids and event["state"] == "confirmed"
+        and event["entry_eligible"]]
+    assert {event["instance_id"] for event in revised_confirmations} == revised_ids
+    assert [event["event_date"] for event in revised_confirmations] == ["2025-05-21"] * 3
 
 
 
 def test_batch_final_day_signal_has_no_entry_session():
-    source = Path(__file__).parents[2] / "data" / "stocks" / "600108.csv"
+    # Use a confirmed case independent of the pending 600108 boundary review.
+    source = Path(__file__).parents[2] / "data" / "etfs" / "159718.csv"
     bars = pd.read_csv(source, parse_dates=["date"])
-    bars = bars[bars.date <= "2026-01-09"].reset_index(drop=True)
+    bars = bars[bars.date <= "2025-04-01"].reset_index(drop=True)
 
-    signals = generate_daily_signals(bars, "600108", "stock")
-    signal = next(item for item in signals if item["signal_date"] == "2026-01-09")
+    signals = generate_daily_signals(bars, "159718", "etf")
+    signal = next(item for item in signals if item["signal_date"] == "2025-04-01")
 
     assert signal["entry_date"] is None
     assert signal["pattern_types"]
@@ -123,13 +143,13 @@ def test_boundary_first_dispatch_is_explicit_and_reports_pair_reuse():
                                      performance=performance)
 
     assert signals == []
-    assert performance["engine_version"] == "caisen-daily-boundary-first-v3"
+    assert performance["engine_version"] == "caisen-daily-boundary-first-v16"
     assert performance["boundary_pairs_generated"] == 0
     assert performance["boundary_pairs_reused"] == 0
     assert performance["coverage_checks"] == 0
 
 
-def test_boundary_first_preserves_v7_signal_payload_on_a_long_history_prefix():
+def test_boundary_first_preserves_long_history_signal_identity_with_anchor_coverage_mode():
     source = Path(__file__).parents[2] / "data" / "stocks" / "600108.csv"
     bars = pd.read_csv(source, parse_dates=["date"]).iloc[:1200].reset_index(drop=True)
     performance = {}
@@ -139,16 +159,38 @@ def test_boundary_first_preserves_v7_signal_payload_on_a_long_history_prefix():
     accelerated = generate_daily_signals(bars, "600108", "stock",
                                          recognizer="boundary_first", performance=performance)
 
-    assert accelerated == reference
-    # Three v8 outputs are intentionally retired: the Mar 13 triangle repeats
-    # the Feb 25 consumed neckline phase; the Jun 28 W first crossed before its
-    # six-month maturity; and the Dec 7 W recrosses its Jun 21 premature break.
-    assert [item["signal_date"] for item in accelerated] == ["1998-02-25", "2002-06-24"]
+    # Anchor-only coverage changes the evidence payload and may admit candidates
+    # that the full-interval reference rejects. For this known 600108 prefix,
+    # the signal identity and execution dates remain the same.
+    assert [(item["signal_date"], item["entry_date"], item["pattern_ids"],
+             item["pattern_types"]) for item in accelerated] == [
+        (item["signal_date"], item["entry_date"], item["pattern_ids"],
+         item["pattern_types"]) for item in reference]
+    assert [item["signal_date"] for item in accelerated] == ["1999-06-28", "2002-06-24"]
     assert performance["boundary_pairs_generated"] > 0
     assert performance["boundary_pairs_reused"] > 0
     assert performance["coverage_checks"] > 0
     assert performance["coverage_reused"] > 0
     assert performance["candidate_refreshes"] < reference_performance["candidate_refreshes"]
+
+
+def test_516630_w_boundary_freezes_only_after_the_structure_is_known():
+    source = Path(__file__).parents[2] / "data" / "etfs" / "516630.csv"
+    bars = pd.read_csv(source, parse_dates=["date"])
+    bars = bars[bars.date <= "2024-10-08"].reset_index(drop=True)
+
+    signals = generate_daily_signals(
+        bars, "516630", "etf", recognizer="boundary_first")
+
+    signal = next(item for item in signals if item["signal_date"] == "2024-10-08")
+    w = next(item for item in signal["patterns"] if item["pattern_type"] == "w_bottom"
+             and item["key_points"].get("pivot_1_date") == "2024-02-05"
+             and item["key_points"].get("pivot_2_date") == "2024-09-09")
+    selection = {item["code"]: item["value"] for item in w["evidence"]
+                 if isinstance(item, dict)}["neckline_selection"]
+
+    assert selection["line_frozen_at"] == selection["structure_known_at"]
+    assert selection["line_frozen_at"] == "2024-09-20"
 
 
 def test_boundary_first_prefix_events_do_not_change_after_appending_future_bars():

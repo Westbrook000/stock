@@ -3,7 +3,7 @@
   const mainLabels={w_bottom:['左底','右底'],inverse_head_shoulders:['左肩','头部','右肩'],triangle_bottom:['左底','上折点1','中底','上折点2','右底']};
   function patternGeometry(data,pattern){
     const bars=data._bars||[],offset=Number.isInteger(pattern.chart_offset)?pattern.chart_offset:(data._chart_offset||0),points=pattern.key_points||{};
-    const main=Boolean((pattern.evidence||[]).some(item=>item.code==='main_structure'&&item.value?.role==='main'));
+    const main=Boolean(pattern.is_main_structure||pattern.selected_main||(pattern.evidence||[]).some(item=>item.code==='main_structure'&&item.value?.role==='main'));
     const pointLabels=main?mainLabels[pattern.pattern_type]:labels[pattern.pattern_type];
     const byDate=new Map(bars.map((bar,i)=>[bar.date,i]));
     const indexOf=(value)=>value?.date?byDate.get(value.date):(Number.isInteger(value?.index)?value.index+offset:undefined);
@@ -18,7 +18,7 @@
     const ci=pattern.confirmation_date?byDate.get(pattern.confirmation_date):undefined;
     if(ci!==undefined&&confirmation!==false)markers.push({index:ci,price:bars[ci].close,name:'价格确认'});
     const terminalNames={target_reached:'目标已达',structure_invalidation:'结构失效',neckline_invalidation:'颈线失效',neckline_projection_invalidation:'颈线失效',followthrough_confirmed:'后续边界确认'};
-    for(const e of evidence){if(!terminalNames[e.code])continue;const index=indexOf(e.value);if(index===undefined||!bars[index])throw new Error('缺少该形态结束位置的K线');markers.push({index,price:Number(e.value.price??e.value.level??bars[index].close),name:terminalNames[e.code]})}
+    for(const e of evidence){if(!terminalNames[e.code])continue;const value=e.value,date=typeof value?.date==='string'?value.date.trim():'';if(!date)continue;const index=byDate.get(date);if(index===undefined||!bars[index])throw new Error('缺少该形态结束位置的K线');markers.push({index,price:Number(value.price??value.level??bars[index].close),name:terminalNames[e.code]})}
     for(const e of evidence){
       const value=e.value||{};
       const tests=e.code==='neckline_test'?[value]:e.code==='neckline_tests'?(Array.isArray(value)?value:[]):[];
@@ -26,6 +26,13 @@
       if(e.code==='neckline_selection'){for(const test of value.older_pressure_tests||[]){const index=byDate.get(test.date);if(index!==undefined)markers.push({index,price:Number(test.level??bars[index].close),name:'更早压力参考'})}}
       if(e.code==='neckline_breakout'){const index=byDate.get(value.date);if(index!==undefined&&!markers.some(marker=>marker.index===index&&marker.name.includes('确认')))markers.push({index,price:Number(value.close??bars[index].close),name:'颈线收盘确认'})}
       if(e.code==='weak_crossings'){for(const crossing of Array.isArray(value)?value:[]){const index=byDate.get(crossing.date);if(index!==undefined)markers.push({index,price:Number(crossing.close??crossing.price??bars[index].close),name:'弱穿越'})}}
+    }
+    for(const event of instanceLifecycle(pattern)){
+      const index=byDate.get(event.date);
+      if(index===undefined||!bars[index])continue;
+      const frozen=event.kind==='boundary_frozen'&&pattern.neckline;
+      const price=frozen?Number(pattern.neckline.slope)*(index-offset)+Number(pattern.neckline.intercept):Number(bars[index].close);
+      markers.push({index,price,name:event.label,event_id:event.event_id||null,instance_id:event.instance_id});
     }
     if(pattern.state==='invalidated'&&!markers.some(m=>m.name.includes('失效'))){
       const value=evidence.find(e=>e.code==='data_discontinuity')?.value,index=indexOf(value);
@@ -50,8 +57,11 @@
         {index:from,price:priceAt(from)},{index:to,price:priceAt(to)}
       ]});
       neckline=[];boundaries.length=0;
-      if(coverageEndIndex>=startIndex)boundaries.push(makeSegment(startIndex,coverageEndIndex,'已验证压力区间','#5d4eaa',3,'solid'));
+      if(lineFrozenIndex>=startIndex)boundaries.push(makeSegment(startIndex,lineFrozenIndex,'有效颈线至冻结','#5d4eaa',3,'solid'));
       if(projectedEnd>lineFrozenIndex)boundaries.push(makeSegment(lineFrozenIndex,projectedEnd,'冻结颈线延伸','#7b73ae',2,'dashed'));
+      for(const [index,name] of [[startIndex,'颈线有效起点'],[lineFrozenIndex,'颈线冻结日'],[projectedEnd,eventEnd===undefined?'观察日':'确认日']]){
+        if(bars[index])markers.push({index,price:priceAt(index),name:`${name} ${bars[index].date}`});
+      }
       for(const candidate of (selection.candidates||[]).filter(item=>!item.selected).slice(0,3)){
         const from=byDate.get(candidate.coverage_start_date),to=byDate.get(candidate.coverage_end_date);
         if(from===undefined||to===undefined||to<from||!candidate.line)continue;
@@ -84,5 +94,62 @@
     if(Number.isFinite(Number(mainStructure.neckline))&&!pattern.neckline)boundaries.push({name:'冻结颈线',points:[{index:start,price:Number(mainStructure.neckline)},{index:end,price:Number(mainStructure.neckline)}]});
     return {anchors,markers,neckline,boundaries,start,end,first:Math.max(0,start-pad),last:Math.min(bars.length-1,end+pad)};
   }
-  return {patternGeometry};
+  function clipPoints(points,first,last){
+    if(!points?.length)return [];
+    if(points.length===1)return points[0].index>=first&&points[0].index<=last?[points[0]]:[];
+    const clipped=[];
+    for(let i=1;i<points.length;i++){
+      const a=points[i-1],b=points[i],low=Math.max(first,Math.min(a.index,b.index)),high=Math.min(last,Math.max(a.index,b.index));
+      if(low>high)continue;
+      const at=index=>({index,price:a.price+(b.price-a.price)*(index-a.index)/(b.index-a.index||1)});
+      const start=at(low),end=at(high);
+      if(!clipped.length||clipped.at(-1).index!==start.index)clipped.push(start);
+      if(clipped.at(-1).index!==end.index)clipped.push(end);
+    }
+    return clipped;
+  }
+  function mainOverlays(geometry){
+    const boundaries=(geometry.boundaries||[]).filter(item=>['有效颈线至冻结','冻结颈线延伸','颈线 / 边界'].includes(item.name));
+    const markers=(geometry.markers||[]).filter(item=>item.instance_id||/^(颈线有效起点|颈线冻结日|确认日|观察日) /.test(item.name)||item.name==='价格确认'||item.name==='颈线收盘确认');
+    return {boundaries,markers};
+  }
+  function instanceLifecycle(pattern){
+    const events=[...(pattern.instance_state_events||[])].sort((a,b)=>Number(a.event_seq||0)-Number(b.event_seq||0));
+    if(!events.length)return [];
+    const instanceId=pattern.pattern_instance_id||events[0].instance_id||pattern.pattern_id;
+    const first=events[0],items=[{kind:'discovered',date:first.event_date,
+      label:'实例发现',instance_id:instanceId,event_id:first.event_id,event_seq:first.event_seq}];
+    const evidence=pattern.evidence||[],selection=evidence.find(item=>item.code==='neckline_selection')?.value||{};
+    const flagGeometry=evidence.find(item=>item.code==='flag_geometry')?.value||{};
+    const freezeDate=pattern.paired_at||selection.line_frozen_at||selection.freeze_date||flagGeometry.known_at;
+    if(freezeDate)items.push({kind:'boundary_frozen',date:freezeDate,label:'结构与边界配对冻结',
+      instance_id:instanceId,boundary_id:pattern.boundary_version_id||selection.selected_candidate_id||flagGeometry.geometry_id||instanceId,
+      structure_key:pattern.structure_key,selection_reason:pattern.selection_reason});
+    for(const event of events){
+      if(event.event_type==='weak_crossing')items.push({kind:'weak_crossing',date:event.event_date,
+        label:'颈线弱越线 · 继续等待',instance_id:instanceId,event_id:event.event_id,event_seq:event.event_seq});
+      else if(event.state==='confirmed')items.push({kind:'confirmed',date:event.event_date,
+        label:event.entry_eligible?'首次突破确认 · BUY':'首次突破确认',instance_id:instanceId,
+        event_id:event.event_id,event_seq:event.event_seq,entry_eligible:event.entry_eligible});
+      else if(event.state==='focus')items.push({kind:'focus',date:event.event_date,
+        label:'突破后回落 · 颈线关注',instance_id:instanceId,event_id:event.event_id,event_seq:event.event_seq});
+      else if(event.state==='invalidated')items.push({kind:'invalidated',date:event.event_date,
+        label:'失效终态',instance_id:instanceId,event_id:event.event_id,event_seq:event.event_seq});
+      else if(event.state==='target_reached')items.push({kind:'target_reached',date:event.event_date,
+        label:'测幅目标到达 · 生命周期终态',instance_id:instanceId,event_id:event.event_id,event_seq:event.event_seq});
+    }
+    const order={discovered:0,boundary_frozen:1,weak_crossing:2,confirmed:3,focus:4,invalidated:5,target_reached:6};
+    return items.filter(item=>item.date).sort((a,b)=>String(a.date).localeCompare(String(b.date))||order[a.kind]-order[b.kind]);
+  }
+  function patternDetails(data,pattern){
+    const bars=data?._bars||[],offset=Number.isInteger(pattern.chart_offset)?pattern.chart_offset:(data?._chart_offset||0),points=pattern.key_points||{},evidence=pattern.evidence||[];
+    const selection=evidence.find(item=>item.code==='neckline_selection')?.value||{},structure=evidence.find(item=>item.code==='main_structure')?.value||{},main=Boolean(pattern.is_main_structure||pattern.selected_main||structure.role==='main'),pointLabels=main?mainLabels[pattern.pattern_type]:labels[pattern.pattern_type]||mainLabels[pattern.pattern_type];
+    const pivots=Object.entries(points).filter(([key,value])=>/^pivot_\d+_index$/.test(key)&&Number.isInteger(value)).map(([key,index])=>{
+      const ordinal=Number(key.match(/\d+/)[0]),point=points[`pivot_${ordinal}`],date=points[`pivot_${ordinal}_date`]||point?.date||bars[index+offset]?.date;
+      const price=Number(point?.price??point??points[`pivot_${ordinal}_price`]);
+      return {ordinal,index:index+offset,name:(pointLabels||[])[ordinal-1]||`结构点${ordinal}`,date,price};
+    }).sort((a,b)=>a.index-b.index);
+    return {boundaryStart:selection.effective_start_date||structure.neckline_effective_start,freezeDate:pattern.paired_at||selection.line_frozen_at||selection.freeze_date||structure.neckline_freeze_date,points:pivots};
+  }
+  return {patternGeometry,clipPoints,mainOverlays,patternDetails,instanceLifecycle};
 });

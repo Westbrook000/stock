@@ -9,7 +9,7 @@ import pandas as pd
 
 from caisen.market import InstrumentFile, discover_instruments
 from caisen import api
-from caisen.store import create_scan_run, get_scan_run, query_scan_results
+from caisen.store import connect, create_scan_run, get_scan_run, query_scan_results
 
 
 def _make_market_root(root):
@@ -82,7 +82,11 @@ def test_scan_worker_persists_spawn_results_and_progress_from_explicit_root(tmp_
     assert run["scanned"] == 3 and run["progress"] == 1
     assert total == 3
     assert {row["code"] for row in rows} == {"000001", "000002", "510001"}
-    assert api._jobs["spawn-scan"]["results"] == rows
+    assert "results" not in api._jobs["spawn-scan"]
+    assert "results" not in api.get_job("spawn-scan")
+    with connect() as db:
+        payload = db.execute("SELECT payload FROM jobs WHERE job_id='spawn-scan'").fetchone()[0]
+        assert len(payload) < 2000 and '"results"' not in payload
 
 
 def test_service_shutdown_cancels_queued_spawn_scan_work():
@@ -106,7 +110,7 @@ def test_service_shutdown_cancels_queued_spawn_scan_work():
 
 def test_scan_submits_only_a_bounded_window_and_still_processes_every_instrument(monkeypatch):
     instruments = [InstrumentFile("%06d" % index, "stock", "%d.csv" % index) for index in range(40)]
-    start_ten_workers = threading.Barrier(10)
+    start_ten_workers = threading.Barrier(8)
     release_workers = threading.Event()
     analyzed = {}
     analyzed_lock = threading.Lock()
@@ -133,7 +137,7 @@ def test_scan_submits_only_a_bounded_window_and_still_processes_every_instrument
                               args=("bounded-submit", {"timeframes": ["1d"]}),
                               kwargs={"executor_factory": make_pool})
     worker.start()
-    assert start_ten_workers.parties == 10
+    assert start_ten_workers.parties == 8
     deadline = time.monotonic() + 3
     while not analyzed and not pools and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -147,7 +151,7 @@ def test_scan_submits_only_a_bounded_window_and_still_processes_every_instrument
     worker.join(timeout=5)
 
     assert not worker.is_alive()
-    assert queued_while_first_workers_block <= 10
+    assert queued_while_first_workers_block <= 8
     assert len(analyzed) == 40
     assert set(analyzed.values()) == {1}
     assert api._jobs["bounded-submit"]["scanned"] == 40
@@ -191,7 +195,7 @@ def test_running_scan_shutdown_saves_finished_rows_and_marks_run_interrupted(tmp
     assert total == run["scanned"]
     codes = [row["code"] for row in rows]
     assert len(codes) == len(set(codes))
-    assert rows == api._jobs["shutdown-scan"]["results"]
+    assert "results" not in api._jobs["shutdown-scan"]
     assert saved_patterns
     assert api._jobs["shutdown-scan"]["status"] == "interrupted"
     deadline = time.monotonic() + 3
@@ -233,9 +237,9 @@ def test_interrupted_scan_keeps_sparse_completion_ordinals_without_duplicates(mo
                               kwargs={"executor_factory": ControlledExecutor})
     worker.start()
     deadline = time.monotonic() + 2
-    while (not executor_box or len(executor_box[0].futures) < 20) and time.monotonic() < deadline:
+    while (not executor_box or len(executor_box[0].futures) < 16) and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert len(executor_box[0].futures) == 20
+    assert len(executor_box[0].futures) == 16
     with api._scan_executors_lock:
         stop_event = api._active_scan_executors[executor_box[0]]
     stop_event.set()
@@ -256,7 +260,7 @@ def test_interrupted_scan_keeps_sparse_completion_ordinals_without_duplicates(mo
     assert run["status"] == "interrupted"
     assert run["scanned"] == total == 3
     assert [row["code"] for row in rows] == ["000000", "000005", "000009"]
-    assert rows == api._jobs["sparse-shutdown"]["results"]
+    assert "results" not in api._jobs["sparse-shutdown"]
 
 
 def test_shutdown_during_initial_submission_marks_scan_interrupted(tmp_path):

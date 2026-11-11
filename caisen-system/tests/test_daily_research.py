@@ -50,6 +50,7 @@ def test_production_universe_rejects_wrong_id_or_sample_counts(tmp_path):
 
 
 def test_runner_cuts_off_future_bars_and_writes_once_with_grouped_metrics(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "caisen.sqlite3"))
     universe = {"id": "fixture", "seed": 20261101, "date": "2026-11-01",
                 "stocks": ["600001"], "etfs": ["510001"]}
     universe_path = tmp_path / "universe.json"
@@ -69,17 +70,26 @@ def test_runner_cuts_off_future_bars_and_writes_once_with_grouped_metrics(tmp_pa
                 "tick_size": 0.01, "tick_size_source": "default"}
 
     incremental = types.ModuleType("caisen.daily_incremental")
+    class FakeSignals(list):
+        instance_events = []
+        entry_events = []
     def generate(bars, code, kind, trade_start=None, progress_callback=None,
                  recognizer="v7", performance=None):
         assert bars["date"].max().strftime("%Y-%m-%d") == "2026-10-30"
         if progress_callback:
             progress_callback({"phase": "recognition", "bars_completed": len(bars),
                                "bars_total": len(bars), "current_date": "2026-10-30"})
-        return [{"signal_date": "2026-10-28", "entry_date": "2026-10-29",
+        result = FakeSignals([{"signal_date": "2026-10-28", "entry_date": "2026-10-29",
                  "pattern_ids": ["p1", "p2"], "pattern_types": ["w_bottom", "triangle_bottom"],
                  "pattern": {"evidence": [{"code": "neckline_selection", "value": {"frozen": True}}]},
                  "pattern_tags": [{"pattern_id": "p1", "pattern_type": "w_bottom"},
-                                  {"pattern_id": "p2", "pattern_type": "triangle_bottom"}]}]
+                                  {"pattern_id": "p2", "pattern_type": "triangle_bottom"}]}])
+        result.instance_events = [{"instance_id": code + ":p1", "event_id": code + ":e1",
+                                   "event_seq": 1, "event_date": "2026-10-28",
+                                   "state": "confirmed", "entry_eligible": True,
+                                   "pattern": {"pattern_id": code + ":p1", "pattern_type": "w_bottom"}}]
+        result.entry_events = list(result.instance_events)
+        return result
     incremental.generate_daily_signals = generate
     monkeypatch.setitem(sys.modules, "caisen.daily_incremental", incremental)
     monkeypatch.setattr("caisen.daily_research.discover_instruments", lambda root: [
@@ -111,6 +121,8 @@ def test_runner_cuts_off_future_bars_and_writes_once_with_grouped_metrics(tmp_pa
     assert payload["groups"]["kind"]["stock"]["trade_count"] == 1
     assert payload["groups"]["kind"]["etf"]["trade_count"] == 1
     assert payload["summary"]["account_count"] == 2
+    assert payload["summary"]["pattern_instance_event_count"] == 2
+    assert payload["summary"]["entry_event_count"] == 2
     assert payload["artifacts"]["json_path"]
     assert (tmp_path / "out" / "daily-research.json").exists()
     assert (tmp_path / "out" / "daily-research.html").exists()
@@ -128,12 +140,154 @@ def test_runner_cuts_off_future_bars_and_writes_once_with_grouped_metrics(tmp_pa
         with open(account_path, encoding="utf-8") as handle:
             account = json.load(handle)
         assert account["signals"][0]["pattern"]["evidence"][0]["value"]["frozen"] is True
+        assert account["instance_events"][0]["entry_eligible"] is True
         assert account["engine_version"] == payload["engine_version"]
+    from caisen.store import get_pattern_instance_events
+    stored_events = get_pattern_instance_events(payload["run_id"], path=tmp_path / "caisen.sqlite3")
+    assert len(stored_events) == 2
+    assert all(event["entry_eligible"] for event in stored_events)
+    html_report = (tmp_path / "out" / "daily-research.html").read_text(encoding="utf-8")
+    assert "形态状态事件" in html_report and "首次突破买入事件" in html_report
     assert payload["strategy_version"]
     assert payload["recognizer_version"]
     assert payload["source_rule_version"]
     assert payload["date_to"] <= payload["parameters"]["client_date"]
     assert payload["daily_equity"]
+
+
+def test_full_html_report_embeds_versions_failures_and_instance_timelines(tmp_path, monkeypatch):
+    from html.parser import HTMLParser
+    from caisen import daily_research
+    from caisen.daily_research import _report_html
+    monkeypatch.setattr(daily_research, "discover_instruments",
+                        lambda root: [InstrumentFile("000538", "stock", "fixture.csv")])
+    case_bars = pd.DataFrame({"date": pd.date_range("2025-12-01", periods=100),
+                              "open": [9.5] * 100, "high": [10.5] * 100,
+                              "low": [9.0] * 100, "close": [10.0] * 100,
+                              "volume": [1000] * 100})
+    monkeypatch.setattr(daily_research, "load_research_bars",
+                        lambda instrument, root: {"bars": case_bars, "data_revision": "r1"})
+
+    account_path = tmp_path / "accounts" / "stock-000538.json"
+    account_path.parent.mkdir(parents=True)
+    pattern = {"pattern_type": "w_bottom", "neckline": {"slope": 0.0, "intercept": 10.0},
+               "key_points": {"pivot_1_index": 20, "pivot_1": 9.0,
+                              "pivot_2_index": 40, "pivot_2": 10.0,
+                              "pivot_3_index": 60, "pivot_3": 9.2},
+               "evidence": [{"code": "neckline_selection", "value": {
+                   "selected_candidate_id": "paired-42"}}]}
+    events = [
+        {"instance_id": "000538:w:1", "event_id": "event-forming", "event_seq": 1,
+         "event_date": "2026-01-02", "state": "forming", "entry_eligible": False,
+         "pattern": pattern, "frozen_geometry": {"neckline": pattern["neckline"]}},
+        {"instance_id": "000538:w:1", "event_id": "event-confirmed", "event_seq": 2,
+         "event_date": "2026-01-08", "state": "confirmed", "entry_eligible": True,
+         "pattern": pattern, "frozen_geometry": {"neckline": pattern["neckline"]}},
+    ]
+    account_path.write_text(json.dumps({"instance_events": events}), encoding="utf-8")
+    payload = {
+        "run_id": "fixture-run", "status": "complete", "date_to": "2026-01-10",
+        "strategy_version": "strategy-v1", "recognizer_version": "recognizer-v2",
+        "engine_version": "boundary-v3", "source_rule_version": "rules-v4",
+        "versions": {"market_data": "fixture-data"},
+        "universe": {"id": "daily_800_stock_200_etf_v1", "stock_count": 800,
+                     "etf_count": 200, "selected_account_count": 1000},
+        "parameters": {"date_to": "2026-01-10", "recognizer": "boundary_first", "workers": 8},
+        "summary": {"account_count": 1000, "pattern_instance_event_count": 2,
+                    "entry_event_count": 1, "trade_count": 1, "cumulative_return": 0.02,
+                    "maximum_drawdown": -0.01, "successful_account_count": 999,
+                    "failed_account_count": 1, "no_data_account_count": 0},
+        "groups": {"kind": {"stock": {"trade_count": 1, "net_pnl": 10,
+                    "win_rate": 1.0, "profit_factor": None}}, "shape": {}},
+        "account_summaries": [{"code": "000538", "kind": "stock", "status": "complete",
+                    "account_json": str(account_path), "account_json_relative": "accounts/stock-000538.json",
+                    "signal_count": 1, "trade_count": 1, "pattern_instance_event_count": 2,
+                    "entry_event_count": 1, "recognizer": "boundary_first", "engine_version": "boundary-v3",
+                    "source_rule_version": "rules-v4", "provenance": {"data_revision": "r1"}}],
+        "timings": {"total_seconds": 12.5, "load_seconds": 1, "recognition_seconds": 8,
+                    "backtrader_seconds": 3.5},
+        "memory": {"rss_peak_bytes": 123456}, "errors": [{"code": "600001", "kind": "stock", "error": "fixture failure"}],
+    }
+    report = _report_html(payload)
+
+    class IDs(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.ids = set()
+        def handle_starttag(self, tag, attrs):
+            self.ids.update(value for key, value in attrs if key == "id")
+    parser = IDs()
+    parser.feed(report)
+    assert {"data", "meta", "groups", "cases", "accounts", "runtime", "failures"} <= parser.ids
+    assert "000538" in report and "event-confirmed" in report and "paired-42" in report
+    assert "event_id" in report and "冻结线" in report and "accounts/stock-000538.json" in report
+    assert "case-chart" in report and "P1" in report and "冻结边界" in report
+    assert "derived_from_immutable_event_snapshot" in report and "boundary_version_id" in report
+    assert "strategy-v1" in report and "2026-01-10" in report and "123456" in report
+    assert "fixture failure" in report and "失败明细" in report
+    stale = {**payload, "account_summaries": [{**payload["account_summaries"][0],
+             "provenance": {"data_revision": "old-revision"}}]}
+    stale_case = daily_research._report_event_cases(stale)[0]
+    assert stale_case["chart_svg"] is None
+    assert "版本不一致" in stale_case["chart_notice"]
+
+
+def test_report_renderer_adds_legacy_metadata_as_separate_sidecar(tmp_path):
+    import os
+    import subprocess
+    from caisen.store import get_pattern_instance_metadata
+
+    output = tmp_path / "run"
+    account_dir = output / "accounts"
+    account_dir.mkdir(parents=True)
+    account_path = account_dir / "stock-TEST.json"
+    db_path = tmp_path / "metadata.sqlite3"
+    raw_events = [{"instance_id": "TEST:w1", "event_id": "legacy-event-1", "event_seq": 1,
+                   "event_date": "2026-01-05", "state": "forming", "entry_eligible": False,
+                   "pattern": {"pattern_id": "TEST:w1", "pattern_type": "w_bottom", "timeframe": "1d",
+                               "key_points": {"pivot_1_index": 10, "pivot_1_date": "2025-12-01"},
+                               "neckline": {"slope": 0.0, "intercept": 10.0},
+                               "evidence": [{"code": "neckline_selection", "value": {
+                                   "selected_candidate_id": "pair-1", "selected_line": {"slope": 0.0, "intercept": 10.0},
+                                   "line_frozen_at": "2026-01-02", "structure_known_at": "2026-01-04"}}]},
+                   "frozen_geometry": {"neckline": {"slope": 0.0, "intercept": 10.0}}}]
+    account_path.write_text(json.dumps({"run_id": "legacy-run", "code": "TEST", "kind": "stock",
+                                       "instance_events": raw_events}), encoding="utf-8")
+    report_path = output / "daily-research.json"
+    manifest_path = output / "run-manifest.json"
+    manifest_path.write_text(json.dumps({"run_id": "legacy-run", "status": "complete"}), encoding="utf-8")
+    payload = {"run_id": "legacy-run", "status": "complete", "date_to": "2026-01-10",
+        "summary": {"account_count": 1, "pattern_instance_event_count": 1, "entry_event_count": 0,
+                    "trade_count": 0, "net_pnl": 0, "expectancy": None, "profit_factor": None,
+                    "average_holding_days": None, "cumulative_return": 0, "maximum_drawdown": 0,
+                    "successful_account_count": 1, "failed_account_count": 0, "no_data_account_count": 0},
+        "universe": {"id": "fixture", "stock_count": 1, "etf_count": 0, "selected_account_count": 1},
+        "parameters": {"date_to": "2026-01-10", "recognizer": "boundary_first", "workers": 1},
+        "groups": {"kind": {"stock": {}}, "shape": {}}, "timings": {}, "memory": {}, "errors": [],
+        "artifacts": {"manifest_path": str(manifest_path)},
+        "account_summaries": [{"code": "TEST", "kind": "stock", "status": "complete",
+            "account_json": str(account_path), "account_json_relative": "accounts/stock-TEST.json",
+            "signal_count": 0, "trade_count": 0, "pattern_instance_event_count": 1,
+            "entry_event_count": 0, "recognizer": "boundary_first", "engine_version": "engine-v1",
+            "source_rule_version": "rules-v1", "provenance": {"data_revision": "r1"}}]}
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    script = Path(__file__).parents[1] / "scripts" / "render_daily_research_report.py"
+    env = dict(os.environ, CAISEN_DB=str(db_path))
+    subprocess.run([sys.executable, str(script), str(report_path)], check=True,
+                   capture_output=True, text=True, env=env)
+
+    updated_account = json.loads(account_path.read_text(encoding="utf-8"))
+    assert updated_account["instance_events"] == raw_events
+    metadata = updated_account["pattern_instance_metadata"]
+    assert metadata[0]["metadata_source"] == "derived_from_immutable_event_snapshot"
+    assert metadata[0]["source_event_schema_version"] == "legacy-event-v1"
+    assert metadata[0]["paired_at"] == "2026-01-04"
+    assert get_pattern_instance_metadata("legacy-run", path=db_path) == metadata
+    updated_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert updated_report["instance_metadata"]["raw_events_modified"] is False
+    assert updated_report["instance_metadata"]["derived_event_count"] == 1
+    rendered = (output / "daily-research.html").read_text(encoding="utf-8")
+    assert "derived_event_count" in rendered and "legacy-event-1" in rendered
 
 
 def test_missing_and_failed_symbols_are_saved_and_counted_in_progress(tmp_path, monkeypatch):
@@ -636,6 +790,17 @@ def test_direct_research_loader_records_stat_revision_without_hashing_or_quality
     assert result["data_revision"].startswith("mtime_ns:")
     assert "sha" not in result["data_revision"]
     assert result["tick_size"] == 0.01
+
+
+def test_rule_revision_is_part_of_the_daily_benchmark_cache_identity():
+    from caisen import daily_research
+
+    versions = daily_research._version_metadata()
+
+    assert versions["engine_version"] == "caisen-daily-continuous-v15"
+    assert versions["boundary_first_engine_version"] == "caisen-daily-boundary-first-v16"
+    assert versions["source_rule_version"] == "caisen-main-bottoms-v17"
+    assert versions["main_pattern_rule_version"] == "caisen-v30-main-bottom-v1"
 
 
 def test_workers_none_consumes_only_a_completed_parity_checked_recommendation(tmp_path, monkeypatch):

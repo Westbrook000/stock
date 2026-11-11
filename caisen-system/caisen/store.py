@@ -1,7 +1,11 @@
 import json
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
+from .assessment import ASSESSMENT_VERSION
+
+SCAN_ASSESSMENT_VERSION = ASSESSMENT_VERSION
 
 
 def database_path():
@@ -35,12 +39,62 @@ def connect(path=None):
             action TEXT NOT NULL DEFAULT 'INSUFFICIENT_DATA', patterns_json TEXT NOT NULL DEFAULT '[]',
             payload_json TEXT NOT NULL, PRIMARY KEY(run_id, ordinal)
         );
+        CREATE TABLE IF NOT EXISTS scan_assessments(
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL, assessment_version TEXT NOT NULL DEFAULT 'scan-assessment-v2', payload_json TEXT NOT NULL,
+            PRIMARY KEY(run_id, ordinal, assessment_version)
+        );
+        CREATE TABLE IF NOT EXISTS scan_result_evidence(
+            run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL, pattern_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+            PRIMARY KEY(run_id, ordinal, pattern_id)
+        );
+        CREATE TABLE IF NOT EXISTS pattern_instance_events(
+            run_id TEXT NOT NULL, code TEXT NOT NULL, kind TEXT NOT NULL,
+            instance_id TEXT NOT NULL, event_seq INTEGER NOT NULL,
+            event_id TEXT NOT NULL, event_date TEXT NOT NULL, state TEXT NOT NULL,
+            entry_eligible INTEGER NOT NULL DEFAULT 0, payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(run_id,kind,code,instance_id,event_seq),
+            UNIQUE(run_id,event_id)
+        );
+        CREATE TABLE IF NOT EXISTS pattern_instance_metadata(
+            run_id TEXT NOT NULL, code TEXT NOT NULL, kind TEXT NOT NULL,
+            instance_id TEXT NOT NULL, event_seq INTEGER NOT NULL, event_id TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(run_id,kind,code,instance_id,event_seq),
+            UNIQUE(run_id,event_id)
+        );
+        CREATE TABLE IF NOT EXISTS scan_assessment_jobs(
+            run_id TEXT PRIMARY KEY REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+            status TEXT NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
+            total INTEGER NOT NULL DEFAULT 0, error TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS scan_results_run_code ON scan_results(run_id, code);
         CREATE INDEX IF NOT EXISTS scan_results_run_action ON scan_results(run_id, action);
+        CREATE INDEX IF NOT EXISTS pattern_instance_events_run_instance
+            ON pattern_instance_events(run_id,kind,code,instance_id,event_seq);
+        CREATE INDEX IF NOT EXISTS pattern_instance_metadata_run_instance
+            ON pattern_instance_metadata(run_id,kind,code,instance_id,event_seq);
         CREATE TABLE IF NOT EXISTS migration_runs(
             migration_id TEXT PRIMARY KEY, completed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """)
+        assessment_info = db.execute("PRAGMA table_info(scan_assessments)").fetchall()
+        assessment_columns = {row[1] for row in assessment_info}
+        assessment_pk = [row[1] for row in sorted((row for row in assessment_info if row[5]), key=lambda row: row[5])]
+        if "assessment_version" not in assessment_columns or assessment_pk != ["run_id", "ordinal", "assessment_version"]:
+            db.execute("ALTER TABLE scan_assessments RENAME TO scan_assessments_old")
+            db.execute("""CREATE TABLE scan_assessments(
+                run_id TEXT NOT NULL REFERENCES scan_runs(run_id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL, assessment_version TEXT NOT NULL DEFAULT 'scan-assessment-v2',
+                payload_json TEXT NOT NULL, PRIMARY KEY(run_id,ordinal,assessment_version))""")
+            version_expr = "assessment_version" if "assessment_version" in assessment_columns else "'scan-assessment-v1'"
+            db.execute("INSERT INTO scan_assessments(run_id,ordinal,assessment_version,payload_json) "
+                       "SELECT run_id,ordinal," + version_expr + ",payload_json FROM scan_assessments_old")
+            db.execute("DROP TABLE scan_assessments_old")
         legacy=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('reviews','refresh_job_items')").fetchone()
         if legacy or db.execute("PRAGMA user_version").fetchone()[0] < 1:
             db.execute("PRAGMA secure_delete=ON")
@@ -74,6 +128,126 @@ def get_pattern(pattern_id, db=None):
     with connect() if db is None else _yield(db) as conn:
         row = conn.execute("SELECT payload FROM patterns WHERE pattern_id=?", (pattern_id,)).fetchone()
         return json.loads(row[0]) if row else None
+
+
+def save_pattern_instance_events(run_id, code, kind, events, db=None, path=None):
+    """Persist immutable lifecycle events; exact replays are idempotent."""
+    if db is not None and path is not None:
+        raise ValueError("pass either db or path, not both")
+    rows = []
+    for event in events or []:
+        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        required = ("instance_id", "event_id", "event_seq", "event_date", "state")
+        missing = [field for field in required if payload.get(field) is None]
+        if missing:
+            raise ValueError("pattern instance event missing fields: " + ", ".join(missing))
+        rows.append((str(run_id), str(code), str(kind), str(payload["instance_id"]),
+                     int(payload["event_seq"]), str(payload["event_id"]),
+                     str(payload["event_date"]), str(payload["state"]),
+                     int(bool(payload.get("entry_eligible"))),
+                     json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":"))))
+    if not rows:
+        return 0
+    inserted = 0
+    context = connect(path=path) if db is None else _yield(db)
+    with context as conn:
+        for row in rows:
+            prior = conn.execute(
+                "SELECT event_id,payload_json FROM pattern_instance_events "
+                "WHERE run_id=? AND kind=? AND code=? AND instance_id=? AND event_seq=?",
+                row[:5]).fetchone()
+            if prior is not None:
+                if prior["event_id"] != row[5] or prior["payload_json"] != row[9]:
+                    raise ValueError("pattern instance event is immutable for its run and sequence")
+                continue
+            try:
+                result = conn.execute(
+                    "INSERT INTO pattern_instance_events "
+                    "(run_id,code,kind,instance_id,event_seq,event_id,event_date,state,entry_eligible,payload_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)", row)
+            except sqlite3.IntegrityError as exc:
+                existing = conn.execute(
+                    "SELECT 1 FROM pattern_instance_events WHERE run_id=? AND event_id=?",
+                    (str(run_id), str(row[5]))).fetchone()
+                if existing:
+                    continue
+                raise ValueError("pattern instance event sequence is immutable") from exc
+            inserted += max(int(result.rowcount), 0)
+    return inserted
+
+
+def get_pattern_instance_events(run_id, code=None, kind=None, instance_id=None, db=None, path=None):
+    """Read a run's ordered immutable lifecycle events."""
+    if db is not None and path is not None:
+        raise ValueError("pass either db or path, not both")
+    clauses, params = ["run_id=?"], [str(run_id)]
+    for field, value in (("code", code), ("kind", kind), ("instance_id", instance_id)):
+        if value is not None:
+            clauses.append(field + "=?")
+            params.append(str(value))
+    context = connect(path=path) if db is None else _yield(db)
+    with context as conn:
+        rows = conn.execute("SELECT payload_json FROM pattern_instance_events WHERE "
+                            + " AND ".join(clauses)
+                            + " ORDER BY kind,code,instance_id,event_seq", params).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+
+def save_pattern_instance_metadata(run_id, code, kind, metadata_rows, db=None, path=None):
+    """Persist derived contract metadata beside, but never inside, raw events."""
+    if db is not None and path is not None:
+        raise ValueError("pass either db or path, not both")
+    context = connect(path=path) if db is None else _yield(db)
+    inserted = 0
+    with context as conn:
+        for metadata in metadata_rows or []:
+            row = dict(metadata)
+            required = ("instance_id", "event_id", "event_seq")
+            missing = [field for field in required if row.get(field) is None]
+            if missing:
+                raise ValueError("pattern instance metadata missing fields: " + ", ".join(missing))
+            serialized = json.dumps(row, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":"))
+            key = (str(run_id), str(kind), str(code), str(row["instance_id"]), int(row["event_seq"]))
+            prior = conn.execute(
+                "SELECT event_id,metadata_json FROM pattern_instance_metadata "
+                "WHERE run_id=? AND kind=? AND code=? AND instance_id=? AND event_seq=?", key).fetchone()
+            if prior is not None:
+                if prior["event_id"] != str(row["event_id"]) or prior["metadata_json"] != serialized:
+                    raise ValueError("pattern instance metadata is immutable for its run and sequence")
+                continue
+            try:
+                conn.execute("INSERT INTO pattern_instance_metadata "
+                             "(run_id,code,kind,instance_id,event_seq,event_id,metadata_json) "
+                             "VALUES(?,?,?,?,?,?,?)",
+                             (key[0], key[2], key[1], key[3], key[4], str(row["event_id"]), serialized))
+            except sqlite3.IntegrityError as exc:
+                existing = conn.execute("SELECT 1 FROM pattern_instance_metadata "
+                                        "WHERE run_id=? AND event_id=?",
+                                        (str(run_id), str(row["event_id"]))).fetchone()
+                if existing:
+                    continue
+                raise ValueError("pattern instance metadata sequence is immutable") from exc
+            inserted += 1
+    return inserted
+
+
+def get_pattern_instance_metadata(run_id, code=None, kind=None, instance_id=None, db=None, path=None):
+    """Read instance contract metadata by run and optional account/instance."""
+    if db is not None and path is not None:
+        raise ValueError("pass either db or path, not both")
+    clauses, params = ["run_id=?"], [str(run_id)]
+    for field, value in (("code", code), ("kind", kind), ("instance_id", instance_id)):
+        if value is not None:
+            clauses.append(field + "=?")
+            params.append(str(value))
+    context = connect(path=path) if db is None else _yield(db)
+    with context as conn:
+        rows = conn.execute("SELECT metadata_json FROM pattern_instance_metadata WHERE "
+                            + " AND ".join(clauses)
+                            + " ORDER BY kind,code,instance_id,event_seq", params).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
 
 class _yield:
@@ -112,17 +286,41 @@ def update_scan_run(run_id, **fields):
         )
 
 
-def save_scan_result(run_id, ordinal, result):
+def save_scan_result(run_id, ordinal, result, assessment=None):
     payload = dict(result)
     patterns = payload.get("patterns") or []
     with connect() as db:
-        _save_scan_result(db, run_id, ordinal, payload, patterns)
+        _save_scan_result(db, run_id, ordinal, payload, patterns, preserve_snapshot=assessment is None)
+        shared_events = payload.get("pattern_instance_events", [])
+        if shared_events:
+            save_pattern_instance_events(run_id, payload.get("code", ""),
+                                         payload.get("kind", ""), shared_events, db=db)
+        if assessment is not None:
+            db.execute("INSERT OR IGNORE INTO scan_assessments(run_id,ordinal,assessment_version,payload_json) VALUES(?,?,?,?)",
+                       (run_id, int(ordinal), SCAN_ASSESSMENT_VERSION, json.dumps(assessment, ensure_ascii=False, allow_nan=False)))
 
 
-def _save_scan_result(db, run_id, ordinal, payload, patterns=None):
+def _save_scan_result(db, run_id, ordinal, payload, patterns=None, preserve_snapshot=True):
+    payload = dict(payload)
     patterns = payload.get("patterns") or [] if patterns is None else patterns
+    events = payload.pop("main_structure_events", [])
+    mini_bars = payload.get("mini_bars") if preserve_snapshot else None
+    if mini_bars:
+        events.append({"pattern_id": "__cutoff_snapshot__", "mini_bars": mini_bars,
+                       "analysis_window": payload.get("analysis_window"),
+                       "latest_date": payload.get("latest_date")})
+    for key in ("selected_main_structures", "main_children", "ended_patterns", "mini_bars", "pattern_migration"):
+        payload.pop(key, None)
+    payload.pop("selected_plan", None)
+    payload.pop("candidate_plans", None)
+    db.executemany(
+        "INSERT OR IGNORE INTO scan_result_evidence(run_id,ordinal,pattern_id,payload_json) VALUES(?,?,?,?)",
+        [(run_id, int(ordinal), str(event.get("pattern_id") or f"event-{index}"),
+          json.dumps(event, ensure_ascii=False, allow_nan=False))
+         for index, event in enumerate(events)],
+    )
     db.execute(
-        """INSERT OR REPLACE INTO scan_results
+        """INSERT OR IGNORE INTO scan_results
            (run_id,ordinal,code,kind,name,category,action,patterns_json,payload_json)
            VALUES(?,?,?,?,?,?,?,?,?)""",
         (run_id, int(ordinal), str(payload.get("code", "")), str(payload.get("kind", "")),
@@ -131,6 +329,128 @@ def _save_scan_result(db, run_id, ordinal, payload, patterns=None):
          json.dumps(patterns, ensure_ascii=False, allow_nan=False),
          json.dumps(payload, ensure_ascii=False, allow_nan=False)),
     )
+
+
+def save_scan_assessment(run_id, ordinal, assessment):
+    with connect() as db:
+        db.execute("INSERT OR IGNORE INTO scan_assessments(run_id,ordinal,assessment_version,payload_json) VALUES(?,?,?,?)",
+                   (run_id, int(ordinal), SCAN_ASSESSMENT_VERSION, json.dumps(assessment, ensure_ascii=False, allow_nan=False)))
+
+
+_assessment_threads = set()
+_assessment_threads_lock = threading.Lock()
+
+
+def _assess_saved_result(payload, events, requested_timeframes):
+    import pandas as pd
+    from .assessment import assess_scan
+    snapshot = next((item for item in events if item.get("pattern_id") == "__cutoff_snapshot__"), {})
+    bars = payload.get("mini_bars") or snapshot.get("mini_bars") or []
+    window = payload.get("analysis_window") or snapshot.get("analysis_window") or {}
+    as_of = window.get("to") or payload.get("latest_date") or snapshot.get("latest_date")
+    patterns = [item for item in events if item.get("pattern_id") != "__cutoff_snapshot__"]
+    patterns = patterns or payload.get("main_structure_events") or []
+    patterns = [pattern for pattern in patterns
+                if pattern.get("state") == "confirmed"
+                or any(item.get("code") == "neckline_breakout" for item in pattern.get("evidence", []))]
+    result = assess_scan(patterns, {"1d": pd.DataFrame(bars)}, as_of)
+    needs_weekly = "1w" in requested_timeframes or any(pattern.get("timeframe") == "1w" for pattern in patterns)
+    if needs_weekly and result.get("status") != "BUY":
+        result["evidence_gaps"] = ["weekly_cutoff_ohlc_snapshot_missing"]
+        result["timeframes"].setdefault("1w", {"status": "INSUFFICIENT_EVIDENCE",
+                                                 "reason": "weekly_cutoff_ohlc_snapshot_missing"})
+        if result.get("status") == "NONE":
+            result["status"] = "INSUFFICIENT_EVIDENCE"
+            result["reason"] = "weekly_cutoff_ohlc_snapshot_missing"
+            result["selected_timeframe"] = "1w"
+    return result
+
+
+def _run_saved_scan_assessment(run_id):
+    batch_size = 25
+    try:
+        with connect() as db:
+            scan = db.execute("SELECT params_json FROM scan_runs WHERE run_id=?", (run_id,)).fetchone()
+        requested_timeframes = json.loads(scan["params_json"]).get("timeframes", []) if scan else []
+        while True:
+            with connect() as db:
+                rows = db.execute(
+                    "SELECT scan_results.ordinal,scan_results.payload_json FROM scan_results "
+                    "LEFT JOIN scan_assessments ON scan_assessments.run_id=scan_results.run_id "
+                    "AND scan_assessments.ordinal=scan_results.ordinal "
+                    "AND scan_assessments.assessment_version=? "
+                    "WHERE scan_results.run_id=? AND scan_assessments.ordinal IS NULL "
+                    "ORDER BY scan_results.ordinal LIMIT ?", (SCAN_ASSESSMENT_VERSION, run_id, batch_size),
+                ).fetchall()
+                total = db.execute("SELECT COUNT(*) FROM scan_results WHERE run_id=?", (run_id,)).fetchone()[0]
+            if not rows:
+                break
+            ordinals = [row["ordinal"] for row in rows]
+            marks = ",".join("?" for _ in ordinals)
+            with connect() as db:
+                events = {}
+                for item in db.execute(
+                    f"SELECT ordinal,payload_json FROM scan_result_evidence WHERE run_id=? AND ordinal IN ({marks})",
+                    (run_id, *ordinals),
+                ).fetchall():
+                    events.setdefault(item["ordinal"], []).append(json.loads(item["payload_json"]))
+            assessed = [(run_id, row["ordinal"], json.dumps(
+                _assess_saved_result(json.loads(row["payload_json"]), events.get(row["ordinal"], []), requested_timeframes),
+                ensure_ascii=False, allow_nan=False)) for row in rows]
+            with connect() as db:
+                db.executemany("INSERT OR IGNORE INTO scan_assessments(run_id,ordinal,assessment_version,payload_json) VALUES(?,?,?,?)",
+                               [(run, ordinal, SCAN_ASSESSMENT_VERSION, payload) for run, ordinal, payload in assessed])
+                processed = db.execute("SELECT COUNT(*) FROM scan_assessments WHERE run_id=? AND assessment_version=?",
+                                       (run_id, SCAN_ASSESSMENT_VERSION)).fetchone()[0]
+                db.execute("UPDATE scan_assessment_jobs SET status=?,processed=?,total=?,updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
+                           ("running", processed, total, run_id))
+        with connect() as db:
+            processed = db.execute("SELECT COUNT(*) FROM scan_assessments WHERE run_id=? AND assessment_version=?",
+                                   (run_id, SCAN_ASSESSMENT_VERSION)).fetchone()[0]
+            total = db.execute("SELECT COUNT(*) FROM scan_results WHERE run_id=?", (run_id,)).fetchone()[0]
+            db.execute("UPDATE scan_assessment_jobs SET status='completed',processed=?,total=?,updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
+                       (processed, total, run_id))
+    except Exception as exc:
+        with connect() as db:
+            db.execute("UPDATE scan_assessment_jobs SET status='failed',error=?,updated_at=CURRENT_TIMESTAMP WHERE run_id=?",
+                       (str(exc), run_id))
+    finally:
+        with _assessment_threads_lock:
+            _assessment_threads.discard(run_id)
+
+
+def start_saved_scan_assessment(run_id):
+    with connect() as db:
+        run = db.execute("SELECT status FROM scan_runs WHERE run_id=?", (run_id,)).fetchone()
+        if run is None:
+            return {"status": "not_found", "processed": 0, "total": 0, "error": None}
+        if run["status"] in ("queued", "running"):
+            return {"status": "scan_running", "processed": 0, "total": 0, "error": None}
+        total = db.execute("SELECT COUNT(*) FROM scan_results WHERE run_id=?", (run_id,)).fetchone()[0]
+        assessed = db.execute("SELECT COUNT(*) FROM scan_assessments WHERE run_id=? AND assessment_version=?",
+                              (run_id, SCAN_ASSESSMENT_VERSION)).fetchone()[0]
+        if assessed >= total:
+            db.execute("INSERT INTO scan_assessment_jobs(run_id,status,processed,total) VALUES(?,?,?,?) "
+                       "ON CONFLICT(run_id) DO UPDATE SET status='completed',processed=excluded.processed,total=excluded.total,updated_at=CURRENT_TIMESTAMP",
+                       (run_id, "completed", assessed, total))
+        else:
+            db.execute("INSERT INTO scan_assessment_jobs(run_id,status,processed,total) VALUES(?,?,?,?) "
+                       "ON CONFLICT(run_id) DO UPDATE SET status='running',processed=excluded.processed,total=excluded.total,error=NULL,updated_at=CURRENT_TIMESTAMP",
+                       (run_id, "running", assessed, total))
+    with _assessment_threads_lock:
+        if assessed < total and run_id not in _assessment_threads:
+            _assessment_threads.add(run_id)
+            threading.Thread(target=_run_saved_scan_assessment, args=(run_id,), daemon=True).start()
+    return get_scan_assessment_progress(run_id)
+
+
+def get_scan_assessment_progress(run_id):
+    with connect() as db:
+        row = db.execute("SELECT status,processed,total,error,updated_at FROM scan_assessment_jobs WHERE run_id=?",
+                         (run_id,)).fetchone()
+    return ({"status": row["status"], "processed": row["processed"], "total": row["total"],
+             "error": row["error"], "updated_at": row["updated_at"]} if row else
+            {"status": "not_started", "processed": 0, "total": 0, "error": None})
 
 
 def _is_legacy_scan_job(payload):
@@ -288,27 +608,53 @@ def get_scan_run(run_id):
 
 def query_scan_results(run_id, search=None, category=None, action=None, kind=None, pattern_types=None,
                        timeframes=None, sort_by="rank", sort_order="asc", limit=50, offset=0):
-    order_columns = {"rank": "ordinal", "code": "code", "name": "name", "category": "category", "action": "action"}
-    if sort_by not in order_columns or sort_order not in ("asc", "desc"):
+    order_columns = {"code": "scan_results.code", "name": "scan_results.name",
+                     "category": "scan_results.category", "action": "scan_results.action"}
+    if sort_by not in (*order_columns, "rank") or sort_order not in ("asc", "desc"):
         raise ValueError("invalid scan result sort")
-    clauses = ["run_id=?"]
+    clauses = ["scan_results.run_id=?"]
     params = [run_id]
     if search:
-        clauses.append("(code LIKE ? COLLATE NOCASE OR name LIKE ? COLLATE NOCASE)")
+        clauses.append("(scan_results.code LIKE ? COLLATE NOCASE OR scan_results.name LIKE ? COLLATE NOCASE)")
         params.extend([f"%{search}%", f"%{search}%"])
     if category:
-        clauses.append("category=?")
+        clauses.append("scan_results.category=?")
         params.append(category)
     if action:
-        clauses.append("action=?")
+        clauses.append("CASE json_extract(scan_assessments.payload_json,'$.status') "
+                       "WHEN 'BUY' THEN 'CONSIDER_BUY' WHEN 'FOCUS_NECKLINE' THEN 'FOCUS_NECKLINE' "
+                       "WHEN 'NONE' THEN CASE WHEN scan_results.action='CONSIDER_BUY' THEN 'WAIT' ELSE scan_results.action END "
+                       "ELSE scan_results.action END=?")
         params.append(action)
     if kind:
-        clauses.append("kind=?")
+        clauses.append("scan_results.kind=?")
         params.append(kind)
     patterns = list(dict.fromkeys(pattern_types or []))
     periods = list(dict.fromkeys(timeframes or []))
     if patterns or periods:
-        pattern_clauses = []
+        pattern_clauses = [
+            "json_extract(pattern.value,'$.is_main_structure')=1",
+            "json_extract(pattern.value,'$.selected_main')=1",
+            "COALESCE(json_extract(pattern.value,'$.ambiguous_structure'),0)=0",
+            "COALESCE(json_extract(pattern.value,'$.execution_suppressed'),0)=0",
+            "((json_extract(scan_assessments.payload_json,'$.timeframes.' || json_extract(pattern.value,'$.timeframe') || '.status') IN ('BUY','FOCUS_NECKLINE') "
+            "AND json_extract(scan_assessments.payload_json,'$.timeframes.' || json_extract(pattern.value,'$.timeframe') || '.pattern_id')=json_extract(pattern.value,'$.pattern_id')) "
+            "OR (COALESCE(json_extract(scan_assessments.payload_json,'$.timeframes.' || json_extract(pattern.value,'$.timeframe') || '.status'),'NONE') NOT IN ('BUY','FOCUS_NECKLINE') "
+            "AND json_extract(pattern.value,'$.state') NOT IN ('invalidated','target_reached','followthrough_confirmed'))) ",
+            "NOT EXISTS (SELECT 1 FROM json_each(scan_results.patterns_json) newer "
+            "WHERE json_extract(newer.value,'$.timeframe')=json_extract(pattern.value,'$.timeframe') "
+            "AND json_extract(newer.value,'$.is_main_structure')=1 "
+            "AND json_extract(newer.value,'$.selected_main')=1 "
+            "AND COALESCE(json_extract(newer.value,'$.ambiguous_structure'),0)=0 "
+            "AND COALESCE(json_extract(newer.value,'$.execution_suppressed'),0)=0 "
+            "AND ((json_extract(scan_assessments.payload_json,'$.timeframes.' || json_extract(newer.value,'$.timeframe') || '.status') IN ('BUY','FOCUS_NECKLINE') "
+            "AND json_extract(scan_assessments.payload_json,'$.timeframes.' || json_extract(newer.value,'$.timeframe') || '.pattern_id')=json_extract(newer.value,'$.pattern_id')) "
+            "OR (COALESCE(json_extract(scan_assessments.payload_json,'$.timeframes.' || json_extract(newer.value,'$.timeframe') || '.status'),'NONE') NOT IN ('BUY','FOCUS_NECKLINE') "
+            "AND json_extract(newer.value,'$.state') NOT IN ('invalidated','target_reached','followthrough_confirmed'))) "
+            "AND (COALESCE(json_extract(newer.value,'$.formed_at'),'')>COALESCE(json_extract(pattern.value,'$.formed_at'),'') "
+            "OR (COALESCE(json_extract(newer.value,'$.formed_at'),'')=COALESCE(json_extract(pattern.value,'$.formed_at'),'') "
+            "AND COALESCE(json_extract(newer.value,'$.pattern_id'),'')>COALESCE(json_extract(pattern.value,'$.pattern_id'),''))))",
+        ]
         if patterns:
             pattern_clauses.append("json_extract(pattern.value,'$.pattern_type') IN (%s)" % ",".join("?" for _ in patterns))
             params.extend(patterns)
@@ -317,11 +663,81 @@ def query_scan_results(run_id, search=None, category=None, action=None, kind=Non
             params.extend(periods)
         clauses.append("EXISTS (SELECT 1 FROM json_each(scan_results.patterns_json) pattern WHERE %s)" % " AND ".join(pattern_clauses))
     where = " AND ".join(clauses)
-    column = order_columns[sort_by]
+    direction = sort_order.upper()
+    if sort_by == "rank":
+        priority = "COALESCE(json_extract(scan_results.payload_json,'$.rank.action_priority'),CASE scan_results.action WHEN 'CONSIDER_BUY' THEN 0 WHEN 'WAIT' THEN 1 WHEN 'HOLD' THEN 2 WHEN 'SELL_IF_HELD' THEN 3 ELSE 4 END)"
+        reverse = "DESC" if direction == "ASC" else "ASC"
+        assessed_priority = "CASE json_extract(scan_assessments.payload_json,'$.status') WHEN 'BUY' THEN 0 WHEN 'FOCUS_NECKLINE' THEN 1 WHEN 'NONE' THEN 2 WHEN 'INSUFFICIENT_EVIDENCE' THEN 3 END"
+        priority = f"COALESCE({assessed_priority},json_extract(scan_results.payload_json,'$.rank.action_priority'),CASE scan_results.action WHEN 'CONSIDER_BUY' THEN 0 WHEN 'WAIT' THEN 1 WHEN 'HOLD' THEN 2 WHEN 'SELL_IF_HELD' THEN 3 ELSE 4 END)"
+        order_by = (f"{priority} {direction}, "
+                    f"COALESCE(json_extract(scan_results.payload_json,'$.rank.confirmed_timeframes'),0) {reverse}, "
+                    f"COALESCE(json_extract(scan_results.payload_json,'$.rank.reward_risk'),0) {reverse}, "
+                    f"COALESCE(json_extract(scan_results.payload_json,'$.rank.risk_pct'),1) {direction}, "
+                    f"COALESCE(json_extract(scan_results.payload_json,'$.rank.confirmation_ordinal'),0) {reverse}, "
+                    f"scan_results.kind {direction}, scan_results.code {direction}, scan_results.ordinal ASC")
+    else:
+        column = ("CASE json_extract(scan_assessments.payload_json,'$.status') "
+                  "WHEN 'BUY' THEN 'CONSIDER_BUY' WHEN 'FOCUS_NECKLINE' THEN 'FOCUS_NECKLINE' "
+                  "WHEN 'NONE' THEN CASE WHEN scan_results.action='CONSIDER_BUY' THEN 'WAIT' ELSE scan_results.action END "
+                  "ELSE scan_results.action END" if sort_by == "action" else order_columns[sort_by])
+        order_by = f"{column} {direction},scan_results.ordinal ASC"
     with connect() as db:
-        total = db.execute(f"SELECT COUNT(*) FROM scan_results WHERE {where}", params).fetchone()[0]
+        join = ("LEFT JOIN scan_assessments ON scan_assessments.run_id=scan_results.run_id "
+                "AND scan_assessments.ordinal=scan_results.ordinal AND scan_assessments.assessment_version=? ")
+        total = db.execute(f"SELECT COUNT(*) FROM scan_results {join} WHERE {where}",
+                           (SCAN_ASSESSMENT_VERSION, *params)).fetchone()[0]
         rows = db.execute(
-            f"SELECT payload_json FROM scan_results WHERE {where} ORDER BY {column} {sort_order.upper()},ordinal ASC LIMIT ? OFFSET ?",
-            (*params, int(limit), int(offset)),
+            f"SELECT scan_results.code,scan_results.kind,scan_results.name,scan_results.category,scan_results.action,"
+            f"scan_results.patterns_json,scan_assessments.payload_json AS assessment_json,"
+            f"json_extract(scan_results.payload_json,'$.state') AS state,"
+            f"json_extract(scan_results.payload_json,'$.latest_date') AS latest_date,"
+            f"json_extract(scan_results.payload_json,'$.latest_close') AS latest_close,"
+            f"json_extract(scan_results.payload_json,'$.analysis_window') AS analysis_window,"
+            f"json_extract(scan_results.payload_json,'$.reason_codes') AS reason_codes,"
+            f"json_extract(scan_results.payload_json,'$.explanation') AS explanation "
+            f"FROM scan_results {join} WHERE {where} "
+            f"ORDER BY {order_by} LIMIT ? OFFSET ?",
+            (SCAN_ASSESSMENT_VERSION, *params, int(limit), int(offset)),
         ).fetchall()
-    return [json.loads(row[0]) for row in rows], total
+    results = []
+    for row in rows:
+        patterns = json.loads(row["patterns_json"] or "[]")
+        latest_mains = {}
+        assessment = json.loads(row["assessment_json"]) if row["assessment_json"] is not None else None
+        for pattern in patterns:
+            if not (pattern.get("is_main_structure") and pattern.get("selected_main")
+                    and not pattern.get("ambiguous_structure") and not pattern.get("execution_suppressed")):
+                continue
+            timeframe = pattern.get("timeframe")
+            per_tf = (assessment or {}).get("timeframes", {}).get(timeframe, {})
+            triggered = (per_tf.get("status") in {"BUY", "FOCUS_NECKLINE"}
+                         and per_tf.get("pattern_id") == pattern.get("pattern_id"))
+            active = pattern.get("state") not in {"invalidated", "target_reached", "followthrough_confirmed"}
+            if not (triggered or (active and per_tf.get("status") not in {"BUY", "FOCUS_NECKLINE"})):
+                continue
+            current = latest_mains.get(timeframe)
+            if current is None or (str(pattern.get("formed_at") or ""), str(pattern.get("pattern_id") or "")) > (
+                    str(current.get("formed_at") or ""), str(current.get("pattern_id") or "")):
+                latest_mains[timeframe] = pattern
+        result = {key: row[key] for key in ("code", "kind", "name", "category", "action", "state", "latest_date", "latest_close", "analysis_window", "reason_codes", "explanation")}
+        result["patterns"] = list(latest_mains.values())
+        if row["reason_codes"]:
+            result["reason_codes"] = json.loads(row["reason_codes"])
+        if row["analysis_window"]:
+            result["analysis_window"] = json.loads(row["analysis_window"])
+        if row["assessment_json"] is not None:
+            result["assessment"] = assessment
+            status = result["assessment"].get("status")
+            if status == "BUY":
+                result["action"] = "CONSIDER_BUY"
+            elif status == "FOCUS_NECKLINE":
+                result["action"] = "FOCUS_NECKLINE"
+            elif status == "NONE":
+                if result["action"] == "CONSIDER_BUY":
+                    result["action"] = "WAIT"
+            elif status == "INSUFFICIENT_EVIDENCE":
+                result["assessment_notice"] = "缺少扫描时点行情或完整ATR快照，保留原始行动，无法重算。"
+        else:
+            result["assessment_notice"] = "正在依据已保存证据评估；当前保留原始行动。"
+        results.append(result)
+    return results, total

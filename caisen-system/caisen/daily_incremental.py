@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from copy import deepcopy
 from bisect import bisect_left
+import json
 import time
 from typing import List
 
@@ -15,33 +16,64 @@ from .main_bottoms import (
     MAIN_RULES, PIVOT_SCALES, _make_main_pattern, _qualify_neckline_slope,
     _structure_candidates, _PotentialNecklinePairCache,
     _neckline_decline_check, _neckline_formation_coverage,
+    _neckline_structure_anchor_coverage,
     _neckline_candidate_reversal_atr_multiple, _neckline_candidate_scale,
     _minimum_neckline_test_count, _same_neckline_boundary_phase,
-    _neckline_test_tolerance_at,
+    _failed_premature_neckline_phase,
+    _neckline_test_tolerance_at, _nested_main_parent_map,
 )
 from .patterns import PATTERN_LABELS, _line, _at
 from .schemas import Pattern, Pivot
+from .pattern_instances import (PatternInstanceLedger, pattern_identity_metadata,
+                                pattern_instance_is_frozen)
 
-ENGINE_VERSION = "caisen-daily-continuous-v5"
-BOUNDARY_FIRST_ENGINE_VERSION = "caisen-daily-boundary-first-v3"
+ENGINE_VERSION = "caisen-daily-continuous-v15"
+BOUNDARY_FIRST_ENGINE_VERSION = "caisen-daily-boundary-first-v16"
 SOURCE_RULE_VERSION = str(MAIN_RULES.get("source_rule_version", "unknown"))
+_TERMINAL_INSTANCE_STATES = {"invalidated", "target_reached"}
+
+
+class DailySignalStream(list):
+    """List-compatible Backtrader signals carrying their exact lifecycle events."""
+
+    def __init__(self, signals=(), instance_events=(), entry_events=()):
+        super().__init__(signals)
+        self.instance_events = list(instance_events)
+        self.entry_events = list(entry_events)
 
 
 class DailyRecognitionSession:
     """Causal daily recognizer. Bars, ATR and confirmed pivots are retained."""
 
     def __init__(self, code, kind, tick_size=0.01, progress_callback=None, total_bars=None,
-                 boundary_first=False):
+                 boundary_first=False, source_frame=None):
         self.code, self.kind = str(code), str(kind)
         self.boundary_first = bool(boundary_first)
         self.tick_size = max(float(tick_size), 1e-6)
         self.progress_callback = progress_callback
         self.total_bars = int(total_bars) if total_bars is not None else None
+        # Batch callers already hold the complete, normalized input frame.
+        # Reuse it as a read-only backing store and expose only a prefix view
+        # while bars are appended. Direct streaming callers keep the original
+        # materialization fallback.
+        self._source_frame = (source_frame.reset_index(drop=True)
+                              if isinstance(source_frame, pd.DataFrame) else None)
+        if self._source_frame is not None:
+            self._source_date_index = pd.DatetimeIndex(self._source_frame.date)
+            self._source_numeric_views = {
+                name: pd.to_numeric(self._source_frame[name], errors="coerce").to_numpy(dtype=float)
+                for name in ("high", "low", "close")
+            }
+        else:
+            self._source_date_index = None
+            self._source_numeric_views = None
         self.progress_started_at = time.perf_counter()
         self.last_progress_at = 0.0
         self.bars: List[dict] = []
         self.date_strings: List[str] = []
         self.atr_values: List[float] = []
+        self._atr_buffer = np.empty(max(self.total_bars or 16, 1), dtype=float)
+        self._atr_buffer_length = 0
         self.scale_states = {name: self._new_zigzag() for name, _, _ in PIVOT_SCALES}
         self.scale_pivots = {name: [] for name, _, _ in PIVOT_SCALES}
         self.low_pivot_range_size = 1
@@ -55,12 +87,20 @@ class DailyRecognitionSession:
         self.consumed_neckline_phases = {}
         self.emitted_ids = set()
         self.emitted_events = []
+        self.instance_ledger = PatternInstanceLedger()
+        self.selected_boundary_by_structure = {}
+        self._boundary_selection_signature = None
+        self._selected_patterns_cache = {}
+        self.instance_entry_signals = {}
+        self.confirmed_instance_patterns = {}
+        self.focused_instance_ids = set()
         self.neckline_candidate_cache = {}
         self.neckline_pair_cache = {}
         self.neckline_coverage_cache = OrderedDict()
         self.neckline_potential_pair_cache = (_PotentialNecklinePairCache()
                                               if self.boundary_first else None)
         self.flag_candidates = {}
+        self.flag_instance_patterns = {}
         self.last_signal_date = None
         self.performance = {"bars_appended": 0, "atr_updates": 0,
                             "pivot_updates": 0, "candidate_refreshes": 0,
@@ -69,16 +109,27 @@ class DailyRecognitionSession:
         self._prefix_frame_cache_length = -1
 
     def _frame_for_current_prefix(self):
-        """Build one reusable frame and immutable numeric views for this prefix."""
+        """Return one reusable prefix frame and its immutable numeric views."""
         if (self._prefix_frame_cache is not None
                 and self._prefix_frame_cache_length == len(self.bars)):
             return self._prefix_frame_cache
-        frame = pd.DataFrame(self.bars)
-        date_index = pd.DatetimeIndex(frame.date)
+        prefix_length = len(self.bars)
+        if (self._source_frame is not None
+                and prefix_length <= len(self._source_frame)):
+            frame = self._source_frame.iloc[:prefix_length]
+            # Avoid inheriting the full source's attrs and attach prefix-sized
+            # arrays only; no future row can enter causal recognition.
+            frame.attrs = {}
+            date_index = self._source_date_index[:prefix_length]
+            for name, values in self._source_numeric_views.items():
+                frame.attrs[f"neckline_{name}_values"] = values[:prefix_length]
+        else:
+            frame = pd.DataFrame(self.bars)
+            date_index = pd.DatetimeIndex(frame.date)
+            low_values = pd.to_numeric(frame.low, errors="coerce").to_numpy(dtype=float)
+            frame.attrs["neckline_low_values"] = low_values
         frame.attrs["date_strings"] = self.date_strings
         frame.attrs["neckline_date_index"] = date_index
-        low_values = pd.to_numeric(frame.low, errors="coerce").to_numpy(dtype=float)
-        frame.attrs["neckline_low_values"] = low_values
         self._prefix_frame_cache = frame
         self._prefix_frame_cache_length = len(self.bars)
         self.performance["prefix_frame_builds"] += 1
@@ -96,7 +147,7 @@ class DailyRecognitionSession:
             key = f"neckline_{name}_values"
             if key not in frame.attrs:
                 frame.attrs[key] = pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
-        frame.attrs["neckline_atr_values"] = np.asarray(self.atr_values, dtype=float)
+        frame.attrs["neckline_atr_values"] = self._atr_array_prefix()
         date_index = frame.attrs.get("neckline_date_index")
         if date_index is None or len(date_index) != len(frame):
             date_index = pd.DatetimeIndex(frame.date)
@@ -110,10 +161,31 @@ class DailyRecognitionSession:
                 np.where(np.isfinite(atr_values), tolerance_atr * atr_values, 0.0))
         return frame
 
+    def _atr_array_prefix(self):
+        """Return appended ATR values as a zero-copy NumPy prefix view."""
+        length = len(self.atr_values)
+        if length > len(self._atr_buffer):
+            capacity = max(length, len(self._atr_buffer) * 2)
+            extended = np.empty(capacity, dtype=float)
+            extended[:self._atr_buffer_length] = self._atr_buffer[:self._atr_buffer_length]
+            self._atr_buffer = extended
+        if self._atr_buffer_length != length:
+            self._atr_buffer[:length] = self.atr_values
+            self._atr_buffer_length = length
+        return self._atr_buffer[:length]
+
     @staticmethod
     def _candidate_geometry_key(candidate):
         return (candidate["family"], tuple((int(p.index), p.kind)
                                             for p in candidate["sequence"]))
+
+    @staticmethod
+    def _candidate_patterns(candidate):
+        patterns = dict(candidate.get("frozen_patterns", {}))
+        current = candidate.get("pattern")
+        if current is not None:
+            patterns[current.pattern_id] = current
+        return list(patterns.values())
 
     @staticmethod
     def _pattern_boundary_phase(pattern, consumed_index, reason):
@@ -174,12 +246,12 @@ class DailyRecognitionSession:
         tolerance_atr = float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
         tolerances = np.maximum(minimum_ticks * self.tick_size,
                                 np.where(np.isfinite(self.atr_values),
-                                         tolerance_atr * np.asarray(self.atr_values, dtype=float), 0.0))
+                                         tolerance_atr * self._atr_array_prefix(), 0.0))
         minimum_date = pd.Timestamp(self.bars[-1]["date"]) - pd.DateOffset(years=6)
         minimum_index = bisect_left(self.date_strings, str(minimum_date.date()))
         self.neckline_potential_pair_cache.prune(minimum_index)
         self.neckline_potential_pair_cache.add(
-            neckline_pivots, np.asarray(self.atr_values, dtype=float), highs, tolerances,
+            neckline_pivots, self._atr_array_prefix(), highs, tolerances,
             self.tick_size, "1d", minimum_index=minimum_index)
 
     def _report_progress(self, force=False, phase="recognition"):
@@ -433,6 +505,12 @@ class DailyRecognitionSession:
                 else:
                     boundary = min(float(p.price) for p in low_points)
                 if float(self.bars[i]["close"]) < boundary:
+                    for pattern in self._candidate_patterns(candidate):
+                        latest = next((event for event in self.instance_ledger.latest_events
+                                       if event.instance_id == pattern.pattern_id), None)
+                        if latest is not None and latest.state not in _TERMINAL_INSTANCE_STATES:
+                            self.instance_ledger.append(
+                                pattern.to_dict(), "invalidated", self.date_strings[i])
                     continue
             retained[key] = candidate
         self.active = retained
@@ -470,7 +548,7 @@ class DailyRecognitionSession:
             formation = self.bars[i1:formation_end + 1]
             coverage = _neckline_formation_coverage(
                 np.asarray([b["high"] for b in formation]),
-                np.asarray(self.atr_values[i1:formation_end + 1]),
+                self._atr_array_prefix()[i1:formation_end + 1],
                 {"slope": upper["slope"], "intercept": _at(upper, i1)},
                 0, len(formation)-1, self.tick_size)
             if not coverage["passed"]:
@@ -481,28 +559,55 @@ class DailyRecognitionSession:
             required = _at(upper, i) + max(minimum, prior_atr)
             previous_required = _at(upper, i - 1) + max(
                 minimum, self.atr_values[i - 2] if i > 1 else minimum)
-            if float(self.bars[i - 1]["close"]) > previous_required or float(self.bars[i]["close"]) <= required:
+            key_points = {}
+            for number, pivot in enumerate(seq, 1):
+                key_points[f"pivot_{number}_index"] = int(pivot.index)
+                key_points[f"pivot_{number}_date"] = pivot.date
+                key_points[f"pivot_{number}"] = float(pivot.price)
+                key_points[f"pivot_{number}_kind"] = pivot.kind
+            geometry_evidence = {"code": "flag_geometry", "value": {
+                "impulse": impulse, "correction_ratio": correction / impulse,
+                "range_ratio": (max(float(b["high"]) for b in section)
+                                - min(float(b["low"]) for b in section)) / impulse,
+                "known_at": seq[-1].confirmed_date}}
+            identity = pattern_identity_metadata({
+                "code": self.code, "kind": self.kind, "timeframe": "1d",
+                "pattern_type": "bull_flag", "key_points": key_points,
+                "neckline": upper, "evidence": [geometry_evidence]})
+            pattern_id = identity["instance_id"]
+            pattern = self.flag_instance_patterns.get(pattern_id)
+            if pattern is None:
+                pattern = Pattern(pattern_id=pattern_id, code=self.code, kind=self.kind,
+                                  timeframe="1d", pattern_type="bull_flag", direction="bullish",
+                                  state="forming", formed_at=seq[0].date, confirmed_at=None,
+                                  key_points=key_points, neckline=dict(upper), invalidation=lo0,
+                                  evidence=[geometry_evidence],
+                                  last_observed_date=str(pd.Timestamp(self.bars[i]["date"]).date()),
+                                  rule_version=ENGINE_VERSION, source_rule_version=SOURCE_RULE_VERSION,
+                                  structure_key=identity["structure_key"],
+                                  boundary_version_id=identity["boundary_version_id"])
+                self.flag_instance_patterns[pattern_id] = pattern
+            selected_flags = self._selected_boundary_patterns(
+                list(self.flag_instance_patterns.values()), cache_slot="bull_flags")
+            if pattern_id not in {item.pattern_id for item in selected_flags}:
                 continue
-            pattern_id = f"{self.code}:bull_flag:{'-'.join(f'{p.index}:{p.kind}' for p in seq)}"
             if pattern_id in self.emitted_ids:
+                continue
+            if (float(self.bars[i - 1]["close"]) > previous_required
+                    or float(self.bars[i]["close"]) <= required):
                 continue
             self.emitted_ids.add(pattern_id)
             date = str(pd.Timestamp(self.bars[i]["date"]).date())
-            pattern = Pattern(pattern_id=pattern_id, code=self.code, kind=self.kind, timeframe="1d",
-                              pattern_type="bull_flag", direction="bullish", state="confirmed",
-                              formed_at=seq[0].date, confirmed_at=i,
-                              key_points={f"pivot_{n}_index": p.index for n, p in enumerate(seq, 1)},
-                              neckline=dict(upper), invalidation=lo0,
-                              evidence=[{"code": "flag_geometry", "value": {"impulse": impulse,
-                                          "correction_ratio": correction / impulse,
-                                          "known_at": seq[-1].confirmed_date}},
-                                        {"code": "flag_breakout", "value": {"date": date,
-                                          "close": float(self.bars[i]["close"]),
-                                          "frozen_boundary": float(_at(upper, i)),
-                                          "required_close": float(required),
-                                          "atr14_previous": float(prior_atr)}}],
-                              confirmation_date=date, last_observed_date=date,
-                              rule_version=ENGINE_VERSION, source_rule_version=SOURCE_RULE_VERSION)
+            pattern = deepcopy(pattern)
+            pattern.state = "confirmed"
+            pattern.confirmed_at = i
+            pattern.confirmation_date = date
+            pattern.last_observed_date = date
+            pattern.evidence.append({"code": "flag_breakout", "value": {
+                "date": date, "close": float(self.bars[i]["close"]),
+                "frozen_boundary": float(_at(pattern.neckline, i)),
+                "required_close": float(required), "atr14_previous": float(prior_atr)}})
+            self.flag_instance_patterns[pattern_id] = pattern
             out.append(self._signal(pattern, date))
         return out
 
@@ -601,10 +706,11 @@ class DailyRecognitionSession:
             after = [p for p in eligible if p.index > first.index]
             prior = [p for p in eligible if p.index <= first.index]
             after_pair = (len(after) >= required_groups and compatible_pair(after))
+            prior_pair = (len(prior) >= required_groups and compatible_pair(prior))
             prior_and_after = (len(prior) + len(after) >= required_groups
                                and bool(prior) and bool(after)
                                and compatible_pair(prior, after))
-            return after_pair or prior_and_after
+            return after_pair or prior_pair or prior_and_after
 
         if family == "inverse_head_shoulders":
             if len(low_points) < 3:
@@ -784,7 +890,7 @@ class DailyRecognitionSession:
         high_values = frame.attrs["neckline_high_values"]
         low_values = frame.attrs["neckline_low_values"]
         close_values = frame.attrs["neckline_close_values"]
-        atr_values = np.asarray(self.atr_values, dtype=float)
+        atr_values = self._atr_array_prefix()
         frame.attrs["neckline_atr_values"] = atr_values
         current_date = str(pd.Timestamp(frame.date.iloc[-1]).date())
         event_candidates = []
@@ -834,11 +940,9 @@ class DailyRecognitionSession:
                         and not cached.confirmation_date):
                     candidate["pattern"] = None
                 continue
-            if family in {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}:
-                if current_date < (self._candidate_maturity_date(candidate) or "9999-12-31"):
-                    continue
             cached = candidate.get("pattern")
-            if cached is not None and cached.confirmation_date:
+            if candidate.get("retired"):
+                candidate["retired"] = True
                 continue
             if pressure_pivot is None and not candidate.get("needs_initial_eval"):
                 continue
@@ -849,18 +953,42 @@ class DailyRecognitionSession:
                 continue
             evaluated_geometries.add(geometry)
             self.performance["candidate_evaluations"] += 1
+            frozen_phases = []
+            previous_patterns = self._candidate_patterns(candidate)
+            previous_ids = {pattern.pattern_id for pattern in previous_patterns}
+            for previous in previous_patterns:
+                if not pattern_instance_is_frozen(previous):
+                    continue
+                detail = {item.get("code"): item.get("value")
+                          for item in previous.evidence if isinstance(item, dict)}
+                frozen_phases.append({"line": previous.neckline,
+                                      "tests": detail.get("neckline_tests", []),
+                                      "selected": True})
+            consumed_phases = list(self.consumed_neckline_phases.get(
+                self._candidate_geometry_key(candidate), ())) + frozen_phases
             patterns = _make_main_pattern(frame, self.code, self.kind, "1d", family, seq,
                                           all_neckline_pivots, atr_values, self.tick_size,
                                           scale, "5y", background_bars=frame,
                                           collect_diagnostics=False,
-                                          consumed_boundary_phases=self.consumed_neckline_phases.get(
-                                              self._candidate_geometry_key(candidate), ()))
+                                          consumed_boundary_phases=consumed_phases,
+                                          neckline_coverage_mode=("structure_anchors_only"
+                                                                  if self.boundary_first
+                                                                  else "full_interval"))
             patterns = patterns if isinstance(patterns, list) else [patterns]
-            candidate["pattern"] = next((p for p in patterns if p is not None and p.state != "invalidated"),
-                                         next((p for p in patterns if p is not None), None))
+            current_pattern = next((p for p in patterns if p is not None and p.state != "invalidated"),
+                                   next((p for p in patterns if p is not None), None))
+            if current_pattern is not None:
+                candidate["pattern"] = current_pattern
+            frozen_patterns = candidate.setdefault("frozen_patterns", {})
             for pattern in patterns:
                 if pattern is None:
                     continue
+                if pattern_instance_is_frozen(pattern):
+                    if pattern.pattern_id not in previous_ids:
+                        pattern.evidence.append({"code": "boundary_available_at", "value": {
+                            "date": current_date, "index": len(self.bars) - 1,
+                            "reason": "paired_boundary_discovered_causally_on_this_prefix"}})
+                    frozen_patterns.setdefault(pattern.pattern_id, pattern)
                 detail = {item["code"]: item["value"] for item in pattern.evidence}
                 selection = detail.get("neckline_selection", {})
                 for early in selection.get("early_breakouts", []):
@@ -870,6 +998,30 @@ class DailyRecognitionSession:
                              "candidate_id": early.get("candidate_id"),
                              "reason": "breakout_before_minimum_structure_duration"}
                     self._remember_consumed_boundary(candidate, phase)
+                    early_date = str(early.get("date") or "")
+                    # The prefix replay may discover an already-crossed line
+                    # on a later bar. Keep its phase consumed, but never append
+                    # a lifecycle event at a date before this observation.
+                    if early_date != current_date:
+                        continue
+                    latest = next((event for event in self.instance_ledger.latest_events
+                                   if event.instance_id == pattern.pattern_id), None)
+                    if early_date and (latest is None or latest.event_date <= early_date):
+                        early_snapshot = deepcopy(pattern)
+                        early_snapshot.evidence.append({"code": "early_breakout_consumed",
+                                                        "value": deepcopy(early)})
+                        self.instance_ledger.append(
+                            early_snapshot.to_dict(), "forming", early_date,
+                            event_type="early_breakout_consumed")
+                for phase in selection.get("consumed_boundary_phases", []):
+                    self._remember_consumed_boundary(candidate, {
+                        "line": phase["line"], "tests": phase.get("tests", []),
+                        "consumed_index": int(phase["consumed_index"]),
+                        "candidate_id": phase.get("candidate_id"),
+                        "reason": phase.get("reason"),
+                        "phase_tolerance": phase.get("phase_tolerance"),
+                        "selected": phase.get("selected", True),
+                    })
                 if pattern.confirmation_date and pattern.confirmed_at is not None:
                     self._remember_consumed_boundary(
                         candidate, self._pattern_boundary_phase(
@@ -877,7 +1029,8 @@ class DailyRecognitionSession:
             candidate["needs_initial_eval"] = False
             self._report_progress()
             for pattern in patterns:
-                if pattern and pattern.confirmation_date == current_date:
+                if (pattern and pattern.confirmation_date == current_date
+                        and current_date >= (self._candidate_maturity_date(candidate) or "9999-12-31")):
                     detail = {item["code"]: item["value"] for item in pattern.evidence}
                     main = detail.get("main_structure", {})
                     if main.get("signal_eligible"):
@@ -891,7 +1044,8 @@ class DailyRecognitionSession:
                         candidate["pattern"] = None
         if not event_candidates:
             return []
-        pool = [item.get("pattern") for item in self.active.values() if item.get("pattern") is not None]
+        pool = [pattern for item in self.active.values()
+                for pattern in self._candidate_patterns(item)]
         eligible = self._independent_candidates(pool, event_candidates, current_date)
         if not eligible:
             return []
@@ -917,13 +1071,67 @@ class DailyRecognitionSession:
         rules = MAIN_RULES.get("breakout", {})
         buffer_multiple = float(rules.get("close_buffer_previous_atr_multiple", 1.0))
         minimum_ticks = float(rules.get("minimum_buffer_ticks", 2)) * self.tick_size
-        for candidate in self.active.values():
+        terminal_instance_ids = {event.instance_id for event in self.instance_ledger.latest_events
+                                 if event.state in _TERMINAL_INSTANCE_STATES}
+        candidates_to_check = []
+        all_patterns = [pattern for source in self.active.values()
+                        for pattern in self._candidate_patterns(source)]
+        self._select_structure_boundaries(all_patterns)
+        for source_candidate in self.active.values():
+            for pattern in self._candidate_patterns(source_candidate):
+                identity = pattern_identity_metadata(pattern)
+                if identity["boundary_version_id"] not in self.selected_boundary_by_structure.get(
+                        identity["structure_key"], {identity["boundary_version_id"]}):
+                    continue
+                candidate = dict(source_candidate)
+                candidate["pattern"] = pattern
+                candidates_to_check.append(candidate)
+        for candidate in candidates_to_check:
             pattern = candidate.get("pattern")
+            if (candidate.get("retired") or (pattern is not None and
+                    (pattern.state == "invalidated" or pattern.pattern_id in terminal_instance_ids))):
+                candidate["retired"] = True
+                continue
             if pattern is None or pattern.confirmation_date:
                 continue
             detail = {item["code"]: item["value"] for item in pattern.evidence}
             structure = detail.get("main_structure", {})
             selection = detail.get("neckline_selection", {})
+            available_at = detail.get("boundary_available_at", {}).get("date")
+            if available_at and current_date <= str(available_at):
+                continue
+            early_phases = list(selection.get("consumed_boundary_phases", []))
+            early_phases.extend({"reason": "breakout_before_minimum_structure_duration",
+                                 "consumed_index": item.get("index"),
+                                 "candidate_id": item.get("candidate_id"),
+                                 "line": item.get("line"), "tests": item.get("tests", [])}
+                                for item in selection.get("early_breakouts", []))
+            failed_phase = _failed_premature_neckline_phase(
+                early_phases, np.asarray([bar["close"] for bar in self.bars], dtype=float), i)
+            if failed_phase is not None:
+                invalidation = {"date": current_date, "index": int(i),
+                                "level": float(_at(failed_phase["line"], i)),
+                                "reason": "premature_breakout_fell_back_below_frozen_neckline",
+                                "breakout_date": self.date_strings[int(failed_phase["consumed_index"])],
+                                "candidate_id": failed_phase.get("candidate_id"),
+                                "line": dict(failed_phase["line"])}
+                pattern.state = "invalidated"
+                pattern.invalidation = invalidation["level"]
+                pattern.last_observed_date = current_date
+                candidate["retired"] = True
+                neckline_evidence = next((item for item in pattern.evidence
+                                           if item["code"] == "neckline_invalidation"), None)
+                if neckline_evidence is None:
+                    pattern.evidence.append({"code": "neckline_invalidation", "value": invalidation})
+                for item in pattern.evidence:
+                    if item["code"] == "neckline_invalidation":
+                        item["value"] = invalidation
+                    elif item["code"] == "main_structure":
+                        item["value"].update({"signal_eligible": False,
+                                              "eligibility_reason": "terminal_state",
+                                              "terminal_state": "invalidated",
+                                              "structure_end_date": current_date})
+                continue
             if (structure.get("role") == "internal" or structure.get("eligibility_reason")
                     not in {"price_breakout_confirmed", "awaiting_fresh_neckline_breakout"}):
                 continue
@@ -949,10 +1157,18 @@ class DailyRecognitionSession:
             guard_key = (pattern.pattern_id, line["slope"], line["intercept"],
                          formation_start, formation_end)
             if candidate.get("formation_guard_key") != guard_key:
-                candidate["formation_guard"] = _neckline_formation_coverage(
-                    np.asarray([b["high"] for b in self.bars]), np.asarray(self.atr_values),
-                    line, formation_start, formation_end, self.tick_size,
-                    cache=self.neckline_coverage_cache)
+                if self.boundary_first:
+                    candidate["formation_guard"] = _neckline_structure_anchor_coverage(
+                        line, candidate.get("sequence", ()), self._atr_array_prefix(),
+                        self.tick_size)
+                    candidate["formation_guard"].update({
+                        "start_index": formation_start, "end_index": formation_end,
+                        "coverage_mode": "structure_anchors_only"})
+                else:
+                    candidate["formation_guard"] = _neckline_formation_coverage(
+                        np.asarray([b["high"] for b in self.bars]), self._atr_array_prefix(),
+                        line, formation_start, formation_end, self.tick_size,
+                        cache=self.neckline_coverage_cache)
                 candidate["formation_guard_key"] = guard_key
             if not candidate["formation_guard"]["passed"]:
                 continue
@@ -967,6 +1183,18 @@ class DailyRecognitionSession:
             if float(self.bars[i - 1]["close"]) > previous_required:
                 continue
             required = _at(line, i) + max(minimum_ticks, buffer_multiple * previous_atr)
+            previous_close = float(self.bars[i - 1]["close"])
+            current_close = float(self.bars[i]["close"])
+            current_line = _at(line, i)
+            if (previous_close <= previous_level and current_line < current_close <= required
+                    and pattern_instance_is_frozen(pattern)):
+                weak_snapshot = deepcopy(pattern)
+                weak_snapshot.evidence.append({"code": "weak_crossing", "value": {
+                    "date": current_date, "index": int(i), "close": current_close,
+                    "frozen_neckline": float(current_line),
+                    "required_close": float(required), "atr14_previous": float(previous_atr)}})
+                self.instance_ledger.append(weak_snapshot.to_dict(), "forming", current_date,
+                                            event_type="weak_crossing")
             if float(self.bars[i]["close"]) > required:
                 targets = next((item["value"] for item in pattern.evidence if item["code"] == "targets"), {})
                 apex = targets.get("triangle_apex_index") if isinstance(targets, dict) else None
@@ -996,6 +1224,12 @@ class DailyRecognitionSession:
                                for item in existing):
                         existing.append(early)
                     structure["early_breakout_consumed"] = True
+                    early_snapshot = deepcopy(pattern)
+                    early_snapshot.evidence.append({"code": "early_breakout_consumed",
+                                                    "value": deepcopy(early)})
+                    self.instance_ledger.append(
+                        early_snapshot.to_dict(), "forming", current_date,
+                        event_type="early_breakout_consumed")
                     continue
                 snapshot = deepcopy(pattern)
                 snapshot.state = "confirmed"
@@ -1045,12 +1279,251 @@ class DailyRecognitionSession:
         snapshot.evidence.append({"code": "main_selection", "value": {
             "selected": bool(selected), "decided_at": decided_at,
             "primary_pattern_id": primary_id or pattern.pattern_id,
-            "reason": "latest_confirmation_then_pattern_family_then_coarsest_ihs_scale_then_structure_duration_then_pressure_evidence"}})
+            "reason": "same_day_family_then_independent_test_count_span_residual_scale_structure_duration_then_anchor_age"}})
         return snapshot
 
     def _remember(self, signals):
         self.emitted_events.extend(deepcopy(signals))
         return signals
+
+    def _record_instance_states(self, signals):
+        """Freeze shared daily instance events after each causal bar update."""
+        latest_events = {event.instance_id: event for event in self.instance_ledger.latest_events}
+        latest_ids = set(latest_events)
+        current_date = self.date_strings[-1]
+        candidates = [pattern for candidate in self.active.values()
+                      for pattern in self._candidate_patterns(candidate)]
+        candidates.extend(self.flag_instance_patterns.values())
+        self._select_structure_boundaries(candidates)
+        candidates = self._selected_boundary_patterns(
+            candidates, boundaries_selected=True, cache_slot="instance_states")
+        for pattern in candidates:
+            if (pattern is None or pattern.pattern_type not in
+                    {"w_bottom", "inverse_head_shoulders", "triangle_bottom", "bull_flag"}):
+                continue
+            last_event = latest_events.get(pattern.pattern_id)
+            if last_event is not None and last_event.state in _TERMINAL_INSTANCE_STATES:
+                continue
+            if not pattern_instance_is_frozen(pattern):
+                continue
+            if pattern.pattern_id not in latest_ids and pattern.state == "forming":
+                self.instance_ledger.append(pattern.to_dict(), "forming", current_date)
+                latest_ids.add(pattern.pattern_id)
+            elif pattern.state == "forming" and pattern.pattern_type == "bull_flag":
+                if float(self.bars[-1]["close"]) <= float(pattern.invalidation or 0.0):
+                    self.instance_ledger.append(pattern.to_dict(), "invalidated", current_date)
+                    latest_events[pattern.pattern_id] = next(
+                        event for event in self.instance_ledger.latest_events
+                        if event.instance_id == pattern.pattern_id)
+            elif pattern.state == "invalidated" and pattern.pattern_id in latest_ids:
+                last = next((event for event in self.instance_ledger.latest_events
+                             if event.instance_id == pattern.pattern_id), None)
+                if last is not None and last.state != "invalidated":
+                    self.instance_ledger.append(pattern.to_dict(), "invalidated", current_date)
+                    latest_events[pattern.pattern_id] = next(
+                        event for event in self.instance_ledger.latest_events
+                        if event.instance_id == pattern.pattern_id)
+        for signal in signals:
+            for payload in signal.get("patterns", [signal.get("pattern", {})]):
+                if not payload or payload.get("pattern_type") not in {
+                        "w_bottom", "inverse_head_shoulders", "triangle_bottom", "bull_flag"}:
+                    continue
+                instance_id = str(payload.get("pattern_id", ""))
+                if not instance_id:
+                    continue
+                event = self.instance_ledger.append(
+                    payload, "confirmed", signal["signal_date"], entry_eligible=True)
+                self.confirmed_instance_patterns[instance_id] = payload
+                self.instance_entry_signals[instance_id] = deepcopy(signal)
+                latest_ids.add(event.instance_id)
+        # A post-breakout retreat is visible as focus, but it never creates an
+        # order event. Freeze the confirmation snapshot for the comparison.
+        for instance_id, payload in self.confirmed_instance_patterns.items():
+            last_event = latest_events.get(instance_id)
+            if last_event and last_event.state in _TERMINAL_INSTANCE_STATES:
+                continue
+            entry_signal = self.instance_entry_signals.get(instance_id)
+            if entry_signal and current_date <= str(entry_signal.get("signal_date", "")):
+                continue
+            line = payload.get("neckline")
+            if not line or len(self.bars) < 2:
+                continue
+            close = float(self.bars[-1]["close"])
+            breakout = next((item.get("value") for item in payload.get("evidence", [])
+                             if item.get("code") in {"neckline_breakout", "flag_breakout"}
+                             and isinstance(item.get("value"), dict)), {})
+            breakout_close = float(breakout.get("close", 0.0) or 0.0)
+            invalidation = payload.get("invalidation")
+            if invalidation is not None and close <= float(invalidation):
+                event = self.instance_ledger.append(payload, "invalidated", current_date)
+                latest_events[instance_id] = event
+                self.focused_instance_ids.add(instance_id)
+            elif (payload.get("targets") and len(self.bars) > 0
+                  and float(self.bars[-1].get("high", 0.0)) >= float(payload["targets"][0])):
+                event = self.instance_ledger.append(payload, "target_reached", current_date)
+                latest_events[instance_id] = event
+            elif (breakout_close > 0 and close < breakout_close
+                  and (breakout_close - close) / breakout_close < 0.08
+                  and instance_id not in self.focused_instance_ids):
+                event = self.instance_ledger.append(payload, "focus", current_date)
+                latest_events[instance_id] = event
+                self.focused_instance_ids.add(instance_id)
+
+    def instance_events(self):
+        return [event.to_dict() for event in self.instance_ledger.events]
+
+    def _select_structure_boundaries(self, patterns):
+        """Keep each distinct frozen boundary active until that instance is terminal."""
+        patterns = list(patterns)
+        signature = (tuple((str(pattern.pattern_id), str(pattern.boundary_version_id))
+                     for pattern in patterns if pattern is not None),
+                     self.instance_ledger.event_count)
+        if signature == self._boundary_selection_signature:
+            return self.selected_boundary_by_structure
+        groups = {}
+        for pattern in patterns:
+            if pattern is None or not pattern_instance_is_frozen(pattern):
+                continue
+            identity = pattern_identity_metadata(pattern)
+            groups.setdefault(identity["structure_key"], {}).setdefault(
+                identity["boundary_version_id"], []).append(pattern)
+        latest_events = {event.instance_id: event for event in self.instance_ledger.latest_events}
+        latest_state = {instance_id: event.state
+                        for instance_id, event in latest_events.items()}
+        terminal_phases = {}
+        for event in self.instance_ledger.latest_events:
+            if event.state not in _TERMINAL_INSTANCE_STATES:
+                continue
+            payload = event.to_dict()
+            pattern = payload.get("pattern") or {}
+            detail = {item.get("code"): item.get("value")
+                      for item in pattern.get("evidence", []) if isinstance(item, dict)}
+            line = pattern.get("neckline") or detail.get("neckline_selection", {}).get("selected_line")
+            if line:
+                terminal_phases.setdefault(payload.get("structure_key"), []).append({
+                    "line": line, "tests": detail.get("neckline_tests", []),
+                })
+        for structure_key, variants in groups.items():
+            live_candidates = []
+            for boundary_id, representatives in variants.items():
+                representative = representatives[0]
+                if any(latest_state.get(pattern.pattern_id) in _TERMINAL_INSTANCE_STATES
+                       for pattern in representatives):
+                    continue
+                detail = {item.get("code"): item.get("value")
+                          for item in representative.evidence if isinstance(item, dict)}
+                phase = {"line": representative.neckline,
+                         "tests": detail.get("neckline_tests", [])}
+                if any(_same_neckline_boundary_phase(ended, phase, self.tick_size)
+                       for ended in terminal_phases.get(structure_key, [])):
+                    continue
+                state = latest_state.get(representative.pattern_id)
+                is_confirmed = state == "confirmed" or bool(representative.confirmation_date)
+                live_candidates.append((boundary_id, representative, phase, is_confirmed))
+            live_candidates.sort(key=lambda item: self._boundary_pattern_rank(item[1]),
+                                 reverse=True)
+            confirmed = [item for item in live_candidates if item[3]]
+            live_ids = [item[0] for item in confirmed]
+            kept_phases = [item[2] for item in confirmed]
+            for boundary_id, _representative, phase, is_confirmed in live_candidates:
+                if not is_confirmed and any(
+                        _same_neckline_boundary_phase(kept, phase, self.tick_size)
+                        for kept in kept_phases):
+                    continue
+                if any(_same_neckline_boundary_phase(kept, phase, self.tick_size)
+                       for kept in kept_phases):
+                    continue
+                live_ids.append(boundary_id)
+                kept_phases.append(phase)
+            self.selected_boundary_by_structure[structure_key] = set(live_ids)
+        self._boundary_selection_signature = signature
+        return self.selected_boundary_by_structure
+
+    def _selected_boundary_patterns(self, patterns, boundaries_selected=False,
+                                    cache_slot=None):
+        patterns = list(patterns)
+        if cache_slot:
+            signature = (tuple((id(pattern), str(pattern.pattern_id),
+                                str(pattern.boundary_version_id), pattern.state,
+                                pattern.confirmation_date)
+                               for pattern in patterns if pattern is not None),
+                         self.instance_ledger.event_count)
+            cached = self._selected_patterns_cache.get(cache_slot)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+        if not boundaries_selected:
+            self._select_structure_boundaries(patterns)
+        grouped = {}
+        for pattern in patterns:
+            if pattern is None:
+                continue
+            identity = pattern_identity_metadata(pattern)
+            frozen_boundaries = self.selected_boundary_by_structure.get(identity["structure_key"])
+            if frozen_boundaries is not None and identity["boundary_version_id"] not in frozen_boundaries:
+                continue
+            if any(event.instance_id == identity["instance_id"]
+                   and event.state in _TERMINAL_INSTANCE_STATES
+                   for event in self.instance_ledger.latest_events):
+                continue
+            grouped.setdefault(identity["instance_id"], []).append(pattern)
+        selected = []
+        for variants in grouped.values():
+            representative = deepcopy(max(variants, key=self._boundary_pattern_rank))
+            scale_evidence = {}
+            for pattern in variants:
+                points = pattern.key_points
+                anchors = []
+                for key in sorted(points):
+                    if key.startswith("pivot_") and key.endswith("_date"):
+                        number = key[len("pivot_"):-len("_date")]
+                        anchors.append({"role": points.get(f"pivot_{number}_kind") or f"pivot_{number}",
+                                        "date": str(points[key]),
+                                        "price": points.get(f"pivot_{number}")})
+                detail = {item.get("code"): item.get("value") for item in pattern.evidence
+                          if isinstance(item, dict)}
+                tests = detail.get("neckline_tests") or []
+                item = {"scale": points.get("scale"), "pivot_scale": points.get("pivot_scale"),
+                        "anchors": anchors,
+                        "neckline_test_dates": sorted(str(test["pivot_date"]) for test in tests
+                                                       if isinstance(test, dict) and test.get("pivot_date"))}
+                scale_evidence[json.dumps(item, sort_keys=True, separators=(",", ":"))] = item
+            merged = {json.dumps(item, sort_keys=True, separators=(",", ":")): item
+                      for item in representative.multiscale_evidence}
+            merged.update(scale_evidence)
+            representative.multiscale_evidence = [merged[key] for key in sorted(merged)]
+            selected.append(representative)
+        if cache_slot:
+            self._selected_patterns_cache[cache_slot] = (signature, selected)
+        return selected
+
+    @staticmethod
+    def _boundary_pattern_rank(pattern):
+        detail = {item.get("code"): item.get("value")
+                  for item in pattern.evidence if isinstance(item, dict)}
+        tests = [test for test in detail.get("neckline_tests", [])
+                 if isinstance(test, dict) and test.get("valid", True)]
+        span = max((int(test.get("test_span_bars", 0)) for test in tests), default=0)
+        residuals = [float(test.get("normalized_residual")) for test in tests
+                     if test.get("normalized_residual") is not None]
+        selection = detail.get("neckline_selection") or {}
+        latest_test = max((str(test.get("pivot_date") or "") for test in tests), default="")
+        freeze_date = str(selection.get("line_frozen_at") or selection.get("freeze_date") or "")
+        anchor_dates = sorted(str(value) for key, value in pattern.key_points.items()
+                              if key.startswith("pivot_") and key.endswith("_date") and value)
+        return (len({test.get("group_id") or test.get("pair_id") or test.get("pivot_date")
+                     for test in tests}), span,
+                -sum(residuals) / len(residuals) if residuals else 0,
+                latest_test, freeze_date, tuple(anchor_dates), pattern.pattern_id)
+
+    def current_instances(self):
+        from copy import deepcopy
+        from .schemas import Pattern
+        current = []
+        for event in self.instance_ledger.latest_events:
+            snapshot = deepcopy(event.to_dict()["pattern"])
+            snapshot["state"] = event.state
+            current.append(Pattern(**snapshot))
+        return current
 
     def _signal(self, pattern, signal_date):
         return self._signal_many([pattern], signal_date)
@@ -1079,79 +1552,49 @@ class DailyRecognitionSession:
     def _main_rank(pattern):
         family_order = {"w_bottom": 2, "inverse_head_shoulders": 1, "triangle_bottom": 0}
         detail = {item["code"]: item["value"] for item in pattern.evidence}
-        tests = detail.get("neckline_tests", [])
+        tests = [item for item in detail.get("neckline_tests", [])
+                 if isinstance(item, dict) and item.get("valid", True)]
         span = max((int(item.get("test_span_bars", 0)) for item in tests), default=0)
+        residuals = [float(item["normalized_residual"]) for item in tests
+                     if item.get("normalized_residual") is not None]
+        residual = sum(residuals) / len(residuals) if residuals else float("inf")
         rank = {"2atr_5pct": 0, "3atr_8pct": 1, "5atr_12pct": 2}
         scale = rank.get(pattern.key_points.get("pivot_scale"), -1)
-        right_date = pattern.key_points.get("pivot_3_date", "") if pattern.pattern_type == "inverse_head_shoulders" else ""
-        left_date = pattern.key_points.get("pivot_1_date", "") if pattern.pattern_type == "inverse_head_shoulders" else ""
-        duration = (pd.Timestamp(pattern.last_observed_date) - pd.Timestamp(pattern.formed_at)).days
+        anchor_dates = [pd.Timestamp(value) for key, value in pattern.key_points.items()
+                        if key.startswith("pivot_") and key.endswith("_date") and value]
+        duration = (max(anchor_dates) - min(anchor_dates)).days if len(anchor_dates) > 1 else 0
+        formed_ordinal = pd.Timestamp(pattern.formed_at).toordinal() if pattern.formed_at else 0
         return (pattern.confirmation_date or "", family_order.get(pattern.pattern_type, -1),
-                scale if pattern.pattern_type == "inverse_head_shoulders" else -1,
-                right_date, left_date, duration if pattern.pattern_type == "inverse_head_shoulders" else 0,
-                len(tests), span, pattern.formed_at, scale, pattern.pattern_id)
+                len({item.get("group_id") or item.get("pair_id") or item.get("pivot_date")
+                     for item in tests}), span, -residual, scale, duration,
+                -formed_ordinal, pattern.pattern_id)
 
     @staticmethod
     def _nested_ids(patterns, action_date):
-        rank = {"2atr_5pct": 0, "3atr_8pct": 1, "5atr_12pct": 2}
-        main_families = {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}
-        as_of = pd.Timestamp(action_date)
-        nested = set()
-        active = [p for p in patterns if p.state in {"forming", "confirmed", "target_reached"}]
-        for child in active:
-            child_points = child.key_points
-            child_dates = [pd.Timestamp(value) for key, value in child_points.items()
-                           if key.startswith("pivot_") and key.endswith("_date") and value]
-            if not child_dates:
-                continue
-            child_detail = {item["code"]: item["value"] for item in child.evidence}
-            child_structure = child_detail.get("main_structure", {})
-            child_start = pd.Timestamp(child_structure.get("first_trough_date") or min(child_dates))
-            child_end = pd.Timestamp(child_structure.get("structure_end_date") or max(child_dates))
-            child_end = min(child_end, as_of)
-            for parent in active:
-                if (parent.pattern_type not in main_families
-                        or parent.pattern_id == child.pattern_id):
-                    continue
-                points = parent.key_points
-                if parent.pattern_type == "inverse_head_shoulders":
-                    same_head_right = (
-                        points.get("pivot_2_date") == child_points.get("pivot_2_date")
-                        and points.get("pivot_3_date") == child_points.get("pivot_3_date"))
-                    if same_head_right:
-                        continue
-                parent_detail = {item["code"]: item["value"] for item in parent.evidence}
-                parent_structure = parent_detail.get("main_structure", {})
-                parent_pivot_dates = [pd.Timestamp(value) for key, value in points.items()
-                                      if key.startswith("pivot_") and key.endswith("_date") and value]
-                parent_start = pd.Timestamp(parent_structure.get("first_trough_date") or
-                    (min(parent_pivot_dates) if parent_pivot_dates else parent.formed_at))
-                parent_end = pd.Timestamp(parent_structure.get("structure_end_date") or
-                    (max(parent_pivot_dates) if parent_pivot_dates
-                     else parent.last_observed_date or parent_start))
-                parent_end = min(parent_end, as_of)
-                strictly_inside = parent_start <= child_start and child_end <= parent_end and (
-                    parent_start < child_start or child_end < parent_end)
-                selection = parent_detail.get("neckline_selection", {})
-                known_at = pd.Timestamp(selection.get("structure_known_at", parent_start))
-                if (strictly_inside
-                        and rank.get(parent_structure.get("pivot_scale", points.get("pivot_scale")), -1)
-                        >= rank.get(child_points.get("pivot_scale"), -1)
-                        and known_at <= as_of):
-                    nested.add(child.pattern_id)
-                    break
-        return nested
+        return set(_nested_main_parent_map(patterns, patterns, action_date).keys())
 
     def _independent_candidates(self, pool, candidates, action_date):
+        as_of = pd.Timestamp(action_date)
+        def boundary_known_by(pattern):
+            detail = {item["code"]: item["value"] for item in pattern.evidence}
+            selection = detail.get("neckline_selection", {})
+            dates = [selection.get(key) for key in (
+                "line_frozen_at", "freeze_date", "structure_known_at") if selection.get(key)]
+            available = (detail.get("boundary_available_at") or {}).get("date")
+            if available:
+                dates.append(available)
+            return not dates or max(pd.Timestamp(value) for value in dates) <= as_of
+
+        pool = [pattern for pattern in pool if pattern is not None
+                and pattern_instance_is_frozen(pattern) and boundary_known_by(pattern)]
+        candidates = [pattern for pattern in candidates if pattern is not None
+                      and pattern_instance_is_frozen(pattern) and boundary_known_by(pattern)]
+        pool = self._selected_boundary_patterns(pool)
+        candidates = self._selected_boundary_patterns(candidates)
         nested = self._nested_ids(pool + candidates, action_date)
         unique = {p.pattern_id: p for p in candidates if p.pattern_id not in nested
                   and p.pattern_id not in self.emitted_ids}
-        by_type = {}
-        for pattern in unique.values():
-            current = by_type.get(pattern.pattern_type)
-            if current is None or self._main_rank(pattern) > self._main_rank(current):
-                by_type[pattern.pattern_type] = pattern
-        return sorted(by_type.values(), key=self._main_rank, reverse=True)
+        return sorted(unique.values(), key=self._main_rank, reverse=True)
 
     def append_bar(self, bar: dict) -> List[dict]:
         row = dict(bar)
@@ -1169,8 +1612,16 @@ class DailyRecognitionSession:
         previous_close = float(self.bars[i - 1]["close"]) if i else row["close"]
         true_range = max(row["high"] - row["low"], abs(row["high"] - previous_close),
                          abs(row["low"] - previous_close))
+        if self._atr_buffer_length != len(self.atr_values):
+            self._atr_array_prefix()
         self.atr_values.append(true_range if i == 0 else self.atr_values[-1] +
                                (true_range - self.atr_values[-1]) / 14.0)
+        if i >= len(self._atr_buffer):
+            extended = np.empty(max(i + 1, len(self._atr_buffer) * 2), dtype=float)
+            extended[:self._atr_buffer_length] = self._atr_buffer[:self._atr_buffer_length]
+            self._atr_buffer = extended
+        self._atr_buffer[i] = self.atr_values[-1]
+        self._atr_buffer_length = i + 1
         self.performance["atr_updates"] += 1
         refreshed = self._append_scale_pivots(i) if i else []
         pressure_pivot = self._append_pressure_pivot(i) if i else None
@@ -1205,8 +1656,11 @@ class DailyRecognitionSession:
             signals = self._evaluate(pressure_pivot)
         else:
             signals = []
-        if not signals:
-            signals = self._check_cached_breakout()
+        # Cached frozen boundaries must advance on every bar, even when a
+        # different candidate emitted a signal on this same date. Skipping
+        # their check can lose an early crossing and allow a later recross to
+        # masquerade as a fresh maturity-qualified entry.
+        signals += self._check_cached_breakout()
         if local_added or i >= 1:
             signals += self._check_bull_flag()
         if len(signals) > 1:
@@ -1217,25 +1671,27 @@ class DailyRecognitionSession:
             if merged:
                 patterns = [Pattern(**item) for item in merged]
                 signals = [self._signal_many(patterns, str(pd.Timestamp(self.bars[-1]["date"]).date()))]
+        self._record_instance_states(signals)
         self._report_progress()
         return self._remember(signals)
 
 
-def generate_daily_signals(bars, code, kind, trade_start=None, progress_callback=None,
-                           recognizer="v7", performance=None):
-    """Replay all supplied bars and return confirmed signals; history is never reset."""
+def recognize_daily_instances(bars, code, kind, trade_start=None, progress_callback=None,
+                               recognizer="v7", performance=None):
+    """Run the shared daily owner and return instances, immutable events and entries."""
     if recognizer not in {"v7", "boundary_first"}:
         raise ValueError("recognizer must be 'v7' or 'boundary_first'")
     frame = pd.DataFrame(bars).copy()
     frame["date"] = pd.to_datetime(frame.date, errors="coerce")
     frame = frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
     if frame.empty:
-        return []
+        return {"instances": [], "instance_events": [], "signals": [], "entry_events": []}
     metadata_tick = getattr(bars, "attrs", {}).get("quality", {}).get("tick_size")
     tick = float(metadata_tick if metadata_tick is not None else (0.001 if kind == "etf" else 0.01))
     session = DailyRecognitionSession(code, kind, tick, progress_callback=progress_callback,
                                       total_bars=len(frame),
-                                      boundary_first=recognizer == "boundary_first")
+                                      boundary_first=recognizer == "boundary_first",
+                                      source_frame=frame)
     session._report_progress(force=True, phase="recognition")
     signals = []
     first = pd.Timestamp(trade_start).date().isoformat() if trade_start is not None else None
@@ -1258,7 +1714,37 @@ def generate_daily_signals(bars, code, kind, trade_start=None, progress_callback
             performance.update(session.neckline_potential_pair_cache.stats)
         performance["engine_version"] = (BOUNDARY_FIRST_ENGINE_VERSION
                                           if recognizer == "boundary_first" else ENGINE_VERSION)
-    return signals
+    current_instances = session.current_instances()
+    instance_events = session.instance_events()
+    entry_events = [event for event in instance_events
+                    if event.get("entry_eligible") is True
+                    and (first is None or event.get("event_date", "") >= first)]
+    if performance is not None:
+        performance["pattern_instance_event_count"] = len(instance_events)
+        performance["entry_event_count"] = len(entry_events)
+        state_counts = {}
+        for event in instance_events:
+            state = event.get("state", "unknown")
+            state_counts[state] = state_counts.get(state, 0) + 1
+        performance["pattern_instance_state_counts"] = state_counts
+    return {"instances": current_instances, "instance_events": instance_events,
+            "signals": signals, "entry_events": entry_events,
+            "engine_version": (BOUNDARY_FIRST_ENGINE_VERSION
+                               if recognizer == "boundary_first" else ENGINE_VERSION)}
+
+
+def generate_daily_signals(bars, code, kind, trade_start=None, progress_callback=None,
+                           recognizer="v7", performance=None):
+    """Backtrader adapter over the same immutable daily recognition events as scan."""
+    result = recognize_daily_instances(bars, code, kind, trade_start=trade_start,
+                                       progress_callback=progress_callback,
+                                       recognizer=recognizer, performance=performance)
+    signals = result["signals"]
+    eligible_ids = {event["instance_id"] for event in result["entry_events"]}
+    signals = [signal for signal in signals
+               if any(pattern.get("pattern_id") in eligible_ids
+                      for pattern in signal.get("patterns", [signal.get("pattern", {})]))]
+    return DailySignalStream(signals, result["instance_events"], result["entry_events"])
 
 
 def generate_daily_signals_boundary_first(bars, code, kind, trade_start=None,

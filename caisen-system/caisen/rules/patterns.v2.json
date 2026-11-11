@@ -620,9 +620,10 @@
     }
   ],
   "main_structure_extension": {
-    "source_rule_version": "caisen-main-bottoms-v11",
+    "source_rule_version": "caisen-main-bottoms-v17",
+    "w_bottom_rebound_peak_association": "each_intervening_rebound_peak_must_match_selected_frozen_boundary_within_touch_tolerance",
     "neckline_selection_rule_version": "pattern_matched_pressure_envelope_v7",
-    "main_pattern_rule_version": "caisen-v24-main-bottom-v1",
+    "main_pattern_rule_version": "caisen-v30-main-bottom-v1",
     "breakout_candidate_rule": "candidate_own_frozen_neckline_v1",
     "neckline_selection_order": [
       "independent_test_count_desc",
@@ -667,8 +668,8 @@
       "candidate_reversal_atr_multiple": 2.0,
       "candidate_reversal_scope": "causal_pressure_point_confirmation_only",
       "minimum_independent_groups": 2,
-      "consumed_boundary_phase_rule": "same_structure_equivalent_frozen_neckline_v1",
-      "consumed_boundary_phase_rationale": "同一结构锚点的已触发缓冲突破会消耗等价冻结颈线；新增同线触点不得重新发出买点。不同压力线及新的结构锚点仍可独立确认。",
+      "consumed_boundary_phase_rule": "same_structure_exact_frozen_neckline_v2",
+      "consumed_boundary_phase_rationale": "同一结构锚点的已触发缓冲突破会消耗同一条冻结颈线；新增同线触点不得重新发出买点。更换为不同冻结颈线版本后可以独立确认并重新发出买点。",
       "lookback_calendar_years": 1,
       "minimum_separation_daily_sessions": 10,
       "minimum_separation_weekly_bars": 2,

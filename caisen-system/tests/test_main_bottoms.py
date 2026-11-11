@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from caisen.main_bottoms import (
     MAIN_RULES,
@@ -13,6 +14,7 @@ from caisen.main_bottoms import (
     _structure_candidates,
     _triangle_boundaries_intact,
     _triangle_apex_index,
+    _w_rebound_peak_associated,
     detect_main_bottoms,
     detect_multiscale_pivots,
     link_main_bottom_children,
@@ -58,7 +60,8 @@ def is_selected(pattern):
 
 
 def test_main_bottom_thresholds_are_declared_in_the_rule_catalog():
-    assert MAIN_RULES["source_rule_version"] == "caisen-main-bottoms-v9"
+    assert MAIN_RULES["source_rule_version"] == "caisen-main-bottoms-v17"
+    assert MAIN_RULES["main_pattern_rule_version"] == "caisen-v30-main-bottom-v1"
     assert MAIN_RULES["neckline_tests"]["candidate_reversal_atr_multiple"] == 2.0
     assert MAIN_RULES["neckline_tests"]["minimum_departure_atr"] == 1.0
     assert MAIN_RULES["timeframes"]["1d"]["structure_window_calendar_years"] == 5
@@ -67,7 +70,7 @@ def test_main_bottom_thresholds_are_declared_in_the_rule_catalog():
     assert MAIN_RULES["minimum_duration_calendar_months"] == 6
     assert MAIN_RULES["neckline_tests"]["minimum_independent_groups"] == 2
     assert MAIN_RULES["neckline_tests"]["consumed_boundary_phase_rule"] == \
-        "same_structure_equivalent_frozen_neckline_v1"
+        "same_structure_exact_frozen_neckline_v2"
     assert MAIN_RULES["inverse_head_shoulders"]["maximum_leg_duration_ratio"] == 2.5
     assert MAIN_RULES["inverse_head_shoulders"][
         "minimum_intervening_right_trough_head_separation_atr_multiple"] == 2.0
@@ -76,21 +79,423 @@ def test_main_bottom_thresholds_are_declared_in_the_rule_catalog():
         ("2atr_5pct", 2.0, 0.05), ("3atr_8pct", 3.0, 0.08), ("5atr_12pct", 5.0, 0.12))
 
 
-def test_long_cycle_w_bottom_uses_two_prior_independent_neckline_tests_and_confirms_causally():
+def test_consumed_neckline_phase_lookup_matches_naive_lifecycle_rules():
+    from caisen.main_bottoms import _consumed_neckline_phase_matcher
+
+    phases = [
+        {"line": {"slope": -0.1, "intercept": 5.0}, "selected": True},
+        {"line": {"slope": -0.2, "intercept": 6.0}, "selected": True,
+         "consumed_index": 9},
+        {"line": {"slope": -0.3, "intercept": 7.0}, "selected": False},
+        {"line": {"slope": -0.4, "intercept": 8.0}, "selected": True,
+         "consumed_index": 11},
+        {"line": {"slope": -0.5, "intercept": 9.0}, "selected": True,
+         "consumed_index": 4},
+    ]
+    matches = _consumed_neckline_phase_matcher(phases, current_index=10)
+
+    assert matches({"slope": -0.1 + 5e-13, "intercept": 5.0})
+    assert matches({"slope": -0.2, "intercept": 6.0})
+    assert matches({"slope": -0.5, "intercept": 9.0})
+    assert not matches({"slope": -0.3, "intercept": 7.0})
+    assert not matches({"slope": -0.4, "intercept": 8.0})
+    assert not matches({"slope": -0.5, "intercept": 9.001})
+
+
+def test_516630_same_anchor_geometry_keeps_distinct_frozen_boundary_reentries():
+    from caisen.daily_incremental import recognize_daily_instances
+
+    source = Path(__file__).parents[2] / "data" / "etfs" / "516630.csv"
+    bars = pd.read_csv(source, parse_dates=["date"])
+    bars = bars[bars.date <= "2024-10-08"].reset_index(drop=True)
+    found = recognize_daily_instances(bars, "516630", "etf", recognizer="boundary_first")
+    same_structure = [item for item in found["instances"]
+        if item.pattern_type == "inverse_head_shoulders"
+        and [item.key_points.get(f"pivot_{number}_date") for number in (1, 2, 3)] ==
+        ["2023-10-24", "2024-02-05", "2024-04-22"]]
+
+    assert len(same_structure) >= 2
+    assert len({item.boundary_version_id for item in same_structure}) == len(same_structure)
+    assert len({(item.neckline["slope"], item.neckline["intercept"])
+                for item in same_structure}) == len(same_structure)
+    assert all(item.state == "confirmed" and item.confirmation_date for item in same_structure)
+    for item in same_structure:
+        selection = evidence(item)["neckline_selection"]
+        assert pd.Timestamp(selection["line_frozen_at"]) < pd.Timestamp(item.confirmation_date)
+    assert all(item.multiscale_evidence for item in same_structure)
+    matching_entries = [event for event in found["entry_events"]
+                        if event["pattern"].get("pattern_type") == "inverse_head_shoulders"
+                        and [event["pattern"].get("key_points", {}).get(f"pivot_{number}_date")
+                             for number in (1, 2, 3)] == [
+                                 "2023-10-24", "2024-02-05", "2024-04-22"]]
+    assert {event["instance_id"] for event in matching_entries} == {
+        item.pattern_id for item in same_structure}
+
+
+def test_w_frozen_neckline_must_be_associated_with_the_intervening_rebound():
+    lows = [Pivot(10, "2025-01-01", 2.5, "low", 11, "2025-01-02"),
+            Pivot(30, "2025-02-01", 2.6, "low", 31, "2025-02-02")]
+    highs = np.array([3.0] * 41, dtype=float)
+    highs[20] = 3.03
+    atr = np.full(41, 0.05, dtype=float)
+    candidate = {"tests": [{"pivot_index": 15, "level": 3.26, "tolerance": 0.025}]}
+
+    assert not _w_rebound_peak_associated(
+        lows, candidate["tests"], {"slope": 0.0, "intercept": 3.225}, highs, atr, 0.001)
+    highs[20] = 3.225
+    assert _w_rebound_peak_associated(
+        lows, [], {"slope": 0.0, "intercept": 3.225}, highs, atr, 0.001)
+
+
+def test_batch_w_pattern_can_reissue_on_a_new_neckline_after_old_line_fails(monkeypatch):
+    import caisen.main_bottoms as main_bottoms
+
+    dates = pd.bdate_range("2020-01-01", periods=171)
+    close = np.full(len(dates), 10.1, dtype=float)
+    close[150] = 12.3  # First line at 12.0 gets a buffered breakout.
+    close[151] = 11.5  # The first boundary fails before the revised line triggers.
+    close[170] = 12.8  # New line at 12.5 gets its own buffered breakout.
+    high = close + 0.05
+    low = close - 0.05
+    high[0], low[0] = 20.0, 8.0  # Supplies a qualifying low-history position.
+    high[20] = 12.0  # The W rebound is covered by both candidate boundaries.
+    low[10], low[30] = 10.0, 10.1
+    frame = pd.DataFrame({"date": dates, "open": close, "high": high,
+                          "low": low, "close": close, "volume": 1_000_000.0})
+    first = Pivot(10, str(dates[10].date()), 10.0, "low", 11,
+                  str(dates[11].date()), "2ATR|5%")
+    rebound = Pivot(20, str(dates[20].date()), 12.0, "high", 21,
+                    str(dates[21].date()), "2ATR|5%")
+    second = Pivot(30, str(dates[30].date()), 10.1, "low", 31,
+                   str(dates[31].date()), "2ATR|5%")
+
+    def boundary(level, pair_id, frozen_index, test_indices):
+        tests = []
+        for index in test_indices:
+            day = str(dates[index].date())
+            tests.append({
+                "pivot_index": index, "pivot_date": day,
+                "known_index": index, "known_date": day,
+                "coverage_start_index": index, "coverage_end_index": index,
+                "coverage_start_date": day, "coverage_end_date": day,
+                "coverage_max_excess": 0.0,
+                "level": level, "tolerance": 0.1, "valid": True,
+                "pair_id": pair_id, "group_id": f"{pair_id}-{index}",
+                "test_span_bars": test_indices[-1] - test_indices[0],
+                "selection_score": (0, 0, 0.1, -index),
+            })
+        return {"line": {"slope": 0.0, "intercept": level}, "tests": tests,
+                "score": (-2, -(test_indices[-1] - test_indices[0]), 0.1, -test_indices[-1]),
+                "frozen_index": frozen_index}
+
+    candidates = [boundary(12.0, "first-line", 6, [5, 6]),
+                  boundary(12.5, "replacement-line", 145, [140, 145])]
+    monkeypatch.setattr(main_bottoms, "_independent_neckline_tests",
+                        lambda *_args, **_kwargs: candidates)
+    monkeypatch.setattr(main_bottoms, "_w_rebound_peak_associated", lambda *_args: True)
+    monkeypatch.setattr(main_bottoms, "_neckline_formation_coverage",
+                        lambda _high, _atr, _line, start, end, *_args, **_kwargs: {
+                            "passed": True, "start_index": start, "end_index": end,
+                            "maximum_excess": 0.0})
+
+    result = main_bottoms._make_main_pattern(
+        frame, "000001", "stock", "1d", "w_bottom", [first, rebound, second],
+        [first, rebound, second], np.full(len(frame), 0.2), 0.01,
+        "2atr_5pct", "5y", background_bars=frame)
+
+    assert result is not None
+    pattern = result[0] if isinstance(result, list) else result
+    assert pattern.state == "confirmed"
+    assert pattern.confirmation_date == str(dates[170].date())
+    assert pattern.neckline["intercept"] == 12.5
+
+
+def test_r02_late_boundary_discovery_does_not_backfill_or_emit_a_buy():
+    from caisen.daily_incremental import recognize_daily_instances
+
+    bars = pd.read_csv(Path(__file__).parent / "fixtures" / "main_bottoms" / "R02-000008.csv",
+                       parse_dates=["date"])
+    result = recognize_daily_instances(bars, "000008", "etf", recognizer="boundary_first")
+    target = next(item for item in result["instances"]
+                  if item.pattern_type == "w_bottom"
+                  and item.key_points.get("pivot_1_date") == "2025-04-29"
+                  and item.key_points.get("pivot_2_date") == "2025-06-23"
+                  and any(record.get("date") == "2025-08-08"
+                          for record in evidence(item)["neckline_selection"].get(
+                              "early_breakouts", [])))
+    late_instance_id = target.pattern_id
+    target_events = [event for event in result["instance_events"]
+                     if event["instance_id"] == late_instance_id]
+
+    # This boundary pairs on 2025-11-19, after its 2025-08-08 crossing.
+    # It may start a forming lifecycle then, but cannot backfill a buy.
+    assert target.confirmation_date is None
+    assert target_events
+    assert min(event["event_date"] for event in target_events) == "2025-11-19"
+    assert not any(event.get("event_date") == "2025-08-08" for event in target_events)
+    assert not any(event["instance_id"] == late_instance_id for event in result["entry_events"])
+
+
+def test_streaming_boundary_discovery_does_not_backdate_late_early_crossings():
+    from caisen.daily_incremental import DailyRecognitionSession
+
+    bars = pd.read_csv(Path(__file__).parent / "fixtures" / "main_bottoms" / "R02-000008.csv",
+                       parse_dates=["date"])
+    session = DailyRecognitionSession("000008", "etf", tick_size=0.001,
+                                      boundary_first=True)
+    prior_event_ids = []
+    target_availability = None
+    target_early_dates = []
+    target_instance_id = None
+    for _, row in bars.iterrows():
+        bar = row.to_dict()
+        bar["date"] = pd.Timestamp(bar["date"])
+        for key in ("open", "high", "low", "close"):
+            bar[key] = float(bar[key])
+        session.append_bar(bar)
+        for candidate in session.active.values():
+            pattern = candidate.get("pattern")
+            if (pattern is None or pattern.pattern_type != "w_bottom"
+                    or pattern.key_points.get("pivot_1_date") != "2025-04-29"
+                    or pattern.key_points.get("pivot_2_date") != "2025-06-23"):
+                continue
+            metadata = {item["code"]: item["value"] for item in pattern.evidence}
+            if metadata.get("boundary_available_at") and target_availability is None:
+                target_availability = metadata["boundary_available_at"]["date"]
+                target_instance_id = pattern.pattern_id
+                target_early_dates = [item["date"] for item in
+                                      metadata["neckline_selection"].get("early_breakouts", [])]
+        events = session.instance_events()
+        assert [event["event_id"] for event in events[:len(prior_event_ids)]] == prior_event_ids
+        newly_added = events[len(prior_event_ids):]
+        current_date = str(bar["date"].date())
+        for event in newly_added:
+            if event.get("event_type") == "early_breakout_consumed":
+                assert event["event_date"] == current_date
+        prior_event_ids = [event["event_id"] for event in events]
+
+    assert target_availability == "2025-11-19"
+    assert target_early_dates == ["2025-08-08"]
+    assert not any(event["event_date"] == "2025-08-08"
+                   and event.get("event_type") == "early_breakout_consumed"
+                   for event in session.instance_events())
+    assert not any(event.get("entry_eligible") and event["instance_id"] == target_instance_id
+                   for event in session.instance_events())
+
+
+def test_000538_weekly_frozen_boundary_and_state_are_prefix_stable():
+    from caisen.market import aggregate_weekly, default_china_calendar
+
+    source = Path(__file__).parents[2] / "data" / "stocks" / "000538.csv"
+    full_daily = pd.read_csv(source, parse_dates=["date"])
+    snapshots = []
+    events_by_cutoff = {}
+    stable_instance_id = None
+    for cutoff in ("2024-08-30", "2024-09-27", "2024-11-29", "2026-11-06"):
+        daily = full_daily[full_daily.date <= cutoff].reset_index(drop=True)
+        weekly = aggregate_weekly(daily, calendar=default_china_calendar())
+        found = detect_main_bottoms(weekly, code="000538", kind="stock", timeframe="1w",
+                                    background_bars=daily)
+        events_by_cutoff[cutoff] = found
+        matching = [item for item in found
+                    if item.pattern_type == "w_bottom"
+                    and item.key_points.get("pivot_1_date") == "2023-03-24"
+                    and item.key_points.get("pivot_2_date") == "2024-02-02"
+                    and evidence(item).get("neckline_selection", {}).get(
+                        "line_frozen_at") == "2023-06-02"]
+        target = (next(item for item in matching if item.pattern_id == stable_instance_id)
+                  if stable_instance_id else matching[0])
+        stable_instance_id = target.pattern_id
+        detail = evidence(target)
+        selection = detail["neckline_selection"]
+        snapshots.append((cutoff, target, selection, detail))
+
+    first_id = snapshots[0][1].pattern_id
+    first_line = snapshots[0][1].neckline
+    assert all(item.pattern_id == first_id for _, item, _, _ in snapshots), [
+        (cutoff, item.pattern_id, item.neckline, item.state, item.confirmation_date)
+        for cutoff, item, _, _ in snapshots]
+    assert all(item.neckline == first_line for _, item, _, _ in snapshots)
+    assert snapshots[0][1].state == "forming"
+    assert snapshots[0][1].confirmation_date is None
+    # The original 49.85 boundary remains the same historical instance; its
+    # later invalidation does not borrow the new line's September confirmation.
+    assert snapshots[1][1].confirmation_date is None
+    assert snapshots[2][1].state == "confirmed"
+    assert snapshots[2][1].confirmation_date == "2024-09-30"
+    assert all(selection["line_frozen_at"] == "2023-06-02"
+               for _, _, selection, _ in snapshots)
+    assert all([test["pivot_date"] for test in detail["neckline_tests"] if test["valid"]]
+               == ["2023-02-03", "2023-05-05"]
+               for _, _, _, detail in snapshots)
+    september_events = [item for item in events_by_cutoff["2024-09-27"]
+                    if item.pattern_type == "w_bottom"
+                    and item.key_points.get("pivot_1_date") == "2023-03-24"
+                    and item.key_points.get("pivot_2_date") == "2024-02-02"]
+    assert len({item.boundary_version_id for item in september_events}) >= 2
+    assert any(item.pattern_id != first_id and item.confirmation_date == "2024-09-27"
+               for item in september_events)
+    later_revisions = [item for item in events_by_cutoff["2026-11-06"]
+                       if item.pattern_type == "w_bottom"
+                       and item.key_points.get("pivot_1_date") == "2023-03-24"
+                       and item.key_points.get("pivot_2_date") == "2024-02-02"
+                       and item.pattern_id != first_id]
+    assert any(item.neckline != first_line and item.confirmation_date
+               for item in later_revisions)
+    assert all(pd.Timestamp(evidence(item)["neckline_selection"]["line_frozen_at"])
+               < pd.Timestamp(item.confirmation_date)
+               for item in later_revisions if item.confirmation_date)
+    assert any(item.state == "forming" for item in september_events)
+
+
+def test_weekly_detection_keeps_a_second_frozen_line_for_the_same_anchors(monkeypatch):
+    from caisen import main_bottoms
+    from caisen.pattern_instances import pattern_identity_metadata
+
+    dates = pd.date_range("2024-01-05", periods=40, freq="W-FRI")
+    bars = pd.DataFrame({"date": dates, "open": 10.0, "high": 10.2,
+                         "low": 9.8, "close": 10.0, "volume": 1000})
+    first = Pivot(2, str(dates[2].date()), 8.0, "low", 3,
+                  str(dates[3].date()), "2ATR|5%")
+    second = Pivot(10, str(dates[10].date()), 8.1, "low", 11,
+                   str(dates[11].date()), "2ATR|5%")
+    sequence = [first, second]
+    scales = {name: list(sequence) for name, _atr_multiple, _percent in PIVOT_SCALES}
+    monkeypatch.setattr(main_bottoms, "detect_multiscale_pivots",
+                        lambda *_args, **_kwargs: scales)
+    monkeypatch.setattr(main_bottoms, "_detect_neckline_test_pivots", lambda *_args: [])
+    monkeypatch.setattr(main_bottoms, "_structure_candidates",
+                        lambda scale_pivots, *_args, **_kwargs:
+                        [("w_bottom", sequence)]
+                        if scale_pivots is scales[PIVOT_SCALES[0][0]] else [])
+    lines = [{"slope": 0.0, "intercept": 10.0 + 0.5 * index} for index in range(10)]
+
+    def make_pattern(_frame, code, kind, timeframe, family, anchors, _pressure,
+                     _atr, _tick, scale, _horizon, **kwargs):
+        excluded = [item.get("line") for item in kwargs.get("consumed_boundary_phases", ())]
+        line_index = next((index for index, line in enumerate(lines) if line not in excluded), None)
+        if line_index is None:
+            return None
+        line = lines[line_index]
+        key_points = {
+            "pivot_1_date": anchors[0].date, "pivot_1_kind": "low", "pivot_1": anchors[0].price,
+            "pivot_2_date": anchors[1].date, "pivot_2_kind": "low", "pivot_2": anchors[1].price,
+            "pivot_scale": scale,
+        }
+        frozen = str(dates[11 + line_index * 2].date())
+        tests = [{"pair_id": f"line-{line_index}", "group_id": f"g-{line_index}-1",
+                  "pivot_date": str(dates[4 + line_index * 2].date()),
+                  "pivot_index": 4 + line_index * 2, "level": line["intercept"], "valid": True},
+                 {"pair_id": f"line-{line_index}", "group_id": f"g-{line_index}-2",
+                  "pivot_date": frozen, "pivot_index": 11 + line_index * 2,
+                  "level": line["intercept"], "valid": True}]
+        evidence_rows = [
+            {"code": "main_structure", "value": {"role": "main", "pivot_scale": scale,
+                                                        "support_lower": 8.0}},
+            {"code": "neckline_selection", "value": {
+                "selected_candidate_id": f"line-{line_index}", "selected_line": line,
+                "line_frozen_at": frozen, "structure_known_at": str(dates[11].date())}},
+            {"code": "neckline_tests", "value": tests},
+        ]
+        identity = pattern_identity_metadata({"code": code, "kind": kind, "timeframe": timeframe,
+            "pattern_type": family, "key_points": key_points, "neckline": line,
+            "evidence": evidence_rows})
+        return Pattern(pattern_id=identity["instance_id"], code=code, kind=kind, timeframe=timeframe,
+            pattern_type=family, direction="bullish", state="confirmed", formed_at=anchors[0].date,
+            confirmed_at=14 + line_index, confirmation_date=str(dates[14 + line_index].date()),
+            last_observed_date=str(dates[-1].date()), key_points=key_points, neckline=line,
+            evidence=evidence_rows, structure_key=identity["structure_key"],
+            boundary_version_id=identity["boundary_version_id"])
+
+    monkeypatch.setattr(main_bottoms, "_make_main_pattern", make_pattern)
+
+    events = detect_main_bottoms(bars, code="000001", timeframe="1w")
+
+    assert len(events) == 10
+    assert len({event.structure_key for event in events}) == 1
+    assert len({event.boundary_version_id for event in events}) == 10
+    assert len({event.pattern_id for event in events}) == 10
+
+
+def test_batch_detection_keeps_same_level_ihs_with_equal_outer_anchors_independent(monkeypatch):
+    from caisen import main_bottoms
+    from caisen.pattern_instances import pattern_identity_metadata
+
+    dates = pd.date_range("2024-01-01", periods=30, freq="D")
+    bars = pd.DataFrame({"date": dates, "open": 10.0, "high": 10.2,
+                         "low": 9.8, "close": 10.0, "volume": 1000})
+    sequences = [
+        [Pivot(2, str(dates[2].date()), 8.0, "low", 3, str(dates[3].date()), "2ATR|5%"),
+         Pivot(12, str(dates[12].date()), 7.0, "low", 13, str(dates[13].date()), "2ATR|5%"),
+         Pivot(25, str(dates[25].date()), 8.0, "low", 26, str(dates[26].date()), "2ATR|5%")],
+        [Pivot(2, str(dates[2].date()), 8.0, "low", 3, str(dates[3].date()), "2ATR|5%"),
+         Pivot(16, str(dates[16].date()), 7.1, "low", 17, str(dates[17].date()), "2ATR|5%"),
+         Pivot(25, str(dates[25].date()), 8.0, "low", 26, str(dates[26].date()), "2ATR|5%")],
+    ]
+    scales = {name: [] for name, _atr_multiple, _percent in PIVOT_SCALES}
+    scales[PIVOT_SCALES[0][0]] = [pivot for sequence in sequences for pivot in sequence]
+    monkeypatch.setattr(main_bottoms, "detect_multiscale_pivots",
+                        lambda *_args, **_kwargs: scales)
+    monkeypatch.setattr(main_bottoms, "_detect_neckline_test_pivots", lambda *_args: [])
+    monkeypatch.setattr(main_bottoms, "_structure_candidates",
+                        lambda _pivots, *_args, **_kwargs:
+                        [("inverse_head_shoulders", sequence) for sequence in sequences]
+                        if _pivots is scales[PIVOT_SCALES[0][0]] else [])
+
+    def make_pattern(_frame, code, kind, timeframe, family, anchors, _pressure,
+                     _atr, _tick, scale, _horizon, **_kwargs):
+        middle = anchors[1]
+        key_points = {f"pivot_{number}_date": pivot.date
+                      for number, pivot in enumerate(anchors, 1)}
+        key_points.update({f"pivot_{number}_kind": pivot.kind
+                          for number, pivot in enumerate(anchors, 1)})
+        key_points["pivot_scale"] = scale
+        line = {"slope": 0.0, "intercept": 10.0 + middle.index / 100}
+        evidence_rows = [
+            {"code": "main_structure", "value": {
+                "role": "main", "pivot_scale": scale}},
+            {"code": "neckline_selection", "value": {
+                "selected_line": line, "line_frozen_at": str(dates[27].date()),
+                "structure_known_at": str(dates[27].date())}},
+        ]
+        identity = pattern_identity_metadata({"code": code, "kind": kind, "timeframe": timeframe,
+            "pattern_type": family, "key_points": key_points, "neckline": line,
+            "evidence": evidence_rows})
+        return Pattern(pattern_id=identity["instance_id"], code=code, kind=kind,
+            timeframe=timeframe, pattern_type=family, direction="bullish", state="forming",
+            formed_at=anchors[0].date, confirmed_at=None, last_observed_date=str(dates[-1].date()),
+            key_points=key_points, neckline=line, evidence=evidence_rows,
+            structure_key=identity["structure_key"],
+            boundary_version_id=identity["boundary_version_id"])
+
+    monkeypatch.setattr(main_bottoms, "_make_main_pattern", make_pattern)
+
+    events = detect_main_bottoms(bars, code="600633", timeframe="1d")
+
+    assert len(events) == 2
+    assert all(next(item["value"] for item in event.evidence
+                    if item["code"] == "main_structure")["role"] == "main"
+               for event in events)
+
+
+def test_nested_long_cycle_w_bottom_keeps_confirmation_but_not_an_independent_buy():
     bars = synthetic_w_bars()
     # Stop at the first qualifying breakout so the later target touch does not
     # change the event's current terminal state in this confirmation test.
     found = detect_main_bottoms(bars[bars.date <= "2024-12-31"].copy(),
                                 code="fixture", timeframe="1d")
-    bottoms = main_events(found)
+    bottoms = [item for item in found if item.pattern_type == "w_bottom"]
 
     assert bottoms
-    selected = next(item for item in bottoms if is_selected(item))
+    selected = next(item for item in bottoms
+                    if evidence(item)["main_structure"]["role"] == "internal")
     main = evidence(selected)["main_structure"]
     tests = [item for item in evidence(selected)["neckline_tests"] if item["valid"]]
     assert main["family"] == "w_bottom"
     assert main["scale"] == "5y"
-    assert main["signal_eligible"] is True
+    assert main["signal_eligible"] is False
+    assert main["eligibility_reason"] == "nested_in_known_main_structure"
+    assert selected.confirmation_date == "2024-11-20"
     assert pd.Timestamp(selected.formed_at) + pd.DateOffset(months=6) <= pd.Timestamp(selected.confirmation_date)
     assert len(tests) >= 2
     assert tests[1]["pivot_index"] - tests[0]["pivot_index"] >= 10
@@ -115,39 +520,38 @@ def test_pair_first_topology_enumerator_preserves_candidate_order_and_anchors():
                 for family, sequence in reference]
 
 
-def test_real_600108_prefix_recognizes_the_frozen_2024_w_and_jan_2026_breakout():
+def test_real_600108_shared_prefix_entries_match_their_own_frozen_geometry():
+    from caisen.daily_incremental import recognize_daily_instances
+
     source = Path(__file__).parents[2] / "data" / "stocks" / "600108.csv"
     bars = pd.read_csv(source, parse_dates=["date"])
     bars = bars[bars.date <= "2026-01-09"].reset_index(drop=True)
-    found = detect_main_bottoms(bars, code="600108", timeframe="1d")
-    bottoms = [item for item in main_events(found)
-               if item.formed_at == "2024-02-06" and is_selected(item)]
+    result = recognize_daily_instances(bars, "600108", "stock", recognizer="boundary_first")
+    target = next(item for item in result["instances"]
+                  if item.pattern_type == "w_bottom"
+                  and item.key_points.get("pivot_1_date") == "2024-02-06"
+                  and item.key_points.get("pivot_2_date") == "2024-09-18")
+    outer = next(item for item in result["instances"]
+                 if item.pattern_type == "w_bottom"
+                 and item.key_points.get("pivot_1_date") == "2021-02-04"
+                 and item.key_points.get("pivot_2_date") == "2024-09-18")
+    assert target.pattern_id != outer.pattern_id
+    assert target.boundary_version_id != outer.boundary_version_id
 
-    assert bottoms
-    selected = bottoms[0]
-    detail = evidence(selected)
-    structure = detail["main_structure"]
-    assert selected.confirmation_date == "2026-01-09"
-    assert selected.key_points["support_lower"] == 2.22
-    assert selected.key_points["support_upper"] == 2.25
-    breakout = detail["neckline_breakout"]
-    projected_neckline = (structure["neckline"]["slope"] * breakout["index"]
-                          + structure["neckline"]["intercept"])
-    assert abs(projected_neckline - 3.3) <= 0.05
-    tests = [item for item in detail["neckline_tests"] if item["valid"]]
-    assert len(tests) >= MAIN_RULES["neckline_tests"]["minimum_independent_groups"]
-    selected_tests = tests[:2]
-    assert selected_tests[0]["pivot_index"] < selected_tests[1]["pivot_index"]
-    assert selected_tests[1]["pivot_index"] - selected_tests[0]["pivot_index"] >= (
-        MAIN_RULES["neckline_tests"]["minimum_separation_daily_sessions"]
-    )
-    assert selected_tests[0]["pair_id"] == selected_tests[1]["pair_id"]
-    assert all(item["departure_atr"] >= MAIN_RULES["neckline_tests"]["minimum_departure_atr"]
-               for item in selected_tests)
-    assert structure["frozen_at"] >= structure["latest_anchor_date"]
-    assert all(item["known_date"] <= structure["frozen_at"] for item in selected_tests)
-    assert structure["frozen_at"] <= "2026-01-09"
-    assert structure["signal_is_volume_independent"] is True
+    entries = result["entry_events"]
+    assert all(event["entry_eligible"] for event in entries)
+    assert len({event["instance_id"] for event in entries}) == len(entries)
+    for event in entries:
+        pattern = event["pattern"]
+        detail = evidence(Pattern(**pattern))
+        breakout = detail.get("neckline_breakout") or detail.get("flag_breakout")
+        assert breakout is not None
+        assert breakout["date"] == event["event_date"]
+        assert breakout["close"] > breakout["required_close"]
+        observed_close = float(bars.loc[bars.date.eq(pd.Timestamp(event["event_date"])),
+                                        "close"].iloc[0])
+        assert breakout["close"] == pytest.approx(observed_close)
+        assert pattern["boundary_version_id"].startswith("boundary-")
 
 
 def test_516630_weekly_ihs_necklines_do_not_exceed_the_5pct_rise_gate():
@@ -173,126 +577,118 @@ def test_516630_weekly_ihs_necklines_do_not_exceed_the_5pct_rise_gate():
     assert any(item.pattern_type == "w_bottom" for item in found)
 
 
-def test_516630_full_daily_history_uses_current_w_neckline_tests_as_of_2024_10_08():
+def test_516630_shared_daily_entry_prefers_frozen_parent_ihs_over_nested_w():
+    from caisen.daily_incremental import recognize_daily_instances
+    from caisen.pattern_instances import pattern_instance_is_frozen
+
     source = Path(__file__).parents[2] / "data" / "etfs" / "516630.csv"
     daily = pd.read_csv(source, parse_dates=["date"])
     daily = daily[daily.date <= "2024-10-08"].reset_index(drop=True)
-    found = detect_main_bottoms(daily, code="516630", kind="etf", timeframe="1d",
-                                background_bars=daily)
+    result = recognize_daily_instances(daily, "516630", "etf", recognizer="boundary_first")
+    parent_ihs = [item for item in result["instances"]
+                  if item.pattern_type == "inverse_head_shoulders"
+                  and [item.key_points.get(f"pivot_{number}_date") for number in (1, 2, 3)] ==
+                      ["2023-10-24", "2024-02-05", "2024-04-22"]]
 
-    candidates = [item for item in main_events(found)
-                  if evidence(item)["main_structure"]["first_trough_date"] == "2024-02-05"]
-    assert candidates
-    selected = next(item for item in candidates if is_selected(item))
-    detail = evidence(selected)
-    structure = detail["main_structure"]
-    tests = [item for item in detail["neckline_tests"] if item["valid"]]
+    assert parent_ihs
+    ihs = next(item for item in parent_ihs)
+    ihs_detail = evidence(ihs)
+    # The older drawing labels the same two IHS shoulder/head lows as a W.
+    # The shared recognizer keeps the validated three-anchor IHS and does not
+    # emit an independent W instance or BUY for that child label.
+    assert not any(item.pattern_type == "w_bottom"
+                   and item.key_points.get("pivot_1_date") == "2024-02-05"
+                   and item.key_points.get("pivot_2_date") == "2024-04-22"
+                   for item in result["instances"])
+    assert not any(event["entry_eligible"]
+                   and event["pattern"].get("pattern_type") == "w_bottom"
+                   and event["pattern"].get("key_points", {}).get("pivot_1_date") == "2024-02-05"
+                   and event["pattern"].get("key_points", {}).get("pivot_2_date") == "2024-04-22"
+                   for event in result["entry_events"])
+    assert ihs.state == "confirmed" and ihs.confirmation_date == "2024-10-08"
+    assert pattern_instance_is_frozen(ihs.to_dict())
+    assert ihs.pattern_id.startswith("516630:")
+    assert ihs.boundary_version_id.startswith("boundary-")
+    assert ihs_detail["main_structure"]["role"] == "main"
+    assert ihs_detail["neckline_selection"]["formation_coverage"]["passed"] is True
+    assert ihs_detail["neckline_selection"]["structure_known_at"] == "2024-04-24"
+    same_day_signals = [signal for signal in result["signals"]
+                        if signal["signal_date"] == "2024-10-08"]
+    assert len(same_day_signals) == 1
+    assert ihs.pattern_id in same_day_signals[0]["pattern_ids"]
+    assert [(event["event_date"], event["entry_eligible"])
+            for event in result["entry_events"]
+            if event["instance_id"] == ihs.pattern_id] == [
+                ("2024-10-08", True)]
 
-    reference_touch = next(item for item in tests if item["pivot_date"] == "2024-03-21")
-    effective_level = (structure["neckline"]["slope"] * reference_touch["pivot_index"]
-                       + structure["neckline"]["intercept"])
-    assert np.isclose(effective_level, 0.973, atol=0.01)
-    assert detail["neckline_selection"]["rule_version"] == "pattern_matched_pressure_envelope_v7"
-    assert tests[-1]["pivot_date"] >= "2024-02-05"
-    assert all(item["level"] <= 0.973 * 1.05 for item in tests)
-    assert selected.confirmation_date == "2024-10-08"
 
+def test_159718_one_atr_reference_keeps_asymmetric_shoulders_and_first_shared_entry(monkeypatch):
+    from caisen.daily_incremental import DailyRecognitionSession
 
-def test_159718_one_atr_reference_keeps_asymmetric_shoulders_and_may_29_breakout(monkeypatch):
     monkeypatch.setitem(MAIN_RULES["neckline_tests"], "candidate_reversal_atr_multiple", 1.0)
     source = Path(__file__).parents[2] / "data" / "etfs" / "159718.csv"
     bars = pd.read_csv(source, parse_dates=["date"])
-    anchor_dates = ["2023-08-22", "2024-04-19", "2025-01-13"]
+    bars = bars[bars.date <= "2025-05-30"].reset_index(drop=True)
+    session = DailyRecognitionSession("159718", "etf", tick_size=0.01)
+    emitted_signals = []
+    for row in bars.to_dict("records"):
+        emitted_signals.extend(session.append_bar(row))
+    anchors = ["2023-08-22", "2024-04-19", "2025-01-13"]
+    entries = [event for event in session.instance_events()
+               if event["entry_eligible"]
+               and event["pattern"].get("pattern_type") == "inverse_head_shoulders"
+               and [event["pattern"]["key_points"].get(f"pivot_{number}_date")
+                    for number in (1, 2, 3)] == anchors]
 
-    waiting_bars = bars[bars.date <= "2025-02-10"].reset_index(drop=True)
-    waiting_found = detect_main_bottoms(waiting_bars, code="159718", kind="etf", timeframe="1d",
-                                        background_bars=waiting_bars)
-    waiting_candidates = [item for item in waiting_found
-                          if item.pattern_type == "inverse_head_shoulders"
-                          and evidence(item).get("main_structure", {}).get("role") == "main"
-                          and [item.key_points.get(f"pivot_{number}_date") for number in (1, 2, 3)] == anchor_dates]
-
-    assert waiting_candidates
-    waiting = waiting_candidates[0]
-    waiting_detail = evidence(waiting)
-    waiting_structure = waiting_detail["main_structure"]
-    waiting_selection = waiting_detail["neckline_selection"]
-
-    assert waiting.confirmation_date is None
-    assert waiting.state == "forming"
-    assert waiting_structure["signal_eligible"] is False
-    assert waiting_structure["eligibility_reason"] == "awaiting_fresh_neckline_breakout"
-    assert waiting_selection["structure_known_at"] == "2025-02-10"
-    assert waiting_detail["neckline_breakout"] is None
-
-    before_breakout_bars = bars[bars.date <= "2025-05-28"].reset_index(drop=True)
-    before_breakout_found = detect_main_bottoms(before_breakout_bars, code="159718", kind="etf", timeframe="1d",
-                                                background_bars=before_breakout_bars)
-    before_breakout = [item for item in before_breakout_found
-                       if item.pattern_type == "inverse_head_shoulders"
-                       and evidence(item).get("main_structure", {}).get("role") == "main"
-                       and [item.key_points.get(f"pivot_{number}_date") for number in (1, 2, 3)] == anchor_dates]
-    assert before_breakout
-    assert all(not evidence(item)["main_structure"]["signal_eligible"] for item in before_breakout)
-
-    breakout_bars = bars[bars.date <= "2025-05-29"].reset_index(drop=True)
-    breakout_found = detect_main_bottoms(breakout_bars, code="159718", kind="etf", timeframe="1d",
-                                         background_bars=breakout_bars)
-    breakout_candidates = [item for item in breakout_found
-                           if item.pattern_type == "inverse_head_shoulders"
-                           and evidence(item).get("main_structure", {}).get("role") == "main"
-                           and [item.key_points.get(f"pivot_{number}_date") for number in (1, 2, 3)] == anchor_dates]
-    assert breakout_candidates
-    confirmed = next(item for item in breakout_candidates if item.confirmation_date == "2025-05-29")
-    selected = next(item for item in breakout_found if is_selected(item))
-    assert selected.pattern_id == confirmed.pattern_id
-    detail = evidence(selected)
-    selection = detail["neckline_selection"]
-    tests = [item for item in detail["neckline_tests"] if item["valid"]]
-
-    assert selected.confirmation_date == "2025-05-29"
-    assert detail["neckline_breakout"]["date"] == "2025-05-29"
-    assert selected.state == "confirmed"
-    assert selected.rule_version == "caisen-v22-main-bottom-v1"
-    assert selected.source_rule_version == "caisen-main-bottoms-v9"
-    assert selected.neckline["slope"] <= 0
-    assert len(tests) >= 2
-    assert selection["rule_version"] == "pattern_matched_pressure_envelope_v7"
-    assert selection["coverage"]["passed"] is True
-    assert selection["coverage"]["start_date"] == tests[0]["pivot_date"]
-    assert selection["coverage"]["end_date"] == selection["line_frozen_at"]
-    assert selection["line_frozen_at"] == "2025-04-28"
-    assert selection["structure_known_at"] == "2025-02-10"
-    assert [item["pivot_date"] for item in tests] == [
-        "2023-11-15", "2024-10-08", "2025-03-20", "2025-04-23"
-    ]
-    breakout = detail["neckline_breakout"]
-    assert np.isclose(breakout["tolerance"], breakout["atr14_previous"])
-    assert np.isclose(breakout["required_close"],
-                      breakout["frozen_neckline"] + breakout["atr14_previous"])
-    assert breakout["required_close"] < breakout["close"]
+    assert [event["event_date"] for event in entries] == [
+        "2025-04-01", "2025-05-21", "2025-05-29"]
+    assert len({event["boundary_version_id"] for event in entries}) == 3
+    assert len({str(event["pattern"]["neckline"]) for event in entries}) == 3
+    entry = entries[0]
+    assert entry["event_date"] == "2025-04-01"
+    assert entry["pattern"]["confirmation_date"] == "2025-04-01"
+    assert entry["pattern"]["neckline"]["slope"] <= 0
+    assert entry["pattern"]["pattern_id"].startswith("159718:")
+    assert entry["boundary_version_id"].startswith("boundary-")
+    assert not any(event["entry_eligible"] and event["instance_id"] == entry["instance_id"]
+                   and event["event_date"] in {"2025-05-21", "2025-05-29"}
+                   for event in session.instance_events())
+    assert any(event.get("event_type") == "weak_crossing"
+               and event["instance_id"] == entry["instance_id"]
+               for event in session.instance_events())
 
 
-def test_159718_two_atr_pressure_candidates_confirm_the_same_ihs_on_may_21():
+def test_159718_two_atr_shared_session_allows_a_later_changed_neckline_entry():
+    from caisen.daily_incremental import DailyRecognitionSession
+
     source = Path(__file__).parents[2] / "data" / "etfs" / "159718.csv"
     bars = pd.read_csv(source, parse_dates=["date"])
-    bars = bars[bars.date <= "2025-05-28"].reset_index(drop=True)
-    found = detect_main_bottoms(bars, code="159718", kind="etf", timeframe="1d",
-                                background_bars=bars)
-    confirmed = [item for item in found
-                 if item.pattern_type == "inverse_head_shoulders"
-                 and item.confirmation_date == "2025-05-21"
-                 and [item.key_points.get(f"pivot_{number}_date") for number in (1, 2, 3)] ==
-                     ["2023-08-22", "2024-04-19", "2025-01-13"]]
+    bars = bars[bars.date <= "2025-05-30"].reset_index(drop=True)
+    session = DailyRecognitionSession("159718", "etf", tick_size=0.01)
+    emitted_signals = []
+    for row in bars.to_dict("records"):
+        emitted_signals.extend(session.append_bar(row))
+    anchors = ["2023-08-22", "2024-04-19", "2025-01-13"]
+    entries = [event for event in session.instance_events()
+               if event["entry_eligible"]
+               and event["pattern"].get("pattern_type") == "inverse_head_shoulders"
+               and [event["pattern"]["key_points"].get(f"pivot_{number}_date")
+                    for number in (1, 2, 3)] == anchors]
 
-    # This bounded batch replay keeps its May 21 event as the first buffered
-    # cross in the batch's own ATR/coverage history. The continuous stream has
-    # an equivalent same-anchor phase consumed on Apr 1; do not use that
-    # stream-only phase to suppress a batch candidate with different replay
-    # inputs.
-    assert confirmed
-    assert all(item.source_rule_version == "caisen-main-bottoms-v9" for item in confirmed)
-    assert all(evidence(item)["main_structure"]["signal_eligible"] for item in confirmed)
+    assert [event["event_date"] for event in entries] == [
+        "2025-03-20", "2025-04-01", "2025-05-21"]
+    assert len({event["boundary_version_id"] for event in entries}) == 3
+    emitted_revisions = [
+        (signal["signal_date"], pattern["pattern_id"])
+        for signal in emitted_signals
+        for pattern in signal.get("patterns", [])
+        if pattern.get("pattern_type") == "inverse_head_shoulders"
+        and [pattern.get("key_points", {}).get(f"pivot_{number}_date")
+             for number in (1, 2, 3)] == anchors]
+    assert {instance_id for _, instance_id in emitted_revisions} == {
+        event["instance_id"] for event in entries}
+    assert sorted(date for date, _ in emitted_revisions) == [
+        "2025-03-20", "2025-04-01", "2025-05-21"]
 
 
 def test_w_bottom_breakout_requires_atr_buffer_and_keeps_weak_crossings():
@@ -302,7 +698,8 @@ def test_w_bottom_breakout_requires_atr_buffer_and_keeps_weak_crossings():
     bars.loc[820:, "high"] = 3.36
     bars.loc[820:, "low"] = 3.32
     found = detect_main_bottoms(bars, code="fixture", timeframe="1d")
-    candidates = [item for item in main_events(found) if evidence(item).get("weak_crossings")]
+    candidates = [item for item in found if item.pattern_type == "w_bottom"
+                  and evidence(item).get("weak_crossings")]
     assert candidates
     selected = candidates[0]
     detail = evidence(selected)
@@ -531,6 +928,75 @@ def test_neckline_candidate_is_rejected_when_any_interval_high_crosses_the_line(
     assert tests == []
 
 
+def test_anchor_only_neckline_coverage_ignores_intermediate_high_but_rejects_crossed_anchor():
+    dates = pd.DatetimeIndex(pd.bdate_range("2022-01-03", periods=45))
+    bars = pd.DataFrame({"date": dates, "high": 2.6, "low": 1.5, "close": 2.0})
+    left = Pivot(5, str(dates[5].date()), 3.0, "high", 7,
+                 str(dates[7].date()), "3ATR|8%|neckline_test_2ATR")
+    right = Pivot(35, str(dates[35].date()), 3.0, "high", 37,
+                  str(dates[37].date()), "3ATR|8%|neckline_test_2ATR")
+    bars.loc[[5, 35], "high"] = 3.0
+    bars.loc[20, "high"] = 3.4  # Not a selected structural anchor.
+    trough = Pivot(40, str(dates[40].date()), 2.2, "low", 42,
+                   str(dates[42].date()), "3ATR|8%")
+    separating_low = Pivot(20, str(dates[20].date()), 2.0, "low", 22,
+                           str(dates[22].date()), "3ATR|8%")
+    atr_values = np.full(len(dates), 0.5)
+
+    accepted = _independent_neckline_tests(
+        [left, right, separating_low, trough], trough, trough, atr_values,
+        dates, 0.01, "1d", bars=bars, return_candidates=True,
+        coverage_mode="structure_anchors_only", structure_anchors=[trough])
+    rejected = _independent_neckline_tests(
+        [left, right, separating_low, trough], trough, trough, atr_values,
+        dates, 0.01, "1d", bars=bars, return_candidates=True,
+        coverage_mode="structure_anchors_only",
+        structure_anchors=[trough, Pivot(25, str(dates[25].date()), 3.4, "high", 27,
+                                         str(dates[27].date()), "3ATR|8%")])
+
+    assert accepted
+    assert accepted[0]["line"]["slope"] == 0
+    assert rejected == []
+
+
+def test_structure_anchor_coverage_ignores_non_anchor_wicks_and_rejects_high_anchor():
+    from caisen.main_bottoms import _neckline_structure_anchor_coverage
+
+    dates = pd.bdate_range("2022-01-03", periods=30)
+    anchors = [Pivot(5, str(dates[5].date()), 2.2, "low", 7,
+                     str(dates[7].date()), "2ATR|5%"),
+               Pivot(25, str(dates[25].date()), 2.4, "low", 27,
+                     str(dates[27].date()), "2ATR|5%")]
+    assert _neckline_structure_anchor_coverage(
+        {"slope": 0.0, "intercept": 3.0}, anchors, np.full(30, 0.5), 0.01)["passed"]
+    anchors.append(Pivot(15, str(dates[15].date()), 3.4, "high", 17,
+                         str(dates[17].date()), "2ATR|5%"))
+    result = _neckline_structure_anchor_coverage(
+        {"slope": 0.0, "intercept": 3.0}, anchors, np.full(30, 0.5), 0.01)
+    assert not result["passed"]
+    assert result["worst_index"] == 15
+
+
+def test_boundary_pair_cache_keeps_anchor_valid_lines_even_if_interval_coverage_fails():
+    from caisen.main_bottoms import _PotentialNecklinePairCache
+
+    dates = pd.bdate_range("2022-01-03", periods=45)
+    left = Pivot(5, str(dates[5].date()), 3.0, "high", 7,
+                 str(dates[7].date()), "3ATR|neckline_test_2ATR")
+    right = Pivot(35, str(dates[35].date()), 3.0, "high", 37,
+                  str(dates[37].date()), "3ATR|neckline_test_2ATR")
+    highs = np.full(len(dates), 2.6)
+    highs[[5, 35]] = 3.0
+    highs[20] = 3.4
+    cache = _PotentialNecklinePairCache()
+    cache.add([left, right], np.full(len(dates), 0.5), highs,
+              np.full(len(dates), 0.25), 0.01, "1d")
+
+    assert cache.matching_pairs([left, right], 10) == []
+    anchor_only = cache.matching_pairs([left, right], 10, anchor_only=True)
+    assert anchor_only == [(left, right)]
+
+
 def test_line_coverage_prefix_index_matches_brute_force_for_each_known_prefix():
     from caisen.main_bottoms import _line_coverage_prefixes
 
@@ -728,29 +1194,6 @@ def test_one_atr_reference_main_events_from_real_review_fixtures_remain_json_saf
                            for item in found)
 
 
-def test_two_atr_policy_records_known_000008_r02_false_positive():
-    source = Path(__file__).parent / "fixtures" / "main_bottoms" / "R02-000008.csv"
-    bars = pd.read_csv(source, parse_dates=["date"])
-    found = detect_main_bottoms(bars, code="000008", timeframe="1d")
-    selected = [item for item in found if is_selected(item)
-                and evidence(item)["main_structure"]["signal_eligible"]]
-
-    assert selected
-    assert all(item.pattern_type == "w_bottom" for item in selected)
-    assert all(item.formed_at == "2025-04-29" for item in selected)
-    assert all(item.confirmation_date == "2025-11-24" for item in selected)
-    assert all(item.source_rule_version == "caisen-main-bottoms-v9" for item in selected)
-    for item in selected:
-        detail = evidence(item)
-        tests = [test for test in detail["neckline_tests"] if test.get("valid")]
-        assert [(test["pivot_date"], test["level"]) for test in tests] == [
-            ("2025-08-21", 3.20), ("2025-10-24", 3.01)]
-        breakout = detail["neckline_breakout"]
-        assert breakout["date"] == "2025-11-24"
-        assert np.isclose(breakout["close"], 3.09)
-        assert np.isclose(breakout["required_close"], 2.91025 + 0.1084)
-
-
 def test_child_linkage_suppresses_only_same_timeframe_bullish_events_inside_parent_until_breakout():
     parent = Pattern("main", "fixture", "stock", "1d", "w_bottom", "bullish", "confirmed",
                      "2024-02-06", 900, confirmation_date="2026-01-09",
@@ -797,6 +1240,89 @@ def test_child_linkage_does_not_backdate_suppression_before_parent_is_known():
 
     assert by_id["early"].parent_id is None
     assert by_id["forming"].parent_id == "main"
+
+
+def test_static_recognizer_suppresses_inner_pattern_by_forming_outer_w(monkeypatch):
+    import caisen.main_bottoms as main_bottoms
+
+    dates = pd.date_range("2024-01-05", periods=105, freq="W-FRI")
+    frame = pd.DataFrame({"date": dates, "open": 10.0, "high": 10.2,
+                          "low": 9.8, "close": 10.0, "volume": 1000.0})
+    parent = Pattern(
+        "outer-w", "600108", "stock", "1w", "w_bottom", "bullish", "forming",
+        "2024-01-05", None, last_observed_date="2025-01-03",
+        key_points={"pivot_1_date": "2024-01-05", "pivot_1_kind": "low",
+                    "pivot_2_date": "2024-06-07", "pivot_2_kind": "low",
+                    "pivot_scale": "5atr_12pct"},
+        evidence=[{"code": "main_structure", "value": {
+            "role": "main", "signal_eligible": False, "pivot_scale": "5atr_12pct",
+            "first_trough_date": "2024-01-05", "structure_end_date": "2025-01-03"}},
+                  {"code": "neckline_selection", "value": {
+                      "structure_known_at": "2024-06-07"}}])
+    child = Pattern(
+        "inner-triangle", "600108", "stock", "1w", "triangle_bottom", "bullish", "confirmed",
+        "2024-03-01", 50, confirmation_date="2024-12-06", last_observed_date="2025-01-03",
+        key_points={"pivot_1_date": "2024-03-01", "pivot_1_kind": "low",
+                    "pivot_2_date": "2024-06-07", "pivot_2_kind": "high",
+                    "pivot_3_date": "2024-09-06", "pivot_3_kind": "low",
+                    "pivot_4_date": "2024-12-06", "pivot_4_kind": "high",
+                    "pivot_scale": "2atr_5pct"},
+        evidence=[{"code": "main_structure", "value": {
+            "role": "main", "signal_eligible": True, "pivot_scale": "2atr_5pct"}}])
+    scales = {"2atr_5pct": [], "3atr_8pct": [], "5atr_12pct": []}
+    parent_pivots = [Pivot(0, "2024-01-05", 8.0, "low", 1, "2024-01-12", "5ATR|12%"),
+                     Pivot(52, "2025-01-03", 8.1, "low", 53, "2025-01-10", "5ATR|12%")]
+    child_pivots = [Pivot(8, "2024-03-01", 8.0, "low", 9, "2024-03-08", "2ATR|5%"),
+                    Pivot(22, "2024-06-07", 10.0, "high", 23, "2024-06-14", "2ATR|5%"),
+                    Pivot(35, "2024-09-06", 8.1, "low", 36, "2024-09-13", "2ATR|5%"),
+                    Pivot(48, "2024-12-06", 10.1, "high", 49, "2024-12-13", "2ATR|5%")]
+    scales["2atr_5pct"] = child_pivots
+    scales["5atr_12pct"] = parent_pivots
+    sequences = {"2atr_5pct": [("triangle_bottom", child_pivots)],
+                 "3atr_8pct": [], "5atr_12pct": [("w_bottom", parent_pivots)]}
+
+    monkeypatch.setattr(main_bottoms, "detect_multiscale_pivots",
+                        lambda *_args, **_kwargs: scales)
+    monkeypatch.setattr(main_bottoms, "_detect_neckline_test_pivots",
+                        lambda *_args, **_kwargs: [])
+    scale_names = {"2ATR|5%": "2atr_5pct", "3ATR|8%": "3atr_8pct",
+                   "5ATR|12%": "5atr_12pct"}
+    monkeypatch.setattr(main_bottoms, "_structure_candidates",
+                        lambda pivots, *_args, **_kwargs: sequences[scale_names[pivots[0].scale]]
+                        if pivots else [])
+    monkeypatch.setattr(main_bottoms, "_make_main_pattern",
+                        lambda _frame, _code, _kind, _tf, family, *_args, **_kwargs:
+                        deepcopy(parent if family == "w_bottom" else child))
+
+    events = detect_main_bottoms(frame, code="600108", kind="stock", timeframe="1w")
+    by_id = {item.pattern_id: item for item in events}
+
+    assert evidence(by_id["inner-triangle"])["main_structure"]["role"] == "internal"
+
+
+@pytest.mark.parametrize(("state", "role", "selected"), [
+    ("target_reached", "main", True),
+    ("confirmed", "internal", True),
+    ("confirmed", "main", False),
+])
+def test_ineligible_or_terminal_main_event_cannot_suppress_a_legacy_child(state, role, selected):
+    parent = Pattern("parent", "fixture", "stock", "1d", "w_bottom", "bullish", state,
+                     "2024-01-01", 900, confirmation_date="2024-10-01",
+                     last_observed_date="2025-01-01",
+                     evidence=[{"code": "main_structure", "value": {
+                         "role": role, "signal_eligible": True,
+                         "first_trough_date": "2024-01-01", "structure_end_date": "2025-01-01"}},
+                               {"code": "main_selection", "value": {"selected": selected}}])
+    child = Pattern("child", "fixture", "stock", "1d", "bull_flag", "bullish", "confirmed",
+                    "2024-03-01", 600, confirmation_date="2024-04-01",
+                    key_points={"pivot_1_date": "2024-03-01", "pivot_1_kind": "low",
+                                "pivot_2_date": "2024-04-01", "pivot_2_kind": "high"})
+
+    linked = link_main_bottom_children([parent], [child])
+    linked_child = next(item for item in linked if item.pattern_id == "child")
+
+    assert linked_child.parent_id is None
+    assert "execution_suppression" not in evidence(linked_child)
 
 
 def test_materially_rising_neckline_is_rejected_and_small_rise_is_flattened():

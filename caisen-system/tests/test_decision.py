@@ -42,9 +42,9 @@ def test_complete_main_bottom_waiting_for_neckline_is_not_labeled_as_unformed():
     assert _label(candidate) == "W底，已成型，等待颈线有效突破"
 
 
-def test_only_three_migrated_bullish_bottom_shapes_can_create_buy_plans():
-    allowed = ("w_bottom", "inverse_head_shoulders", "triangle_bottom")
-    excluded = ("spring", "bull_flag", "bear_flag", "m_top", "false_breakout", "head_shoulders", "triangle_top")
+def test_only_four_migrated_bullish_shapes_can_create_buy_plans():
+    allowed = ("w_bottom", "inverse_head_shoulders", "triangle_bottom", "bull_flag")
+    excluded = ("spring", "bear_flag", "m_top", "false_breakout", "head_shoulders", "triangle_top")
 
     for pattern_type in allowed:
         candidate = pattern(pattern_type, volume_verified=True, execution_rules_verified=True)

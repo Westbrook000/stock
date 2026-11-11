@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from caisen.daily_incremental import generate_daily_signals
+from caisen.daily_incremental import generate_daily_signals, recognize_daily_instances
 from caisen.daily_research import load_research_bars
 from caisen.main_bottoms import detect_main_bottoms
 
@@ -70,30 +70,26 @@ def _159122_bars_through_june_2026():
     return bars[bars.date <= "2026-06-22"].reset_index(drop=True)
 
 
-def test_159122_same_frozen_boundary_premature_break_is_not_reissued_after_maturity():
+def test_159122_v12_does_not_create_a_late_buy_for_rejected_rebound_boundary():
     bars = _159122_bars_through_june_2026()
 
-    for recognizer in ("v7", "boundary_first"):
-        signals = generate_daily_signals(bars, "159122", "etf", recognizer=recognizer)
-        assert any(item["signal_date"] == "2026-05-06"
-                   and "w_bottom" in item["pattern_types"] for item in signals)
-        assert not any(item["signal_date"] == "2026-06-22"
-                       and "w_bottom" in item["pattern_types"] for item in signals)
+    result = recognize_daily_instances(bars, "159122", "etf", recognizer="boundary_first")
+    target_ids = {event["instance_id"] for event in result["instance_events"]
+                  if event["pattern"].get("pattern_type") == "w_bottom"
+                  and event["pattern"].get("formed_at") == "2025-11-05"}
+    # The v12 rebound-to-neckline association rule rejects this old candidate
+    # before it can become a tradable instance. The same-boundary early-cross
+    # and no-reissue lifecycle remains covered by the cached-candidate session
+    # regression in test_daily_incremental_guards.py.
+    assert not target_ids
+    assert not any(signal["signal_date"] == "2026-06-22"
+                   and "w_bottom" in signal["pattern_types"]
+                   for signal in result["signals"])
 
-    batch = detect_main_bottoms(bars, code="159122", kind="etf", timeframe="1d",
-                                background_bars=bars)
-    dec_w = [item for item in batch if item.pattern_type == "w_bottom"
-             and item.formed_at == "2025-12-16"]
-    assert dec_w
-    assert all(item.confirmation_date is None for item in dec_w)
-    assert all(any(entry["date"] == "2026-05-06"
-                   for entry in next(value for evidence in item.evidence
-                                     if evidence["code"] == "neckline_selection"
-                                     for value in [evidence["value"]])["early_breakouts"])
-               for item in dec_w)
+    assert not any(signal["signal_date"] == "2026-06-22" for signal in result["signals"])
 
 
-def test_boundary_phase_equivalence_catches_touch_extensions_but_not_a_distinct_line():
+def test_boundary_phase_identity_tracks_frozen_geometry_not_later_touch_extensions():
     from caisen.main_bottoms import _same_neckline_boundary_phase
 
     original = {
@@ -118,11 +114,11 @@ def test_boundary_phase_equivalence_catches_touch_extensions_but_not_a_distinct_
         "consumed_index": 140, "phase_tolerance": 0.02,
     }
 
-    assert _same_neckline_boundary_phase(original, extended, tick_size=0.01)
+    assert not _same_neckline_boundary_phase(original, extended, tick_size=0.01)
     assert not _same_neckline_boundary_phase(original, distinct, tick_size=0.01)
 
 
-def test_boundary_phase_equivalence_matches_replaced_touch_ids_in_overlapping_window():
+def test_changed_frozen_line_is_a_new_boundary_phase_even_with_overlapping_touches():
     from caisen.main_bottoms import _same_neckline_boundary_phase
 
     consumed = {
@@ -139,7 +135,7 @@ def test_boundary_phase_equivalence_matches_replaced_touch_ids_in_overlapping_wi
                   for index in (15, 65)],
     }
 
-    assert _same_neckline_boundary_phase(consumed, replacement, tick_size=0.01)
+    assert not _same_neckline_boundary_phase(consumed, replacement, tick_size=0.01)
 
 
 def test_boundary_phase_equivalence_checks_projection_at_first_cross_after_shared_touches():

@@ -21,6 +21,13 @@ def make_bars():
     return frame
 
 
+def run_saved_scan(job_id, params, total):
+    from caisen.store import create_scan_run, query_scan_results
+    create_scan_run(job_id, params, total=total)
+    api._scan_worker(job_id, params, executor_factory=ThreadPoolExecutor)
+    return query_scan_results(job_id, limit=max(total, 1))[0]
+
+
 def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failures(monkeypatch):
     instruments = [InstrumentFile("000001", "stock", "one.csv"),
                    InstrumentFile("000002", "etf", "two.csv"),
@@ -43,20 +50,22 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
         return MarketDataResult(result.instrument, quality_status="insufficient", warnings=["calendar missing"])
     monkeypatch.setattr(api, "load_daily_bars", load)
     monkeypatch.setattr(api, "aggregate_weekly", weekly)
-    monkeypatch.setattr(api, "detect_main_bottoms", lambda bars, code, kind, tf, **kwargs: [bullish] if code == "000001" and tf == "1d" else [])
+    monkeypatch.setattr(api, "recognize_daily_instances", lambda bars, code, kind, **kwargs:
+                        {"instances": [bullish] if code == "000001" else [], "instance_events": []})
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
-    api._scan_worker("fixture-job", {"timeframes":["1d","1w"]}, executor_factory=ThreadPoolExecutor)
+    rows = run_saved_scan("fixture-job", {"timeframes":["1d","1w"]}, 3)
     result = api._jobs["fixture-job"]
 
     assert result["status"] == "partial_failed"
     assert result["total"] == 3
-    assert len(result["results"]) == 3
-    assert [row["code"] for row in result["results"]] == ["000001", "000002", "000003"]
-    assert result["results"][0]["action"] == "CONSIDER_BUY"
-    assert len(result["results"][0]["mini_bars"]) == 3
-    assert result["results"][-1]["action"] == "INSUFFICIENT_DATA"
+    assert "results" not in result
+    assert len(rows) == 3
+    assert [row["code"] for row in rows] == ["000001", "000002", "000003"]
+    assert rows[0]["action"] == "CONSIDER_BUY" and rows[0]["assessment"]["status"] == "INSUFFICIENT_EVIDENCE"
+    assert "mini_bars" not in rows[0]
+    assert rows[-1]["action"] == "INSUFFICIENT_DATA"
     assert result["inventory"]["failed_count"] == 1
     assert result["inventory"]["inventory_at"]
 
@@ -76,7 +85,7 @@ def test_scan_worker_applies_kind_and_limit_before_loading(monkeypatch):
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
-    api._scan_worker("prefilter-job", {"kinds": ["etf"], "limit": 1, "timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
+    run_saved_scan("prefilter-job", {"kinds": ["etf"], "limit": 1, "timeframes": ["1d"]}, 1)
 
     result = api._jobs["prefilter-job"]
     assert loaded == ["000002"]
@@ -96,31 +105,34 @@ def test_scan_request_rejects_invalid_prefilters():
         api.start_scan({"timeframes": ["1d"], "date_from": "not-a-date"})
 
 
-def test_scan_date_window_slices_before_weekly_aggregation_and_pattern_detection(monkeypatch):
+def test_scan_window_slices_weekly_but_daily_recognition_keeps_full_prefix(monkeypatch):
     result = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
     weekly_dates = []
-    detected_dates = []
+    recognized_dates = []
     background_dates = []
     monkeypatch.setattr(api, "discover_instruments", lambda root: [result.instrument])
     monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: result)
     def aggregate(sliced, **kwargs):
         weekly_dates.extend(sliced.bars.date.dt.strftime("%Y-%m-%d").tolist())
         return MarketDataResult(sliced.instrument, bars=sliced.bars.tail(1).copy(), quality_status="usable")
-    def detect(frame, *args, **kwargs):
-        detected_dates.extend(frame.date.dt.strftime("%Y-%m-%d").tolist())
+    def detect_weekly(frame, *args, **kwargs):
         background_dates.extend(kwargs["background_bars"].date.dt.strftime("%Y-%m-%d").tolist())
         return []
+    def recognize_daily(frame, *args, **kwargs):
+        recognized_dates.extend(frame.date.dt.strftime("%Y-%m-%d").tolist())
+        return {"instances": [], "instance_events": []}
     monkeypatch.setattr(api, "aggregate_weekly", aggregate)
-    monkeypatch.setattr(api, "detect_main_bottoms", detect)
+    monkeypatch.setattr(api, "recognize_daily_instances", recognize_daily)
+    monkeypatch.setattr(api, "detect_main_bottoms", detect_weekly)
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
-    api._scan_worker("window-job", {"timeframes": ["1d", "1w"], "date_from": "2026-10-15", "date_to": "2026-10-15"}, executor_factory=ThreadPoolExecutor)
+    rows = run_saved_scan("window-job", {"timeframes": ["1d", "1w"], "date_from": "2026-10-15", "date_to": "2026-10-15"}, 1)
 
-    row = api._jobs["window-job"]["results"][0]
+    row = rows[0]
     assert weekly_dates == ["2026-10-15"]
-    assert detected_dates == ["2026-10-15", "2026-10-15"]
-    assert background_dates == ["2026-10-14", "2026-10-15", "2026-10-14", "2026-10-15"]
+    assert recognized_dates == ["2026-10-14", "2026-10-15"]
+    assert background_dates == ["2026-10-14", "2026-10-15"]
     assert row["latest_date"] == "2026-10-15"
     assert row["analysis_window"] == {"requested_from":"2026-10-15", "requested_to":"2026-10-15",
                                        "from":"2026-10-15", "to":"2026-10-15",
@@ -133,9 +145,9 @@ def test_scan_date_window_with_no_rows_keeps_insufficient_data_row(monkeypatch):
     monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: result)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
-    api._scan_worker("empty-window-job", {"timeframes": ["1d"], "date_from": "2027-01-01"}, executor_factory=ThreadPoolExecutor)
+    rows = run_saved_scan("empty-window-job", {"timeframes": ["1d"], "date_from": "2027-01-01"}, 1)
 
-    row = api._jobs["empty-window-job"]["results"][0]
+    row = rows[0]
     assert row["action"] == "INSUFFICIENT_DATA"
     assert row["reason_codes"] == ["no_market_data_in_selected_date_range"]
     assert row["analysis_window"]["from"] is None
@@ -154,7 +166,8 @@ def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(
     monkeypatch.setattr(api, "discover_instruments", lambda root: [instrument])
     monkeypatch.setattr(api, "load_daily_bars", lambda item, root: MarketDataResult(item, bars=make_bars()))
     monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
-    monkeypatch.setattr(api, "detect_main_bottoms", lambda *args, **kwargs: [w_bottom, m_top])
+    monkeypatch.setattr(api, "recognize_daily_instances", lambda *args, **kwargs:
+                        {"instances": [w_bottom, m_top], "instance_events": []})
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("scan must not call the legacy recognizer")))
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
@@ -167,11 +180,11 @@ def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(
                 "tie_break":{"kind":kind,"code":code}}}
     monkeypatch.setattr(api, "synthesize_decision", synthesize)
 
-    api._scan_worker("shape-job", {"timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
+    rows = run_saved_scan("shape-job", {"timeframes": ["1d"]}, 1)
 
-    assert {pattern["pattern_type"] for pattern in api._jobs["shape-job"]["results"][0]["patterns"]} == {"w_bottom"}
+    assert {pattern["pattern_type"] for pattern in rows[0]["patterns"]} == {"w_bottom"}
     assert {pattern.pattern_type for pattern in decision_inputs[0]["1d"]} == {"w_bottom"}
-    assert api._jobs["shape-job"]["results"][0]["pattern_migration"]["families"]["m_top"]["status"] == "unsupported"
+    assert "pattern_migration" not in rows[0]
 
 
 def test_backtest_page_has_one_fixed_daily_research_entry():
@@ -200,12 +213,41 @@ def test_backtest_page_has_one_fixed_daily_research_entry():
 def test_modified_workbench_assets_use_current_cache_version():
     from pathlib import Path
     html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
-    for asset in ("pattern-chart.js", "app.js"):
-        expected_version = "20261105-backtest-effective-config-v2" if asset == "app.js" else "20261031-neckline-v2"
+    for asset, expected_version in (("app.css", "20261107-pattern-support-v1"),
+                                    ("app.js", "20261107-pattern-support-v1")):
         assert f"/static/{asset}?v={expected_version}" in html
-    for asset in ("app.css", "refresh_report.js", "scan-filters.js", "http-client.js", "fixed-backtest-report.js"):
+    for asset, expected_version in (("pattern-chart.js", "20261107-main-overlays-v2"),):
+        assert f"/static/{asset}?v={expected_version}" in html
+    for asset in ("scan-filters.js", "scan-ui.js"):
+        assert f"/static/{asset}?v=20261107-pattern-support-v1" in html
+    for asset in ("refresh_report.js", "http-client.js", "fixed-backtest-report.js"):
         assert f"/static/{asset}?v=20261029v7" in html
     assert "20261027v6" not in html
+
+
+def test_health_exposes_current_pattern_migration_status():
+    from caisen.api import health
+
+    status = health()["pattern_migration"]
+    assert status["supported_new_path"] == ["w_bottom", "inverse_head_shoulders", "triangle_bottom", "bull_flag"]
+    assert status["families"]["bull_flag"]["status"] == "supported"
+
+
+def test_pattern_migration_status_drives_scan_and_historical_filter_labels():
+    from pathlib import Path
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    app = (root / "app.js").read_text(encoding="utf-8")
+    scan_ui = (root / "scan-ui.js").read_text(encoding="utf-8")
+    filters = (root / "scan-filters.js").read_text(encoding="utf-8")
+
+    assert 'id="patternSupportNote"' in html
+    assert "window.CaisenPatternMigration=result.pattern_migration||null" in app
+    assert "applyPatternMigration(window.CaisenPatternMigration)" in scan_ui
+    assert "option.disabled=!historical&&(!known||status!=='supported')" in scan_ui
+    assert "patternSupportLabel(names[option.value]||option.value,status,historical)" in scan_ui
+    assert "历史结果可查" in filters
+    assert "扫描筛选已禁用；历史结果仍可查询" in scan_ui
 
 
 def test_workbench_html_contains_one_click_scan_and_detail_navigation():
@@ -244,22 +286,50 @@ def test_scan_results_filter_after_completion_without_resubmitting_the_scan():
     from pathlib import Path
     root = Path(__file__).parents[1] / "caisen" / "static"
     html = (root / "index.html").read_text(encoding="utf-8")
-    js = (root / "app.js").read_text(encoding="utf-8")
+    js = (root / "scan-ui.js").read_text(encoding="utf-8")
 
     assert 'id="scanResultFilters"' in html
-    assert 'id="scanActionFilter"' in html
-    assert 'id="scanShapeFilter"' in html
+    assert 'id="scanStatusChips"' in html
+    assert 'id="scanShapeChips"' in html
     assert 'id="buyOnlyBtn"' in html
     assert 'id="resetScanFilters"' in html
-    assert "全部十招" in html
-    assert "全部 12 招" not in html
-    assert "CaisenScanFilters.filterScanRows(scanRows" in js
-    assert "筛选后 ${visibleScanRows.length} / ${scanRows.length}" in js
-    assert "没有标的符合当前筛选" in js
-    assert "pattern_type:$('scanPattern')" not in js
+    assert 'role="group" aria-label="扫描形态标签"' in html
+    assert "形态标签（可多选）" in html
+    assert "CaisenScanFilters.patternChipMarkup" in js
+    assert "aria-pressed" in js
+    assert "api/v1/scans/${encodeURIComponent(id)}/results" in js
+    assert "没有符合筛选条件的保存结果" in js
+    assert "async function loadScanPage" in js
+    assert "POST" not in js.split("async function loadScanPage", 1)[1].split("function showActionChips", 1)[0]
     assert "/static/scan-filters.js" in html
-    filtering = js.split("function applyScanFilters", 1)[1].split("function renderScan", 1)[0]
-    assert "fetch(" not in filtering
+
+
+def test_history_assessment_progress_warns_polls_and_refreshes_final_results():
+    from pathlib import Path
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "scan-ui.js").read_text(encoding="utf-8")
+
+    assert 'id="historyAssessmentStatus"' in html
+    assert "data.assessment_progress" in js
+    assert "完成前新旧结果可能混合" in js
+    assert "assessment_notice" in js and "无法重评" in js
+    assert "historyPage(pageNumber,{silent:true})" in js
+    assert "refreshAfterCompletion" in js and "finalRefresh:true" in js
+    assert "历史评估失败" in js and "progress.error" in js
+
+
+def test_detail_assessment_state_replaces_old_rank_headline_and_folds_legacy_plan():
+    from pathlib import Path
+    root = Path(__file__).parents[1] / "caisen" / "static"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    js = (root / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="assessment-status"' in js
+    assert "assessment.reason" in js and "assessment.timeframes" in js
+    assert "legacy-plan-reference" in js
+    assert "首目标 ${fmt(plan.targets?.[0])}，${fmt(plan.reward_risk)}R" not in js
+    assert "20261107-pattern-support-v1" in html
 
 
 def test_pattern_card_distinguishes_engine_and_source_rule_versions():
@@ -297,18 +367,29 @@ def test_detail_chart_returns_full_history_and_preview_weekly_bars(monkeypatch):
         quality_status="insufficient",
         warnings=["calendar missing"],
     )
+    assessment_bars = []
+    def assess(patterns, bars_by_timeframe, as_of_date=None, **kwargs):
+        assessment_bars.append(bars_by_timeframe)
+        return {"status": "INSUFFICIENT_EVIDENCE" if bars_by_timeframe["1w"].empty else "BUY",
+                "selected_timeframe": None, "timeframes": {}, "as_of_date": as_of_date}
     monkeypatch.setattr(api, "_market_data", lambda code, kind: daily_result)
     monkeypatch.setattr(api, "aggregate_weekly", lambda result, calendar=None: weekly_result)
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
+    monkeypatch.setattr(api, "assess_scan", assess)
 
     daily_payload = api.analysis("000001", timeframe="1d")
     weekly_payload = api.analysis("000001", timeframe="1w")
 
     assert len(daily_payload["_bars"]) == len(daily)
-    assert daily_payload["_chart_offset"] == len(daily) - 500
+    assert daily_payload["_chart_offset"] == 0
     assert weekly_payload["chart_is_preview"] is True
     assert len(weekly_payload["_bars"]) == len(weekly_preview)
+    assert daily_payload["assessment"]["status"] == "INSUFFICIENT_EVIDENCE"
+    assert weekly_payload["assessment"]["status"] == "INSUFFICIENT_EVIDENCE"
+    assert len(assessment_bars) == 2
+    assert all(frame["1w"].empty for frame in assessment_bars)
+    assert all(not frame["1d"].empty for frame in assessment_bars)
 
 
 def test_weekly_analysis_uses_full_daily_history_as_quality_background(monkeypatch):
@@ -327,7 +408,7 @@ def test_weekly_analysis_uses_full_daily_history_as_quality_background(monkeypat
     api.analysis("000001", timeframe="1w")
 
     expected = daily.bars.date.dt.strftime("%Y-%m-%d").tolist()
-    assert seen["1d"] == expected
+    assert "1d" not in seen
     assert seen["1w"] == expected
 
 
@@ -488,7 +569,8 @@ def test_scan_history_routes_filter_persisted_results_without_rescanning(monkeyp
                     rule_version="rules-v1", app_version="app-v1")
     save_scan_result("history-1", 0, {
         "code": "000001", "kind": "stock", "name": "样本公司", "category": "银行",
-        "action": "WAIT", "patterns": [{"pattern_type": "w_bottom", "timeframe": "1d"}],
+        "action": "WAIT", "patterns": [{"pattern_id":"main", "pattern_type": "w_bottom", "timeframe": "1d",
+            "formed_at":"2026-10-01", "state":"forming", "is_main_structure":True, "selected_main":True}],
         "latest_date": "2026-10-15",
     })
     update_scan_run("history-1", status="completed", progress=1, scanned=1)
@@ -576,20 +658,28 @@ def test_scan_worker_marks_all_instrument_failures_failed_and_keeps_history(monk
     assert rows[0]["state"] == "data_error"
 
 
-def test_main_bottom_detail_groups_selected_parent_children_and_volume_support():
+def test_main_bottom_detail_defaults_to_selected_timeframe_mains_and_retains_historical_selection():
     from pathlib import Path
     root = Path(__file__).parents[1] / "caisen" / "static"
     js = (root / "app.js").read_text(encoding="utf-8")
     chart = (root / "pattern-chart.js").read_text(encoding="utf-8")
     assert "已选主结构" in js
-    assert "已纳入主结构的子形态" in js
+    assert "detailPatterns.map(patternCard)" in js
+    assert "selectedPattern=primary||null" in js
+    assert "CaisenScanFilters.mainPatterns({patterns})" in js
+    assert "completedPatterns=patterns.filter(isTerminalPattern)" in js
+    assert 'class="completed-patterns"' in js
+    assert "completedPatterns.map(patternCard)" in js
+    assert "data-show-pattern" in (root / "scan-ui.js").read_text(encoding="utf-8")
+    assert "showPattern(button.dataset.showPattern)" in js
+    assert "pattern-evidence-fold" in (root / "scan-ui.js").read_text(encoding="utf-8")
     assert "量能仅作辅助" in js
     assert "不作买入门槛" in js
     assert "neckline_tests" in chart
     assert "neckline_breakout" in chart
 
 
-def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monkeypatch, tmp_path):
+def test_scan_worker_uses_at_most_eight_workers_and_persists_ranked_progress(monkeypatch, tmp_path):
     import threading
     from caisen.store import create_scan_run, get_scan_run, query_scan_results
 
@@ -597,7 +687,7 @@ def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monke
     active = 0
     maximum = 0
     lock = threading.Lock()
-    first_batch = threading.Barrier(10)
+    first_batch = threading.Barrier(8)
     monkeypatch.setenv("CAISEN_DB", str(tmp_path / "concurrent.sqlite3"))
     monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
 
@@ -607,7 +697,7 @@ def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monke
             active += 1
             maximum = max(maximum, active)
         try:
-            if int(instrument.code) < 10:
+            if int(instrument.code) < 8:
                 first_batch.wait(timeout=3)
             if instrument.code == "000011":
                 raise ValueError("unreadable")
@@ -641,14 +731,13 @@ def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monke
     result = api._jobs["concurrent-scan"]
     saved, total = query_scan_results("concurrent-scan", limit=20)
     run = get_scan_run("concurrent-scan")
-    assert maximum == 10
+    assert maximum == 8
     assert result["status"] == "partial_failed"
     assert result["scanned"] == result["total"] == 12
     assert progress_updates == [*range(1, 13), 12]
-    assert result["results"][0]["code"] == "000009"
-    assert result["results"][-1]["state"] == "data_error"
+    assert "results" not in result
+    assert saved[0]["code"] == "000000"
+    assert saved[-1]["state"] == "data_error"
     assert total == 12
-    assert [row["code"] for row in saved] == [row["code"] for row in result["results"]]
-    assert saved == result["results"]
     assert run["status"] == "partial_failed"
     assert run["scanned"] == 12 and run["progress"] == 1

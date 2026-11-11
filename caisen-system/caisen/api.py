@@ -21,11 +21,14 @@ from .market import (InstrumentFile, aggregate_weekly, default_china_calendar,
                      discover_instruments, load_daily_bars)
 from .patterns import BOOK_PATTERNS, PATTERN_LABELS, current_pattern_snapshot, detect_patterns
 from .main_bottoms import detect_main_bottoms
+from .daily_incremental import recognize_daily_instances
 from .migration import SUPPORTED_NEW_PATH_TYPES, migration_status
-from .decision import _label as _pattern_display_label, rank_scan_results, synthesize_decision
+from .decision import _label as _pattern_display_label, synthesize_decision
+from .assessment import assess_scan
 from .plans import BUY_CANDIDATE_PATTERN_TYPES, build_trade_plan
 from .store import (connect, create_scan_run, get_pattern, get_scan_run, interrupt_active_scan_runs,
-                    import_legacy_scan_jobs, list_scan_runs, query_scan_results, save_pattern, save_patterns,
+                    import_legacy_scan_jobs, list_scan_runs, query_scan_results,
+                    save_pattern, save_patterns, start_saved_scan_assessment,
                     save_scan_result, update_scan_run)
 from . import RULE_VERSION, __version__
 from .data_refresh import refresh_one
@@ -112,6 +115,17 @@ def _quality_status(bars):
     return "usable" if verified else "usable_with_warnings"
 
 
+def _assessment_bars(bars_by_timeframe, quality_by_timeframe):
+    """Keep incomplete or unavailable OHLC out of formal scan assessments."""
+    result = {}
+    for timeframe, bars in bars_by_timeframe.items():
+        if quality_by_timeframe.get(timeframe) in ("insufficient", "unavailable"):
+            result[timeframe] = bars.iloc[0:0].copy()
+        else:
+            result[timeframe] = bars
+    return result
+
+
 def _mini_bars(bars, size=48):
     if bars is None or bars.empty:
         return []
@@ -145,16 +159,48 @@ def _decision_patterns_by_timeframe(patterns_by_timeframe):
     for timeframe,patterns in patterns_by_timeframe.items():
         selected[timeframe]=[pattern for pattern in patterns
                               if getattr(pattern,"pattern_type",None) in SUPPORTED_NEW_PATH_TYPES
-                              and _is_main_bottom(pattern)
-                              and _main_selection(pattern).get("selected") is True
+                              and ((getattr(pattern,"pattern_type",None) == "bull_flag"
+                                    and getattr(pattern,"state",None) == "confirmed"
+                                    and any(item.get("code") == "flag_breakout"
+                                            for item in getattr(pattern,"evidence",[])))
+                                   or (_is_main_bottom(pattern)
+                                       and _main_selection(pattern).get("selected") is True))
                               and getattr(pattern,"state",None) not in terminal]
     return selected
+
+
+def _apply_assessment_to_decision(decision, assessment):
+    """Use the shared scan assessment for display while retaining the old plan for reference."""
+    decision = dict(decision)
+    previous_action = decision.get("action")
+    status = assessment.get("status")
+    reason = assessment.get("reason")
+    if reason is None:
+        selected_tf = assessment.get("selected_timeframe")
+        reason = (assessment.get("timeframes", {}).get(selected_tf) or {}).get("reason")
+    decision["legacy_action"] = previous_action
+    decision["assessment"] = assessment
+    decision["reason_codes"] = [reason] if reason else []
+    if status == "BUY":
+        decision["action"] = "CONSIDER_BUY"
+        decision["explanation"] = "扫描评估确认有效突破或满足突破回试条件；原交易计划仅作参考。"
+    elif status == "FOCUS_NECKLINE":
+        decision["action"] = "FOCUS_NECKLINE"
+        decision["explanation"] = "形态已成型，等待颈线有效突破。"
+    elif status == "NONE":
+        decision["action"] = "WAIT" if previous_action == "CONSIDER_BUY" else previous_action
+        decision["explanation"] = "当前评估未触发买入或颈线关注条件；保留其他原行动提示。"
+    elif status == "INSUFFICIENT_EVIDENCE":
+        decision["assessment_notice"] = "缺少必要的扫描时点证据，保留原行动；旧交易计划仅作参考。"
+        decision["explanation"] = decision["assessment_notice"]
+    return decision
 
 
 def _supported_main_patterns(patterns):
     return [pattern for pattern in patterns
             if getattr(pattern, "pattern_type", None) in SUPPORTED_NEW_PATH_TYPES
-            and _is_main_bottom(pattern)]
+            and (getattr(pattern, "pattern_type", None) == "bull_flag"
+                 or _is_main_bottom(pattern))]
 
 def _main_bottom_windows(daily_bars, weekly_bars):
     """Limit main-bottom structure search to five daily or ten weekly years."""
@@ -234,12 +280,24 @@ def _analyze_scan_instrument(instrument, params, root=None):
         prices={tf:float(frame.close.iloc[-1]) for tf,frame in bars_by_tf.items() if not frame.empty}
         requested=params.get("timeframes",["1d","1w"])
         main_patterns_by_tf={}
+        instance_events_by_tf={}
         for tf in requested:
-            main_patterns_by_tf[tf]=detect_main_bottoms(
-                bars_by_tf[tf],code,kind,tf,
-                tick_size=bars_by_tf[tf].attrs.get("quality",{}).get("tick_size",0.01),
-                background_bars=backgrounds_by_tf["1d"],
-            ) if not bars_by_tf[tf].empty else []
+            if bars_by_tf[tf].empty:
+                main_patterns_by_tf[tf],instance_events_by_tf[tf]=[],[]
+            elif tf == "1d":
+                # Recognition identity and index anchors depend on the full
+                # causal prefix through date_to. date_from limits scan display
+                # context only; it must not resample pivots or instance IDs.
+                shared=recognize_daily_instances(daily_background,code,kind,
+                                                  recognizer="boundary_first")
+                main_patterns_by_tf[tf]=shared["instances"]
+                instance_events_by_tf[tf]=shared["instance_events"]
+            else:
+                main_patterns_by_tf[tf]=detect_main_bottoms(
+                    bars_by_tf[tf],code,kind,tf,
+                    tick_size=bars_by_tf[tf].attrs.get("quality",{}).get("tick_size",0.01),
+                    background_bars=backgrounds_by_tf["1d"])
+                instance_events_by_tf[tf]=[]
         patterns_by_tf={tf:current_pattern_snapshot(_supported_main_patterns(main_patterns_by_tf[tf]))
                         for tf in requested}
         decision_patterns_by_tf=_decision_patterns_by_timeframe(patterns_by_tf)
@@ -267,6 +325,18 @@ def _analyze_scan_instrument(instrument, params, root=None):
                          "，目标已达" if p.state=="target_reached" else
                          "，箱体后续边界已确认（历史）" if p.state=="followthrough_confirmed" else "，已确认")
             payload=p.to_dict()
+            if p.timeframe == "1d":
+                events=[event for event in instance_events_by_tf.get("1d", [])
+                        if event.get("instance_id") == p.pattern_id]
+                latest_event=events[-1] if events else {}
+                payload.update({"pattern_instance_id":p.pattern_id,
+                                "instance_state_events":events,
+                                "entry_eligible":latest_event.get("entry_eligible") is True,
+                                "has_entry_event":any(event.get("entry_eligible") is True
+                                                      for event in events),
+                                **{key:latest_event.get(key) for key in (
+                                    "structure_key","boundary_version_id","paired_at","state_at",
+                                    "selection_reason","recognition_schema_version","state_schema_version")}})
             payload["display_label"]=label+state_label+("，结构存在歧义" if "ambiguous_structure" in p.flags else "")
             pending_patterns.append(payload)
             summary={"pattern_id":p.pattern_id,"pattern_type":p.pattern_type,"direction":p.direction,
@@ -277,9 +347,15 @@ def _analyze_scan_instrument(instrument, params, root=None):
                      "selected_main":bool(is_main and next((item.get("value",{}).get("selected")
                                                             for item in p.evidence if item.get("code")=="main_selection"),False)),
                      "main_scale":structure.get("scale") if is_main else None,
+                     "ambiguous_structure":"ambiguous_structure" in p.flags,
                      "execution_suppressed":any(item.get("code")=="execution_suppression"
                                                  and isinstance(item.get("value"),dict)
                                                  and item["value"].get("suppressed") is True for item in p.evidence)}
+            if p.timeframe == "1d":
+                summary.update({key: payload.get(key) for key in (
+                    "pattern_instance_id","structure_key","boundary_version_id","paired_at","state_at",
+                    "selection_reason","recognition_schema_version","state_schema_version",
+                    "entry_eligible","has_entry_event")})
             pattern_rows.append(summary)
             if is_main:
                 main_events.append(payload)
@@ -290,6 +366,7 @@ def _analyze_scan_instrument(instrument, params, root=None):
         ended_patterns=[summary for summary in pattern_rows if summary.get("state") in
                         ("invalidated","target_reached","followthrough_confirmed")]
         row={**decision,"patterns":pattern_rows,"main_structure_events":main_events,
+             "pattern_instance_events":instance_events_by_tf.get("1d",[]),
              "selected_main_structures":selected_mains,"main_children":main_children,
              "ended_patterns":ended_patterns,"category":category,
              "name":str(daily.name.iloc[-1]) if "name" in daily and len(daily) else code,
@@ -300,6 +377,12 @@ def _analyze_scan_instrument(instrument, params, root=None):
              "data_versions":{"1d":daily_result.data_version,"1w":weekly_result.data_version},
              "quality_status":daily_result.quality_status,"mini_bars":_mini_bars(daily),
              "pattern_migration":migration_status()}
+        row["_assessment"] = assess_scan(
+            all_patterns, _assessment_bars(bars_by_tf, quality_by_tf), analysis_window.get("to"),
+            tick_size_by_timeframe={tf: bars_by_tf[tf].attrs.get("quality", {}).get("tick_size", 0.01)
+                                    for tf in bars_by_tf},
+            background_bars_by_timeframe=backgrounds_by_tf,
+            instance_events_by_timeframe={"1d":instance_events_by_tf.get("1d",[])})
         json.dumps(row,ensure_ascii=False,allow_nan=False)
         return row,pending_patterns
     except Exception as exc:
@@ -376,7 +459,8 @@ def home():
 
 @app.get("/api/v1/health")
 def health():
-    return {"status":"ok","system":"caisen-volume-price","rule_version":RULE_VERSION,"app_version":__version__,"broker_orders":False}
+    return {"status":"ok","system":"caisen-volume-price","rule_version":RULE_VERSION,"app_version":__version__,"broker_orders":False,
+            "pattern_migration":migration_status()}
 
 
 @app.get("/api/v1/analysis")
@@ -390,18 +474,29 @@ def analysis(code: str, kind: str = "stock", timeframe: str = "1d", request: Req
     weekly_result=aggregate_weekly(daily_result,calendar=default_china_calendar())
     weekly=weekly_result.bars
     bars_by_tf={"1d":daily,"1w":weekly}
-    pattern_bars_by_tf={"1d":daily.tail(500).copy(),"1w":weekly.tail(520).copy()}
+    pattern_bars_by_tf={"1d":daily.copy(),"1w":weekly.tail(520).copy()}
     backgrounds_by_tf={"1d":daily,"1w":daily}
     quality_by_tf={"1d":daily_result.quality_status,"1w":weekly_result.quality_status}
     warnings_by_tf={"1d":daily_result.warnings,"1w":weekly_result.warnings}
     price_by_tf={tf:float(frame.close.iloc[-1]) for tf,frame in bars_by_tf.items() if not frame.empty}
     main_patterns_by_tf={}
+    instance_events_by_tf={}
     for tf,frame in pattern_bars_by_tf.items():
-        main_patterns_by_tf[tf]=detect_main_bottoms(
-            bars_by_tf[tf],code,kind,tf,
-            tick_size=bars_by_tf[tf].attrs.get("quality",{}).get("tick_size",0.01),
-                        background_bars=daily,
-        ) if not bars_by_tf[tf].empty else []
+        if bars_by_tf[tf].empty:
+            main_patterns_by_tf[tf], instance_events_by_tf[tf] = [], []
+        elif tf == "1d":
+            shared = recognize_daily_instances(
+                bars_by_tf[tf], code, kind,
+                recognizer="boundary_first",
+                performance=None)
+            main_patterns_by_tf[tf] = shared["instances"]
+            instance_events_by_tf[tf] = shared["instance_events"]
+        else:
+            main_patterns_by_tf[tf]=detect_main_bottoms(
+                bars_by_tf[tf],code,kind,tf,
+                tick_size=bars_by_tf[tf].attrs.get("quality",{}).get("tick_size",0.01),
+                background_bars=daily)
+            instance_events_by_tf[tf] = []
     patterns_by_tf={tf:current_pattern_snapshot(_supported_main_patterns(main_patterns_by_tf[tf]))
                     for tf in main_patterns_by_tf}
     decision_patterns_by_tf=_decision_patterns_by_timeframe(patterns_by_tf)
@@ -418,6 +513,18 @@ def analysis(code: str, kind: str = "stock", timeframe: str = "1d", request: Req
     results=[]
     for pattern in patterns:
         payload=pattern.to_dict(); save_pattern(payload)
+        if timeframe == "1d":
+            payload["pattern_instance_id"] = pattern.pattern_id
+            payload["instance_state_events"] = [event for event in instance_events_by_tf.get("1d", [])
+                                                  if event.get("instance_id") == pattern.pattern_id]
+            latest_event = (payload["instance_state_events"][-1]
+                            if payload["instance_state_events"] else {})
+            payload["entry_eligible"] = latest_event.get("entry_eligible") is True
+            payload["has_entry_event"] = any(event.get("entry_eligible") is True
+                                              for event in payload["instance_state_events"])
+            payload.update({key:latest_event.get(key) for key in (
+                "structure_key","boundary_version_id","paired_at","state_at",
+                "selection_reason","recognition_schema_version","state_schema_version")})
         payload["chart_offset"]=chart_offsets.get(pattern.pattern_id,0)
         payload["display_label"]=_pattern_display_label(pattern)
         if pattern.pattern_type in BUY_CANDIDATE_PATTERN_TYPES and pattern.direction == "bullish" and pattern.state == "confirmed" and "ambiguous_structure" not in pattern.flags:
@@ -437,14 +544,23 @@ def analysis(code: str, kind: str = "stock", timeframe: str = "1d", request: Req
     other_directions={p.direction for p in decision_patterns_by_tf[other_tf] if p.state=="confirmed"}
     decision=synthesize_decision(code,kind,decision_patterns_by_tf,price_by_tf,quality_by_tf,bars_by_timeframe=pattern_bars_by_tf,
                                  warnings_by_timeframe=warnings_by_tf)
+    as_of_date=str(daily.date.iloc[-1].date()) if not daily.empty else None
+    assessment=assess_scan([pattern for items in patterns_by_tf.values() for pattern in items],
+                           _assessment_bars(bars_by_tf,quality_by_tf),as_of_date,
+                           tick_size_by_timeframe={tf: bars_by_tf[tf].attrs.get("quality", {}).get("tick_size", 0.01)
+                                                   for tf in bars_by_tf},
+                           background_bars_by_timeframe=backgrounds_by_tf,
+                           instance_events_by_timeframe={"1d":instance_events_by_tf.get("1d",[])})
+    decision=_apply_assessment_to_decision(decision,assessment)
     decision["patterns"]=[{**pattern.to_dict(),"display_label":_pattern_display_label(pattern),
                            "chart_offset":chart_offsets.get(pattern.pattern_id,0)}
                           for tf in ("1d","1w") for pattern in patterns_by_tf.get(tf,[])]
-    latest_date=str(daily.date.iloc[-1].date()) if not daily.empty else None
+    latest_date=as_of_date
     return {"code":code,"kind":kind,"timeframe":timeframe,"latest_date":latest_date,"_bars":chart_bars,"_chart_offset":chart_offset,
             "chart_is_preview":chart_is_preview,
             "bar_count":len(bars),"data_provenance":daily.attrs.get("provenance",{}),
             "data_quality":bars.attrs.get("quality",{}),"patterns":results,"decision":decision,
+            "assessment":assessment,"pattern_instance_events":instance_events_by_tf.get(timeframe, []),
             "pattern_migration":migration_status(),
             "book_pattern_catalog":BOOK_PATTERNS,"timeframe_comparison":{"requested":timeframe,
               "other_timeframe":other_tf,"other_confirmed_patterns":[{"pattern_type":p.pattern_type,"state":p.state,"direction":p.direction,"confirmed_at":p.confirmed_at} for p in other_patterns if p.state=="confirmed"],
@@ -470,10 +586,11 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
         instruments=[item for item in instruments if item.kind in selected_kinds]
         if params.get("limit") is not None:
             instruments=instruments[:params["limit"]]
-        records=[None]*len(instruments)
         pending_patterns=[]
         completed=0
-        max_workers=max(1,min(10,len(instruments)))
+        failed_count=0
+        warning_count=0
+        max_workers=max(1,min(8,len(instruments)))
         executor=executor_factory(max_workers=max_workers)
         stop_event=threading.Event()
         with _scan_executors_lock:
@@ -511,11 +628,13 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
                             interrupted=True
                             continue
                         row,patterns=future.result()
-                        records[index]=row
+                        assessment=row.pop("_assessment",None)
                         if persist_history:
-                            save_scan_result(job_id,index,row)
+                            save_scan_result(job_id,index,row,assessment=assessment)
                         pending_patterns.extend(patterns)
                         completed+=1
+                        failed_count += int(row.get("state")=="data_error")
+                        warning_count += int(bool(row.get("data_warnings")))
                         _scan_progress(job_id,completed-1,len(instruments),persist_history)
                         if len(pending_patterns)>=500:
                             save_patterns(pending_patterns)
@@ -539,10 +658,9 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
                     save_patterns(pending_patterns)
                     pending_patterns=[]
                 if interrupted:
-                    partial_records=[row for row in records if row is not None]
                     progress=completed/max(len(instruments),1)
                     _jobs[job_id]={"status":"interrupted","progress":progress,"scanned":completed,
-                                   "total":len(instruments),"results":partial_records}
+                                   "total":len(instruments)}
                     _persist_job(job_id,_jobs[job_id])
                     if persist_history:
                         update_scan_run(job_id,status="interrupted",progress=progress,
@@ -553,19 +671,14 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
                 _active_scan_executors.pop(executor,None)
         if pending_patterns:
             save_patterns(pending_patterns)
-        records=rank_scan_results(records)
-        if persist_history:
-            for ordinal,row in enumerate(records):
-                save_scan_result(job_id,ordinal,row)
-        failed_count=sum(row.get("state")=="data_error" for row in records)
-        run_status=("failed" if records and failed_count==len(records) else
+        run_status=("failed" if instruments and failed_count==len(instruments) else
                     ("partial_failed" if failed_count else "completed"))
-        _jobs[job_id]={"status":run_status,"progress":1,"scanned":len(instruments),"total":len(instruments),"results":records,
+        _jobs[job_id]={"status":run_status,"progress":1,"scanned":len(instruments),"total":len(instruments),
                        "inventory":{"inventory_at":datetime.now(timezone.utc).isoformat(),
                                     "stock_count":sum(item.kind=="stock" for item in instruments),
                                     "etf_count":sum(item.kind=="etf" for item in instruments),"source":"local_csv",
                                     "requested_window":{"from":params.get("date_from"),"to":params.get("date_to")},
-                                    "warning_count":sum(bool(row.get("data_warnings")) for row in records),
+                                    "warning_count":warning_count,
                                     "failed_count":failed_count},
                        "limitations":["当前本地存续标的分析，不代表完整市场历史成分", "量能/企业行动信息未验证；候选仅供观察", "无交易日历时周线只作预览，数据不足不参与信号"]}
         _persist_job(job_id,_jobs[job_id])
@@ -629,6 +742,7 @@ def scan_results(scan_id: str, q: str = None, kind: str = None, category: str = 
         raise HTTPException(400,"kind must be stock or etf")
     if get_scan_run(scan_id) is None:
         raise HTTPException(404,"scan not found")
+    assessment_progress=start_saved_scan_assessment(scan_id)
     patterns=[value for value in (pattern_types or "").split(",") if value]
     periods=[value for value in (timeframes or "").split(",") if value]
     if any(value not in ("1d","1w") for value in periods):
@@ -640,6 +754,7 @@ def scan_results(scan_id: str, q: str = None, kind: str = None, category: str = 
     except ValueError as exc:
         raise HTTPException(400,str(exc))
     return {"items":items,"total":total,"page":page,"page_size":50,
+            "assessment_progress":assessment_progress,
             "detail_notice":"以下是任务运行时保存的结果；打开标的详情会加载最新行情。"}
 
 
@@ -675,6 +790,9 @@ def start_data_refresh(params: dict):
 
 @app.get("/api/v1/jobs/{job_id}")
 def get_job(job_id: str):
+    run=get_scan_run(job_id)
+    if run is not None:
+        return {key:run[key] for key in ("run_id","status","progress","scanned","total","inventory","rule_version","app_version","error","created_at","updated_at")}
     payload=_load_job_payload(job_id)
     if payload is None: raise HTTPException(404,"job not found")
     return payload

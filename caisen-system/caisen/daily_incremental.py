@@ -22,8 +22,8 @@ from .main_bottoms import (
 from .patterns import PATTERN_LABELS, _line, _at
 from .schemas import Pattern, Pivot
 
-ENGINE_VERSION = "caisen-daily-continuous-v5"
-BOUNDARY_FIRST_ENGINE_VERSION = "caisen-daily-boundary-first-v3"
+ENGINE_VERSION = "caisen-daily-continuous-v5-phase-scope-v1"
+BOUNDARY_FIRST_ENGINE_VERSION = "caisen-daily-boundary-first-v3-phase-scope-v1"
 SOURCE_RULE_VERSION = str(MAIN_RULES.get("source_rule_version", "unknown"))
 
 

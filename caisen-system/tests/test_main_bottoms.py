@@ -58,7 +58,7 @@ def is_selected(pattern):
 
 
 def test_main_bottom_thresholds_are_declared_in_the_rule_catalog():
-    assert MAIN_RULES["source_rule_version"] == "caisen-main-bottoms-v9"
+    assert MAIN_RULES["source_rule_version"] == "caisen-main-bottoms-v11-phase-scope-v1"
     assert MAIN_RULES["neckline_tests"]["candidate_reversal_atr_multiple"] == 2.0
     assert MAIN_RULES["neckline_tests"]["minimum_departure_atr"] == 1.0
     assert MAIN_RULES["timeframes"]["1d"]["structure_window_calendar_years"] == 5
@@ -67,7 +67,7 @@ def test_main_bottom_thresholds_are_declared_in_the_rule_catalog():
     assert MAIN_RULES["minimum_duration_calendar_months"] == 6
     assert MAIN_RULES["neckline_tests"]["minimum_independent_groups"] == 2
     assert MAIN_RULES["neckline_tests"]["consumed_boundary_phase_rule"] == \
-        "same_structure_equivalent_frozen_neckline_v1"
+        "same_structure_identical_frozen_neckline_v2"
     assert MAIN_RULES["inverse_head_shoulders"]["maximum_leg_duration_ratio"] == 2.5
     assert MAIN_RULES["inverse_head_shoulders"][
         "minimum_intervening_right_trough_head_separation_atr_multiple"] == 2.0

@@ -50,62 +50,15 @@ def _recognition_experiment_cache_key():
 
 
 def _same_neckline_boundary_phase(consumed, candidate, tick_size=0.01):
-    """Match a frozen line across added touches without merging distinct lines.
+    """Consume the same frozen line, not another line within touch tolerance.
 
-    Two or more shared pressure-touch anchors with line agreement identify an
-    extended touch group on the same boundary. Exact coefficient identity also
-    matches when the line is represented by a different touch set.
+    ATR tolerances validate candle contact; they do not identify a boundary.
+    A new supported line owns a separate first crossing even with shared lows.
     """
-    left_line, right_line = consumed.get("line"), candidate.get("line")
-    if not left_line or not right_line:
-        return False
-    left_tests, right_tests = consumed.get("tests", []), candidate.get("tests", [])
-    left_by_index = {int(item["pivot_index"]): item for item in left_tests
-                     if item.get("pivot_index") is not None}
-    right_by_index = {int(item["pivot_index"]): item for item in right_tests
-                      if item.get("pivot_index") is not None}
-    shared = sorted(left_by_index.keys() & right_by_index.keys())
-    left_start = min((int(item.get("coverage_start_index", item["pivot_index"]))
-                      for item in left_tests if item.get("pivot_index") is not None), default=None)
-    left_end = max((int(item.get("coverage_end_index", item["pivot_index"]))
-                    for item in left_tests if item.get("pivot_index") is not None), default=None)
-    right_start = min((int(item.get("coverage_start_index", item["pivot_index"]))
-                       for item in right_tests if item.get("pivot_index") is not None), default=None)
-    right_end = max((int(item.get("coverage_end_index", item["pivot_index"]))
-                     for item in right_tests if item.get("pivot_index") is not None), default=None)
-    overlap_start = max(left_start, right_start) if left_start is not None and right_start is not None else None
-    overlap_end = min(left_end, right_end) if left_end is not None and right_end is not None else None
-    overlap = (overlap_start, overlap_end) if overlap_start is not None and overlap_end is not None \
-        and overlap_start <= overlap_end else None
-    if len(shared) < 2 and overlap is None:
-        return (abs(float(left_line["slope"]) - float(right_line["slope"])) <= 1e-12
-                and abs(float(left_line["intercept"]) - float(right_line["intercept"])) <= 1e-12)
-
-    probes = set(shared)
-    if overlap is not None:
-        probes.update(overlap)
-    consumed_index = consumed.get("consumed_index")
-    if consumed_index is not None:
-        probes.add(int(consumed_index))
-
-    def nearest_tolerance(tests, index):
-        eligible = [item for item in tests if item.get("pivot_index") is not None]
-        if not eligible:
-            return 0.0
-        distance = min(abs(int(item["pivot_index"]) - index) for item in eligible)
-        return max((float(item.get("tolerance", 0.0)) for item in eligible
-                    if abs(int(item["pivot_index"]) - index) == distance), default=0.0)
-
-    for index in probes:
-        left_tolerance = nearest_tolerance(left_tests, index)
-        right_tolerance = nearest_tolerance(right_tests, index)
-        old_boundary_tolerance = max(2.0 * float(tick_size), left_tolerance,
-                                     float(consumed.get("phase_tolerance", 0.0)))
-        new_boundary_tolerance = max(2.0 * float(tick_size), right_tolerance)
-        tolerance = min(old_boundary_tolerance, new_boundary_tolerance)
-        if abs(_at(left_line, index) - _at(right_line, index)) > tolerance:
-            return False
-    return True
+    left, right = consumed.get("line"), candidate.get("line")
+    return bool(left and right and
+                abs(float(left["slope"]) - float(right["slope"])) <= 1e-12 and
+                abs(float(left["intercept"]) - float(right["intercept"])) <= 1e-10)
 
 
 def _failed_premature_neckline_phase(phases, close_values, index):
@@ -1765,20 +1718,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             # Keep the primary pending lifecycle unchanged. Sidechannel
             # candidates are only considered when no primary is pending.
             continue
-        failed_phase = _failed_premature_neckline_phase(consumed_phases, close, index)
-        if failed_phase is not None:
-            early_breakout_invalidation = {
-                "date": _date_text(dates, index, date_strings), "index": int(index),
-                "level": float(_at(failed_phase["line"], index)),
-                "reason": "premature_breakout_fell_back_below_frozen_neckline",
-                "breakout_date": date_strings[int(failed_phase["consumed_index"])],
-                "candidate_id": failed_phase.get("candidate_id"),
-                "line": dict(failed_phase["line"]),
-            }
-            chosen_candidate = next((candidate for candidate in neckline_candidates
-                                     if _same_neckline_boundary_phase(
-                                         failed_phase, candidate, tick_size)), chosen_candidate)
-            break
+        # A failed premature crossing consumes only its frozen boundary.
+        # Keep searching this geometry for independently supported new lines.
         available = [candidate for candidate in neckline_candidates
                      if candidate["frozen_index"] < index
                      and _neckline_decline_check(family, candidate["line"],

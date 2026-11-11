@@ -1,0 +1,50 @@
+<!doctype html><meta charset="utf-8"><title>V8 restoration audit</title><style>body{font:16px/1.65 system-ui;max-width:1100px;margin:40px auto;background:#f2f5f8;color:#203247;padding:24px}section{background:white;padding:26px;margin:20px 0;border-radius:12px}td,th{padding:12px;text-align:left;border-bottom:1px solid #ddd}strong{color:#a65500}code{overflow-wrap:anywhere}</style><h1>v8 恢复审计：源码来源尚不完整</h1><section style="white-space:pre-wrap"># v8 恢复审计：源码来源尚不完整
+
+本次完成了当前成果保护和源码追溯，尚未完成策略回退，也未运行新的100账户复现。生产扫描、详情和回测代码未修改。
+
+## 已完成
+
+- 归档源码、测试、脚本、文档和未提交 Git 差异。
+- 使用 APFS 克隆保存全部报告与研究目录，8,695 个报告文件、361 个研究文件的路径、大小及修改时间逐项一致。
+- 保存临时目录里残留的早期识别源码及其 SHA256，防止后续清理造成丢失。
+- 检查 Git 历史、reflog、stash 和不可达对象，未找到完整 v8 提交。748d3d01 已为 v9，effa91b3 则是更早的 v1 扩展。
+- 执行前未观察到正在运行的旧研究回测进程。遗留 running 任务文件不作为运行事实。
+
+## 恢复缺口
+
+`/tmp/caisen-hotpath-20261105-baseline/snapshot-v8` 仅剩空目录。残留的 main_bottoms.py、daily_incremental.py 不包含完整的对应规则目录、执行器及依赖来源，尚不能证明与历史 v8 全量运行匹配。
+
+不能将 v9 更名为 v8，或通过删除几项新版规则，就声称完成原始 v8 恢复。下一步必须找到匹配规则及依赖，或重建候选实现并通过历史逐信号、冻结边界和逐笔账目复现；候选实现验证前只能标为未验证。
+
+## 值得保留的研究信息
+
+| 发现 | 证据和局限 | 后续处理 |
+|---|---|---|
+| 双向及链式抑制 | 可能错误压制有效结构 | v8 恢复后独立验证单向抑制 |
+| 同组底点换线 | 真正不同且当时已可知的新边界可以产生独立首次突破 | 保留用户确认口径，独立实验，不混入原始 v8 |
+| 三角形换线 | 新上边界改变交点及突破位置 | 重算交点和 1/2～3/4 窗口；000008 仅为单例原型证据 |
+| 动态换线 V2 | 100账户胜率34.47%、收益302.19%，最大单账户回撤90.20% | 仅复用已存v12结构，不能当作完整新识别器的验证 |
+| 交易减少未改善胜率 | 同100股票，v8为3780笔、胜率33.7566%、收益61.3449%；v12为1669笔、33.6129%、27.1279% | 分析删单和新增单贡献，不将交易减少当作识别准确率提高 |
+| 性能复用 | 数组、压力点配对、覆盖缓存及按标的并行 | 信号和账目一致后才归类为纯性能优化 |
+
+## 尚未完成
+
+- 完整恢复 v8 及100账户逐笔复现。
+- 日线、周线扫描及缓存版本切换。
+- 基于已验收 v8 的单因素实验及新版 Backtrader 报告。
+
+历史 v8 的3780笔交易等指标仅为已有结果，不是本次重跑结果。当前提交为恢复审计提交，不是 v8 恢复成功提交；不建立 v8 基线标签。
+
+归档位置和来源清单见同目录 provenance.json，网页入口为 index.html。
+</section><p><a href="provenance.json">Provenance JSON</a></p><h1>V8 restoration audit &amp; research ledger</h1><p>2026-11-11</p><section><h2>Restoration gate not passed</h2><strong>Partial historical source survives; exact matching rules and execution provenance are missing. Production has not been switched.</strong><p>No new reproduction or successful rollback is claimed.</p></section><section><h2>Archived work</h2><p>Complete reports and research folders were APFS-cloned. Every file path, size and modification time matches. Source, tests, scripts, docs and Git differences are separately archived.</p><code>/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111</code><pre>{
+  &quot;reports&quot;: {
+    &quot;files&quot;: 8695,
+    &quot;bytes&quot;: 40413516379,
+    &quot;inventory_equal&quot;: true
+  },
+  &quot;research&quot;: {
+    &quot;files&quot;: 361,
+    &quot;bytes&quot;: 4628272835,
+    &quot;inventory_equal&quot;: true
+  }
+}</pre></section><section><h2>Source provenance</h2><p>Git 748d3d01 is v9; effa91b3 predates v8. Available history, reflog, stash and unreachable objects did not yield an exact v8 snapshot. The snapshot-v8 directory contains empty subdirectories. Candidate main_bottoms.py and daily_incremental.py were preserved, but do not establish complete reproducibility.</p></section><section><h2>Research findings</h2><table><tr><th>Finding</th><th>Evidence and limits</th><th>Disposition</th></tr><tr><td>Directional suppression</td><td>Bidirectional and cascading suppression are candidate bugs.</td><td>Separate experiment after baseline restoration.</td></tr><tr><td>Same troughs, new neckline</td><td>A genuinely different boundary can have its own first signal after availability.</td><td>User-approved research rule; not mixed into v8.</td></tr><tr><td>Triangle apex</td><td>Changing upper boundaries requires recalculating apex and 50%-75% breakout window.</td><td>000008 smoke only; not 100-account evidence.</td></tr><tr><td>Dynamic neckline V2</td><td>100 accounts: win rate 34.47%, return 302.19%, worst account drawdown 90.20%.</td><td>Stored v12 structures only; not a complete new recognizer.</td></tr><tr><td>Trade removal</td><td>Matched 100: v8 3780 trades/33.7566% wins/+61.3449%; v12 1669/33.6129%/+27.1279%.</td><td>Fewer trades did not establish better accuracy.</td></tr><tr><td>Performance</td><td>Reuse arrays, pressure pairs and interval calculations; parallelize by symbol.</td><td>Require identical signals and ledgers; report cold and warm timings separately.</td></tr></table></section><section><h2>Historical reference, not a new run</h2><p>Same 100 stocks, cutoff 2026-10-30: 3780 trades; win rate 33.7566%; equal-start-capital return 61.3449%; aggregate drawdown 11.8185%; profit factor 1.2356.</p><p>Signal, boundary, order and ledger reproduction must pass before scan migration. Subsequent optimizations remain research.</p><a href="provenance.json">Provenance manifest</a> | <a href="README.md">Completion and missing-items ledger</a></section>

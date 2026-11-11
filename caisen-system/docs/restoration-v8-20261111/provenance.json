@@ -1,0 +1,57 @@
+{
+  "created_at": "2026-11-11T04:33:16.468905+00:00",
+  "head": "33ca8475ae2d40fca46d9ed72ae4d8ee7c725bb5",
+  "status": "source_recovery_incomplete",
+  "production_switched": false,
+  "reproduction_run": false,
+  "backup": "/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111",
+  "copies": {
+    "reports": {
+      "files": 8695,
+      "bytes": 40413516379,
+      "inventory_equal": true
+    },
+    "research": {
+      "files": 361,
+      "bytes": 4628272835,
+      "inventory_equal": true
+    }
+  },
+  "candidate_sources": {
+    "/tmp/caisen-hotpath-20261105-baseline/daily_incremental.py": {
+      "archive": "/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111/recovery-evidence/caisen-hotpath-20261105-baseline/daily_incremental.py",
+      "sha256": "8a9cade4afc74c9c3761c98727ad4edd82be1ecfd2b7b1dc22befbaa292c5375"
+    },
+    "/tmp/caisen-hotpath-20261105-baseline/main_bottoms.py": {
+      "archive": "/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111/recovery-evidence/caisen-hotpath-20261105-baseline/main_bottoms.py",
+      "sha256": "28adf047192ab8fc4fa73902e09e564f04f3244403224ab56e20140ea97ccec2"
+    },
+    "/tmp/caisen-hotpath-20261105-final/daily_incremental.py": {
+      "archive": "/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111/recovery-evidence/caisen-hotpath-20261105-final/daily_incremental.py",
+      "sha256": "42a8ffd95486946ee0adcafa22ed8ca571589087ff5781b3c7be3cb8c1675fea"
+    },
+    "/tmp/caisen-hotpath-20261105-final/test_daily_incremental_performance.py": {
+      "archive": "/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111/recovery-evidence/caisen-hotpath-20261105-final/test_daily_incremental_performance.py",
+      "sha256": "81ed2e87b4bc07a47843afda5c45ec3f29775f686a3583b71d2276e8fec6c18e"
+    },
+    "/tmp/caisen-hotpath-20261105-final/main_bottoms.py": {
+      "archive": "/Users/sotawest/OpenCode/stock/caisen-system/state/v8-restoration-20261111/recovery-evidence/caisen-hotpath-20261105-final/main_bottoms.py",
+      "sha256": "58526c28b3d650c98e2ebea7e8a2e93468e7c79400eb3e07bab10878c2c5b9c9"
+    }
+  },
+  "missing": [
+    "Exact matching v8 rule catalog: snapshot-v8 contains empty directories",
+    "Complete v8 execution and dependency source provenance",
+    "Reproduction of historical signals, orders and ledgers on the paired 100 accounts"
+  ],
+  "baseline_rule": "caisen-main-bottoms-v8",
+  "baseline_engine": "caisen-daily-boundary-first-v2",
+  "cutoff": "2026-10-30",
+  "git_audit": {
+    "748d3d01": "v9, not v8",
+    "effa91b3": "v1 main-bottom extension",
+    "v8_rule_commit_search": "no match",
+    "unreachable_objects": "none",
+    "stash": "none"
+  }
+}

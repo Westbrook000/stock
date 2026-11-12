@@ -123,7 +123,7 @@ def test_boundary_first_dispatch_is_explicit_and_reports_pair_reuse():
                                      performance=performance)
 
     assert signals == []
-    assert performance["engine_version"] == "caisen-daily-boundary-first-v3-phase-scope-v1"
+    assert performance["engine_version"] == "caisen-daily-boundary-first-v3-evidence-first-v2"
     assert performance["boundary_pairs_generated"] == 0
     assert performance["boundary_pairs_reused"] == 0
     assert performance["coverage_checks"] == 0

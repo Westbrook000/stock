@@ -17,13 +17,13 @@ from .main_bottoms import (
     _neckline_decline_check, _neckline_formation_coverage,
     _neckline_candidate_reversal_atr_multiple, _neckline_candidate_scale,
     _minimum_neckline_test_count, _same_neckline_boundary_phase,
-    _neckline_test_tolerance_at,
+    _neckline_test_tolerance_at, _first_frozen_boundary_crossing,
 )
 from .patterns import PATTERN_LABELS, _line, _at
 from .schemas import Pattern, Pivot
 
-ENGINE_VERSION = "caisen-daily-continuous-v5-phase-scope-v1"
-BOUNDARY_FIRST_ENGINE_VERSION = "caisen-daily-boundary-first-v3-phase-scope-v1"
+ENGINE_VERSION = "caisen-daily-continuous-v5-evidence-first-v2"
+BOUNDARY_FIRST_ENGINE_VERSION = "caisen-daily-boundary-first-v3-evidence-first-v2"
 SOURCE_RULE_VERSION = str(MAIN_RULES.get("source_rule_version", "unknown"))
 
 
@@ -53,6 +53,8 @@ class DailyRecognitionSession:
         self.local_pivots: List[Pivot] = []
         self.active = {}
         self.consumed_neckline_phases = {}
+        self.boundary_crossing_cache = {}
+        self.close_values = []
         self.emitted_ids = set()
         self.emitted_events = []
         self.neckline_candidate_cache = {}
@@ -86,6 +88,7 @@ class DailyRecognitionSession:
 
     def _prepare_neckline_frame(self, frame):
         """Attach the numeric history views shared by every candidate evaluation."""
+        frame.attrs["frozen_boundary_crossing_cache"] = self.boundary_crossing_cache
         frame.attrs["neckline_candidate_cache"] = self.neckline_candidate_cache
         frame.attrs["neckline_pair_cache"] = self.neckline_pair_cache
         frame.attrs["neckline_coverage_cache"] = self.neckline_coverage_cache
@@ -917,6 +920,8 @@ class DailyRecognitionSession:
         rules = MAIN_RULES.get("breakout", {})
         buffer_multiple = float(rules.get("close_buffer_previous_atr_multiple", 1.0))
         minimum_ticks = float(rules.get("minimum_buffer_ticks", 2)) * self.tick_size
+        if len(self.close_values) != len(self.bars):
+            self.close_values = [float(bar['close']) for bar in self.bars]
         for candidate in self.active.values():
             pattern = candidate.get("pattern")
             if pattern is None or pattern.confirmation_date:
@@ -955,6 +960,25 @@ class DailyRecognitionSession:
                     cache=self.neckline_coverage_cache)
                 candidate["formation_guard_key"] = guard_key
             if not candidate["formation_guard"]["passed"]:
+                continue
+            first_cross = _first_frozen_boundary_crossing(
+                self.close_values, self.atr_values, line, formation_end + 1,
+                i, self.tick_size, self.boundary_crossing_cache)
+            if first_cross is not None and first_cross['index'] < i:
+                first_index = first_cross['index']
+                reason = ('breakout_before_minimum_structure_duration'
+                          if self.date_strings[first_index] < self._candidate_maturity_date(candidate)
+                          else 'historical_first_crossing_before_selection')
+                self._remember_consumed_boundary(candidate, dict(
+                    phase, consumed_index=first_index, reason=reason))
+                selection['first_boundary_crossing'] = dict(
+                    first_cross, date=self.date_strings[first_index], reason=reason)
+                structure.update(signal_eligible=False, eligibility_reason=reason,
+                                 first_boundary_crossing_date=self.date_strings[first_index])
+                if reason == 'breakout_before_minimum_structure_duration':
+                    pattern.state = 'invalidated'
+                    structure['terminal_state'] = 'invalidated'
+                pattern.last_observed_date = current_date
                 continue
             if float(self.bars[i]["close"]) < float(structure.get("support_lower", -np.inf)):
                 continue
@@ -1161,6 +1185,10 @@ class DailyRecognitionSession:
         if self.bars and row["date"] <= self.bars[-1]["date"]:
             raise ValueError("daily bars must be appended in strictly increasing date order")
         self.bars.append(row)
+        if len(self.close_values) == len(self.bars) - 1:
+            self.close_values.append(row['close'])
+        else:
+            self.close_values = [float(bar['close']) for bar in self.bars]
         self._prefix_frame_cache = None
         self._prefix_frame_cache_length = -1
         self.date_strings.append(str(row["date"].date()))

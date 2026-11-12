@@ -50,15 +50,88 @@ def _recognition_experiment_cache_key():
 
 
 def _same_neckline_boundary_phase(consumed, candidate, tick_size=0.01):
-    """Consume the same frozen line, not another line within touch tolerance.
+    """Match exact lines or shared-evidence numerical refits below half a tick.
 
     ATR tolerances validate candle contact; they do not identify a boundary.
-    A new supported line owns a separate first crossing even with shared lows.
+    A materially new supported line owns its own first crossing.
     """
     left, right = consumed.get("line"), candidate.get("line")
-    return bool(left and right and
-                abs(float(left["slope"]) - float(right["slope"])) <= 1e-12 and
-                abs(float(left["intercept"]) - float(right["intercept"])) <= 1e-10)
+    if not left or not right:
+        return False
+    if (abs(float(left['slope']) - float(right['slope'])) <= 1e-12
+            and abs(float(left['intercept']) - float(right['intercept'])) <= 1e-10):
+        return True
+    old_tests, new_tests = consumed.get('tests', []), candidate.get('tests', [])
+    old_anchors = {int(t['pivot_index']) for t in old_tests if t.get('pivot_index') is not None}
+    new_anchors = {int(t['pivot_index']) for t in new_tests if t.get('pivot_index') is not None}
+    shared = old_anchors & new_anchors
+    if len(shared) < 2:
+        return False
+    # Shared pressure evidence plus sub-tick prices identifies numerical refits.
+    # ATR touch tolerance must never merge two materially different boundaries.
+    probes = old_anchors | new_anchors
+    probes.update(int(t['known_index']) for t in old_tests + new_tests
+                  if t.get('known_index') is not None)
+    if consumed.get('consumed_index') is not None:
+        probes.add(int(consumed['consumed_index']))
+    return all(abs(_at(left, i) - _at(right, i)) < .5 * tick_size for i in probes)
+
+
+def _frozen_boundary_identity(line, reference_index):
+    """Identify geometry using slope and a date-anchored price, not window offset."""
+    return f"{float(line['slope']):.12g}:{_at(line, reference_index):.12g}"
+
+
+def _first_frozen_boundary_crossing(close_values, atr_values, line, start_index,
+                                    end_index, tick_size, cache=None):
+    """Audit a line independently of selection; append-only scans reuse history."""
+    start_index = max(1, int(start_index))
+    end_index = min(int(end_index), len(close_values) - 1, len(atr_values) - 1)
+    rules = MAIN_RULES.get('breakout', {})
+    multiple = float(rules.get('close_buffer_previous_atr_multiple', 1.0))
+    ticks = float(rules.get('minimum_buffer_ticks', 2)) * tick_size
+    key = (float(line['slope']), float(line['intercept']), start_index,
+           float(tick_size), multiple, ticks)
+    memo = cache.get(key) if cache is not None else None
+    if memo is not None and memo['scanned_to'] >= end_index:
+        first = memo['first']
+        return dict(first) if first is not None and first['index'] <= end_index else None
+    if memo is None:
+        memo = {'scanned_to': start_index - 1, 'first': None}
+        if cache is not None:
+            cache[key] = memo
+        frozen = start_index - 1
+        if 0 < frozen <= end_index:
+            known_atr = float(atr_values[frozen - 1])
+            buffer = max(ticks, multiple * known_atr)
+            if np.isfinite(known_atr) and float(close_values[frozen]) > _at(line, frozen) + buffer:
+                memo['first'] = {'index': frozen, 'close': float(close_values[frozen]),
+                                 'frozen_neckline': _at(line, frozen),
+                                 'required_close': _at(line, frozen) + buffer,
+                                 'atr14_previous': known_atr, 'tolerance': buffer,
+                                 'already_above_at_freeze': True}
+    if memo['first'] is not None:
+        return dict(memo['first']) if memo['first']['index'] <= end_index else None
+    begin = max(start_index, memo['scanned_to'] + 1)
+    if begin > end_index:
+        return None
+    indexes = np.arange(begin, end_index + 1)
+    known_atr = np.asarray(atr_values[begin - 1:end_index], dtype=float)
+    prices = np.asarray(close_values[begin:end_index + 1], dtype=float)
+    levels = line['slope'] * indexes + line['intercept']
+    buffers = np.maximum(ticks, multiple * known_atr)
+    matches = np.flatnonzero(np.isfinite(known_atr) & (known_atr > 0)
+                             & (prices > levels + buffers))
+    memo['scanned_to'] = end_index
+    if len(matches):
+        j = int(matches[0])
+        memo['first'] = {'index': int(indexes[j]), 'close': float(prices[j]),
+                         'frozen_neckline': float(levels[j]),
+                         'required_close': float(levels[j] + buffers[j]),
+                         'atr14_previous': float(known_atr[j]),
+                         'tolerance': float(buffers[j]), 'already_above_at_freeze': False}
+        return dict(memo['first'])
+    return None
 
 
 def _failed_premature_neckline_phase(phases, close_values, index):
@@ -1735,62 +1808,56 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             <= rejected["tolerance"] for rejected in rejected_boundaries)]
         if not available:
             continue
-        available.sort(key=lambda candidate: candidate["score"])
-        primary_candidate = min(available, key=lambda candidate: candidate["score"])
-        chosen_candidate = primary_candidate
-        for candidate in available:
-            selected_tests = candidate["tests"]
-            neckline = dict(candidate["line"])
-            if index <= structure_known_at or index <= candidate["frozen_index"]:
-                continue
-            if any(abs(_at(neckline, rejected["index"]) - rejected["price"])
-                   <= rejected["tolerance"] for rejected in rejected_boundaries):
-                continue
-            phase = {"line": neckline, "tests": selected_tests,
-                     "consumed_index": int(index),
-                     "phase_tolerance": _neckline_test_tolerance_at(index, atr_values, tick_size),
-                     "candidate_id": selected_tests[0]["pair_id"]}
-            matching_consumed = [existing for existing in consumed_phases
-                                 if (existing.get("consumed_index") is None
-                                     or int(existing["consumed_index"]) < index)
-                                 and _same_neckline_boundary_phase(existing, phase, tick_size)]
-            if any(existing.get("selected", True) for existing in matching_consumed):
-                continue
-            sidephase_already_consumed = bool(matching_consumed)
-            previous_level = _at(neckline, index - 1)
-            previous_atr_for_buffer = atr_values[index - 2] if index > 1 else np.nan
-            if not np.isfinite(previous_atr_for_buffer) or previous_atr_for_buffer <= 0:
-                continue
-            previous_buffer = max(
-                float(MAIN_RULES.get("breakout", {}).get("minimum_buffer_ticks", 2)) * tick_size,
-                float(MAIN_RULES.get("breakout", {}).get("close_buffer_previous_atr_multiple", 1.0))
-                * float(previous_atr_for_buffer),
-            )
-            if close[index - 1] > previous_level + previous_buffer:
-                continue
-            previous_atr = atr_values[index - 1] if index > 0 else np.nan
-            if not np.isfinite(previous_atr) or previous_atr <= 0:
-                continue
-            level = _at(neckline, index)
-            breakout_rules = MAIN_RULES.get("breakout", {})
-            tolerance = max(float(breakout_rules.get("minimum_buffer_ticks", 2)) * tick_size,
-                            float(breakout_rules.get("close_buffer_previous_atr_multiple", 1.0))
-                            * float(previous_atr))
-            required_close = level + tolerance
-            if close[index] > level and close[index] <= required_close:
-                weak_crossings.append({
-                    "date": _date_text(dates, index, date_strings), "close": float(close[index]),
-                    "neckline": float(level), "required_close": float(required_close),
-                    "atr14_previous": float(previous_atr), "tolerance": float(tolerance),
-                    "candidate_id": selected_tests[0]["pair_id"],
-                })
-            if close[index] <= required_close:
-                continue
-            if sidephase_already_consumed:
-                # This exact frozen boundary has already had its first
-                # buffered crossing consumed; another candidate line remains
-                # free to confirm its own lifecycle.
-                continue
+        chosen_candidate = min(available, key=lambda candidate: candidate["score"])
+        selected_tests = chosen_candidate["tests"]
+        neckline = dict(chosen_candidate["line"])
+        # A complete shape is a watch condition, not a buy signal. Require a
+        # fresh buffered close breakout after both the structure and this
+        # boundary are known; discovering an old structure while price is
+        # already through the buffered trigger must not create a retroactive entry.
+        if index <= structure_known_at or index <= chosen_candidate["frozen_index"]:
+            continue
+        first_cross = _first_frozen_boundary_crossing(
+            close, atr_values, neckline,
+            max(structure_known_at, chosen_candidate['frozen_index']) + 1,
+            index, tick_size, frame.attrs.setdefault('frozen_boundary_crossing_cache', {}))
+        if first_cross is not None and first_cross['index'] < index:
+            phase = dict(first_cross, line=dict(neckline), tests=selected_tests,
+                         consumed_index=first_cross['index'],
+                         candidate_id=selected_tests[0]['pair_id'],
+                         reason='historical_first_crossing_before_selection')
+            if not any(_same_neckline_boundary_phase(existing, phase, tick_size)
+                       for existing in consumed_phases):
+                consumed_phases.append(phase)
+            continue
+        previous_level = _at(neckline, index - 1)
+        previous_atr_for_buffer = atr_values[index - 2] if index > 1 else np.nan
+        if not np.isfinite(previous_atr_for_buffer) or previous_atr_for_buffer <= 0:
+            continue
+        previous_buffer = max(
+            float(MAIN_RULES.get("breakout", {}).get("minimum_buffer_ticks", 2)) * tick_size,
+            float(MAIN_RULES.get("breakout", {}).get("close_buffer_previous_atr_multiple", 1.0))
+            * float(previous_atr_for_buffer),
+        )
+        if close[index - 1] > previous_level + previous_buffer:
+            continue
+        previous_atr = atr_values[index - 1] if index > 0 else np.nan
+        if not np.isfinite(previous_atr) or previous_atr <= 0:
+            continue
+        level = _at(neckline, index)
+        breakout_rules = MAIN_RULES.get("breakout", {})
+        tolerance = max(float(breakout_rules.get("minimum_buffer_ticks", 2)) * tick_size,
+                        float(breakout_rules.get("close_buffer_previous_atr_multiple", 1.0))
+                        * float(previous_atr))
+        required_close = level + tolerance
+        if close[index] > level and close[index] <= required_close:
+            weak_crossings.append({
+                "date": _date_text(dates, index, date_strings), "close": float(close[index]),
+                "neckline": float(level), "required_close": float(required_close),
+                "atr14_previous": float(previous_atr), "tolerance": float(tolerance),
+                "candidate_id": selected_tests[0]["pair_id"],
+            })
+        if close[index] > required_close:
             item = {
                 "date": _date_text(dates, index, date_strings), "index": int(index),
                 "close": float(close[index]), "frozen_neckline": float(level),
@@ -1799,11 +1866,17 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 "candidate_id": selected_tests[0]["pair_id"],
             }
             if pd.Timestamp(dates[index]) < maturity_date:
-                early_event = dict(item, line=dict(candidate["line"]),
-                                   tests=candidate["tests"])
+                early_event = dict(item, line=dict(chosen_candidate["line"]),
+                                   tests=chosen_candidate["tests"])
                 early_breakouts.append(early_event)
-                phase["reason"] = "breakout_before_minimum_structure_duration"
-                consumed_phases.append(phase)
+                phase = {"line": dict(chosen_candidate["line"]),
+                         "tests": chosen_candidate["tests"], "consumed_index": int(index),
+                         "phase_tolerance": _neckline_test_tolerance_at(index, atr_values, tick_size),
+                         "candidate_id": item["candidate_id"],
+                         "reason": "breakout_before_minimum_structure_duration"}
+                if not any(_same_neckline_boundary_phase(existing, phase, tick_size)
+                           for existing in consumed_phases):
+                    consumed_phases.append(phase)
                 rejected_boundaries.append({
                     "index": int(index), "price": float(level),
                     "tolerance": max(2.0 * tick_size,
@@ -1816,13 +1889,15 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                                          "breakout_date": item["date"], "state": "too_early"})
                 continue
             else:
-                phase["reason"] = "buffered_breakout"
-                consumed_phases.append(phase)
-                pending_breakout = {"candidate": candidate, "item": item}
-                chosen_candidate = candidate
-                # The reported pattern must carry the same frozen neckline
-                # that generated its first valid breakout.
-                break
+                phase = {"line": dict(chosen_candidate["line"]),
+                         "tests": chosen_candidate["tests"], "consumed_index": int(index),
+                         "phase_tolerance": _neckline_test_tolerance_at(index, atr_values, tick_size),
+                         "candidate_id": item["candidate_id"],
+                         "reason": "buffered_breakout"}
+                if not any(_same_neckline_boundary_phase(existing, phase, tick_size)
+                           for existing in consumed_phases):
+                    consumed_phases.append(phase)
+                pending_breakout = {"candidate": chosen_candidate, "item": item}
     if chosen_candidate is None:
         final_candidates = [candidate for candidate in neckline_candidates
                             if candidate["frozen_index"] < len(frame) - 1
@@ -1874,6 +1949,17 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     frozen_date = _date_text(dates, frozen_at, date_strings)
     if breakout is None and pd.Timestamp(dates[-1]) < maturity_date:
         return None
+
+    selected_first_cross = _first_frozen_boundary_crossing(
+        close, atr_values, neckline, max(structure_known_at, chosen_candidate['frozen_index']) + 1,
+        len(frame) - 1, tick_size, frame.attrs.setdefault('frozen_boundary_crossing_cache', {}))
+    if (breakout is None and selected_first_cross is not None
+            and pd.Timestamp(dates[selected_first_cross['index']]) < maturity_date):
+        early_breakout_invalidation = {
+            'date': date_strings[selected_first_cross['index']],
+            'index': selected_first_cross['index'],
+            'level': selected_first_cross['frozen_neckline'],
+            'reason': 'breakout_before_minimum_structure_duration'}
 
     structure_invalidation = None
     neckline_invalidation = early_breakout_invalidation
@@ -2052,6 +2138,9 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                                       "same_structure_equivalent_frozen_neckline_v1")),
         "breakout_candidate_rule": str(MAIN_RULES.get(
             "breakout_candidate_rule", "candidate_own_frozen_neckline_v1")),
+        "first_boundary_crossing": _first_frozen_boundary_crossing(
+            close, atr_values, neckline, max(structure_known_at, chosen_candidate['frozen_index']) + 1,
+            len(frame) - 1, tick_size, frame.attrs.setdefault('frozen_boundary_crossing_cache', {})),
         "selected_candidate_id": selected_candidate_id,
         "selected_rank": next((item["rank"] for item in candidate_summaries
                                if item["selected"]), None),
@@ -2092,10 +2181,12 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     identity_dates = [pivot.date for pivot in sequence] + [
         _date_text(dates, item["pivot_index"], date_strings) for item in selected_tests
     ]
+    boundary_identity = _frozen_boundary_identity(neckline, first_trough.index)
     identity = "|".join([code, kind, timeframe, MAIN_PATTERN_TYPES[family], pivot_scale,
-                         ":".join(identity_dates)])
+                         ":".join(identity_dates), boundary_identity])
     pattern_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
     key_points = {"pivot_scale": pivot_scale, "scale": scale_name,
+                  "frozen_boundary_identity": boundary_identity,
                   "support_lower": float(support_lower), "support_upper": float(support_upper),
                   "first_trough_index": int(first_trough.index),
                   "first_trough_date": _date_text(dates, first_trough.index, date_strings),
@@ -2112,7 +2203,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             "role": "main", "family": family, "scale": scale_name, "pivot_scale": pivot_scale,
             "signal_eligible": signal_eligible,
             "eligibility_reason": "price_breakout_confirmed" if signal_eligible else (
-                "terminal_state" if terminal else "awaiting_fresh_neckline_breakout"),
+                "breakout_before_minimum_structure_duration" if early_breakout_invalidation else
+                ("terminal_state" if terminal else "awaiting_fresh_neckline_breakout")),
             "support_lower": float(support_lower), "support_upper": float(support_upper),
             "neckline": neckline, "frozen_at": frozen_date,
             "frozen_at_index": int(frozen_at), "first_trough_date": _date_text(dates, first_trough.index, date_strings),
@@ -2198,6 +2290,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         ]
         old_identity = "|".join([code, kind, timeframe, MAIN_PATTERN_TYPES[family], pivot_scale,
                                   ":".join(old_identity_dates)])
+        old_identity += '|' + _frozen_boundary_identity(old_line, first_trough.index)
         old_id = hashlib.sha1(old_identity.encode("utf-8")).hexdigest()[:16]
         snapshot = deepcopy(pattern)
         snapshot.pattern_id = f"{code}:{old_id}"
@@ -2206,6 +2299,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         snapshot.confirmed_at = int(old_breakout["index"])
         snapshot.confirmation_date = old_breakout["date"]
         snapshot.key_points["neckline_test_indices"] = [item["pivot_index"] for item in old_tests]
+        snapshot.key_points['frozen_boundary_identity'] = _frozen_boundary_identity(
+            old_line, first_trough.index)
         if family == "triangle_bottom":
             old_height = max(0.0, _at(old_line, first_trough.index) - _at(lower_boundary, first_trough.index))
         elif family == "inverse_head_shoulders":
@@ -2269,6 +2364,10 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                     "decline_check": _neckline_decline_check(family, old_line,
                         old_tests[0]["coverage_start_index"], int(old_breakout["index"])),
                     "diagnostics_as_of": old_breakout["date"],
+                    "first_boundary_crossing": _first_frozen_boundary_crossing(
+                        close, atr_values, old_line, old_structure_frozen_index + 1,
+                        int(old_breakout['index']), tick_size,
+                        frame.attrs.setdefault('frozen_boundary_crossing_cache', {})),
                     "rejection_counts": rejection_summary(int(old_breakout["index"]))[0],
                     "rejected_candidates": rejection_summary(int(old_breakout["index"]))[1],
                     "independent_tests": old_tests,

@@ -61,3 +61,18 @@ def test_new_line_confirmation_is_not_backdated_before_maturity():
     assert not any(p.confirmation_date for p in before)
     after = recognize(bars, pivots, phase)
     assert [p.confirmation_date for p in after if p.confirmation_date] == ['2024-08-22']
+
+
+def test_evidence_winner_is_selected_before_checking_which_line_breaks_today():
+    bars, pivots, _ = fixture()
+    # The upper 11.0 line has two tests covering 100 bars; the 10.5 line has
+    # two covering 20. The weaker line crosses earlier after maturity.
+    bars.loc[100, ['open', 'close', 'low']] = [10.3, 10.3, 10.25]
+    result = m._make_main_pattern(
+        bars, 'fixture', 'stock', '1d', 'w_bottom', [pivots[1], pivots[5]],
+        pivots, np.full(len(bars), .2), .01, '2atr_5pct', '5y', background_bars=bars)
+    patterns = result if isinstance(result, list) else [result]
+    confirmed = [p for p in patterns if p and p.confirmation_date]
+    assert confirmed
+    assert confirmed[-1].neckline == {'slope': 0., 'intercept': 11.}
+    assert confirmed[-1].confirmation_date == '2024-08-22'

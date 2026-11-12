@@ -56,6 +56,21 @@ def test_boundary_identity_distinguishes_new_line_and_survives_window_offsets():
     assert m._frozen_boundary_identity(old, 100) != m._frozen_boundary_identity(different, 100)
 
 
+def test_failed_boundary_does_not_reject_another_line_in_the_same_atr_zone():
+    tests = [{'pivot_index': i, 'known_index': i + 1} for i in (10, 30)]
+    failed = {'line': {'slope': 0., 'intercept': 10.}, 'tests': tests,
+              'index': 40, 'consumed_index': 40, 'price': 10., 'tolerance': .5}
+    other = {'line': {'slope': 0., 'intercept': 10.02}, 'tests': tests}
+    assert not m._boundary_was_rejected(other, [failed], .01)
+    same = {'line': dict(failed['line']), 'tests': tests}
+    assert m._boundary_was_rejected(same, [failed], .01)
+
+
+def test_price_only_rejection_has_no_proven_boundary_identity():
+    other = {'line': {'slope': 0., 'intercept': 10.02}, 'tests': []}
+    assert not m._boundary_was_rejected(other, [{'index': 40, 'price': 10., 'tolerance': .5}], .01)
+
+
 def test_late_discovery_cannot_emit_a_000538_style_old_boundary_recross():
     dates = ['2020-02-28', '2020-03-17', '2020-04-30', '2020-07-03',
              '2020-08-28', '2021-08-18', '2021-08-19']

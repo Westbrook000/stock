@@ -58,7 +58,7 @@ def is_selected(pattern):
 
 
 def test_main_bottom_thresholds_are_declared_in_the_rule_catalog():
-    assert MAIN_RULES["source_rule_version"] == "caisen-main-bottoms-v11-evidence-first-v2"
+    assert MAIN_RULES["source_rule_version"] == "caisen-main-bottoms-v11-evidence-first-v3"
     assert MAIN_RULES["neckline_tests"]["candidate_reversal_atr_multiple"] == 2.0
     assert MAIN_RULES["neckline_tests"]["minimum_departure_atr"] == 1.0
     assert MAIN_RULES["timeframes"]["1d"]["structure_window_calendar_years"] == 5

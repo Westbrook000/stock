@@ -620,9 +620,9 @@
     }
   ],
   "main_structure_extension": {
-    "source_rule_version": "caisen-main-bottoms-v11-evidence-first-v2",
-    "neckline_selection_rule_version": "pattern_matched_pressure_envelope_v7-evidence-first-v2",
-    "main_pattern_rule_version": "caisen-v24-main-bottom-evidence-first-v2",
+    "source_rule_version": "caisen-main-bottoms-v11-evidence-first-v3",
+    "neckline_selection_rule_version": "pattern_matched_pressure_envelope_v7-evidence-first-v3",
+    "main_pattern_rule_version": "caisen-v24-main-bottom-evidence-first-v3",
     "breakout_candidate_rule": "candidate_own_frozen_neckline_v1",
     "neckline_selection_order": [
       "independent_test_count_desc",
@@ -681,7 +681,8 @@
       "post_formation_weak_crossings_allowed": true,
       "premature_failure_scope": "frozen_boundary_only",
       "boundary_identity": "same_coefficients_or_two_shared_pressure_anchors_with_sub_half_tick_price_deviation",
-      "first_boundary_crossing_audit": "own_line_since_structure_and_line_known_before_selection"
+      "first_boundary_crossing_audit": "own_line_since_structure_and_line_known_before_selection",
+      "rejected_boundary_matching": "same_boundary_identity_not_ATR_price_zone"
     },
     "neckline_slope": {
       "maximum_cumulative_relative_rise": 0.05,

@@ -82,6 +82,12 @@ def _frozen_boundary_identity(line, reference_index):
     return f"{float(line['slope']):.12g}:{_at(line, reference_index):.12g}"
 
 
+def _boundary_was_rejected(candidate, rejected_boundaries, tick_size):
+    """A failed line rejects that boundary, not its entire ATR price zone."""
+    return any(_same_neckline_boundary_phase(rejected, candidate, tick_size)
+               for rejected in rejected_boundaries)
+
+
 def _first_frozen_boundary_crossing(close_values, atr_values, line, start_index,
                                     end_index, tick_size, cache=None):
     """Audit a line independently of selection; append-only scans reuse history."""
@@ -1769,6 +1775,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             if close[index] < prior_support:
                 invalidation = {
                     "index": int(index), "price": prior_support,
+                    "line": dict(prior_candidate['line']),
+                    "tests": prior_candidate['tests'], "consumed_index": int(index),
                     "tolerance": max(2.0 * tick_size,
                                      float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
                                      * float(atr_values[index]) if np.isfinite(atr_values[index]) else 0.0),
@@ -1803,9 +1811,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             and phase.get("selected", True)
             and _same_neckline_boundary_phase(phase, candidate, tick_size)
             for phase in consumed_phases)]
-        available = [candidate for candidate in available if not any(
-            abs(_at(candidate["line"], rejected["index"]) - rejected["price"])
-            <= rejected["tolerance"] for rejected in rejected_boundaries)]
+        available = [candidate for candidate in available
+                     if not _boundary_was_rejected(candidate, rejected_boundaries, tick_size)]
         if not available:
             continue
         chosen_candidate = min(available, key=lambda candidate: candidate["score"])
@@ -1879,6 +1886,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                     consumed_phases.append(phase)
                 rejected_boundaries.append({
                     "index": int(index), "price": float(level),
+                    "line": dict(chosen_candidate['line']),
+                    "tests": chosen_candidate['tests'], "consumed_index": int(index),
                     "tolerance": max(2.0 * tick_size,
                                      float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
                                      * float(previous_atr)),
@@ -1908,9 +1917,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                                         and (phase.get("consumed_index") is None
                                              or int(phase["consumed_index"]) < len(frame) - 1)
                                         for phase in consumed_phases)
-                            and not any(
-                                abs(_at(candidate["line"], rejected["index"]) - rejected["price"])
-                                <= rejected["tolerance"] for rejected in rejected_boundaries)]
+                            and not _boundary_was_rejected(
+                                candidate, rejected_boundaries, tick_size)]
         if not final_candidates:
             retired = [entry for entry in neckline_history
                        if entry.get("state") == "invalidated" and entry.get("candidate")]

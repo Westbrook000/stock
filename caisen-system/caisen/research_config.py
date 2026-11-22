@@ -18,6 +18,9 @@ class RecognitionExperimentConfig:
     experiment_id: str
     minimum_neckline_tests: Optional[int] = None
     admission_types: Optional[FrozenSet[str]] = None
+    neckline_selection_order: str = "test_count_first"
+    require_internal_rebound_coverage: bool = False
+    require_minimum_anchor_span: bool = False
 
     def __post_init__(self):
         if not self.experiment_id:
@@ -26,10 +29,17 @@ class RecognitionExperimentConfig:
             raise ValueError("minimum_neckline_tests must be positive")
         if self.admission_types is not None:
             object.__setattr__(self, "admission_types", frozenset(self.admission_types))
+        if self.neckline_selection_order not in {"test_count_first", "span_first"}:
+            raise ValueError("unsupported neckline_selection_order")
+        if not isinstance(self.require_internal_rebound_coverage, bool):
+            raise TypeError("require_internal_rebound_coverage must be bool")
+        if not isinstance(self.require_minimum_anchor_span, bool):
+            raise TypeError("require_minimum_anchor_span must be bool")
 
     def cache_key(self):
-        return (self.experiment_id, self.minimum_neckline_tests,
-                tuple(sorted(self.admission_types)) if self.admission_types is not None else None)
+        return (self.experiment_id, self.minimum_neckline_tests, self.neckline_selection_order,
+                tuple(sorted(self.admission_types)) if self.admission_types is not None else None,
+                self.require_internal_rebound_coverage, self.require_minimum_anchor_span)
 
 
 _CURRENT_EXPERIMENT = ContextVar("caisen_recognition_experiment", default=None)
@@ -38,6 +48,22 @@ _CURRENT_EXPERIMENT = ContextVar("caisen_recognition_experiment", default=None)
 def current_recognition_experiment():
     """Return the immutable experiment config active in this execution context."""
     return _CURRENT_EXPERIMENT.get()
+
+
+def recognition_context_snapshot():
+    """Return a stable JSON-safe description of the active recognition config."""
+    config = current_recognition_experiment()
+    if config is None:
+        return {"recognition_experiment": None}
+    return {"recognition_experiment": {
+        "experiment_id": config.experiment_id,
+        "minimum_neckline_tests": config.minimum_neckline_tests,
+        "admission_types": sorted(config.admission_types) if config.admission_types is not None else None,
+        "neckline_selection_order": config.neckline_selection_order,
+        "require_internal_rebound_coverage": config.require_internal_rebound_coverage,
+        "require_minimum_anchor_span": config.require_minimum_anchor_span,
+        "cache_key": list(config.cache_key()),
+    }}
 
 
 @contextmanager

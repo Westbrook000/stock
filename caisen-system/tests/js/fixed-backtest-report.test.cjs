@@ -38,3 +38,15 @@ test("fixed report translates display labels without changing source enums", () 
   assert.match(html, /止损/);
   assert.doesNotMatch(html, /stock|w_bottom|stop_loss|\b1d\b/);
 });
+
+test("fixed report explains measured target entry refusals and overshoot exits", () => {
+  const reasons = ["missing_measured_target", "measured_target_not_above_entry",
+    "measured_target_already_passed"];
+  const html = report.render({ summary: {}, groups: [], patterns: [], results: [],
+    trades: reasons.map((exit_reason) => ({ code: "AAA", kind: "stock", timeframe: "1d",
+      signal_date: "2024-01-01", entry_date: "2024-01-02", entry_price: 10,
+      exit_date: "2024-01-03", exit_price: 10, exit_reason, pnl: 0 })) });
+  assert.match(html, /缺少可用形态测算目标/);
+  assert.match(html, /测算目标不高于实际入场价/);
+  assert.match(html, /测算目标已越过，次日开盘退出/);
+});

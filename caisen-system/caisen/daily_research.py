@@ -37,7 +37,8 @@ from .fixed_backtest import (
     calculate_metrics,
     simulate_fixed_trades,
 )
-from .market import ALIASES, discover_instruments
+from .market import (ALIASES, TICK_RULE_VERSION, TICK_SIZE_SOURCE_URLS,
+                     discover_instruments, resolve_instrument_tick)
 from .main_bottoms import MAIN_RULES
 from .daily_incremental import ENGINE_VERSION as DAILY_ENGINE_VERSION
 from .daily_incremental import BOUNDARY_FIRST_ENGINE_VERSION
@@ -51,13 +52,13 @@ DEFAULT_RECOGNIZER = "boundary_first"
 RECOGNIZER_VERSION = DAILY_ENGINE_VERSION
 ENGINE_VERSION = DAILY_ENGINE_VERSION
 BENCHMARK_PATH = (Path(__file__).resolve().parents[1] / "reports" / "daily-research" /
-                  "benchmark" / "benchmark-execution-v5-current-rules-36.json")
+                  "benchmark" / "benchmark-execution-v7-current-rules-36-flag-history.json")
 LEGACY_BENCHMARK_PATH = (Path(__file__).resolve().parents[1] / "reports" / "daily-research" /
-                         "benchmark" / "benchmark-execution-v4.json")
+                         "benchmark" / "benchmark-execution-v5-current-rules-36.json")
 BENCHMARK_SELECTION_VERSION = "same-current-rules-36-v1"
-BENCHMARK_POLICY_SCOPE = "same-current-code-36-account-serial-vs-spawn8"
+BENCHMARK_POLICY_SCOPE = "same-current-code-36-account-serial-vs-spawn"
 BENCHMARK_TARGET_SESSIONS = {"short": 220, "medium": 520, "long": 1000}
-BENCHMARK_PROTOCOL_VERSION = 5
+BENCHMARK_PROTOCOL_VERSION = 6
 BENCHMARK_REPETITIONS = 3
 BENCHMARK_ENGINE_REPETITIONS = 1
 BENCHMARK_WORKER_COUNTS = (1, 2, 4, 6, 8, 10)
@@ -137,24 +138,13 @@ def _client_date():
 
 
 def _instrument_tick(root, instrument):
-    registry = Path(os.environ.get("CAISEN_INSTRUMENTS", Path(root) / "caisen-system" / "config" / "instruments.json"))
-    entry = _instrument_registry(str(registry)).get("%s:%s" % (instrument.kind, instrument.code), {})
-    if entry.get("tick_size") is not None:
-        return float(entry["tick_size"]), "registry"
-    return 0.01, "default"
-
-
-@functools.lru_cache(maxsize=8)
-def _instrument_registry(path):
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8")).get("instruments", {})
-    except (OSError, ValueError, TypeError):
-        return {}
+    return resolve_instrument_tick(root, instrument)
 
 
 def _current_execution_source_hashes():
     root = Path(__file__).resolve().parents[1]
     names = ("caisen/daily_incremental.py", "caisen/main_bottoms.py",
+             "caisen/structure_boundary.py", "caisen/market.py",
              "caisen/rules/patterns.v2.json", "caisen/fixed_backtest.py",
              "caisen/research_config.py", "caisen/daily_research.py",
              "scripts/benchmark_current_rule_workers.py")
@@ -166,6 +156,11 @@ def _current_execution_source_hashes():
                 digest.update(chunk)
         hashes[name] = digest.hexdigest()
     return hashes
+
+
+def _is_sha256_hex(value):
+    return (isinstance(value, str) and len(value) == 64
+            and all(character in "0123456789abcdefABCDEF" for character in value))
 
 
 def load_research_bars(instrument, root="."):
@@ -194,13 +189,15 @@ def load_research_bars(instrument, root="."):
     bars = bars.dropna(subset=required).sort_values("date", kind="mergesort")
     bars = bars.drop_duplicates("date", keep="last").reset_index(drop=True)
     tick_size, tick_source = _instrument_tick(root, instrument)
-    bars.attrs["quality"] = {"tick_size": tick_size}
+    bars.attrs["quality"] = {"tick_size": tick_size, "tick_size_source": tick_source,
+                              "tick_rule_version": TICK_RULE_VERSION}
     data_revision = "mtime_ns:%d,size:%d" % (after.st_mtime_ns, after.st_size)
     return {"bars": bars, "data_revision": data_revision,
             "first_date": bars.date.min().date().isoformat() if not bars.empty else None,
             "last_date": bars.date.max().date().isoformat() if not bars.empty else None,
             "normalized_rows": len(bars), "tick_size": tick_size, "tick_size_source": tick_source,
-            "source": "local_csv"}
+            "tick_size_source_urls": list(TICK_SIZE_SOURCE_URLS.values()),
+            "tick_rule_version": TICK_RULE_VERSION, "source": "local_csv"}
 
 
 def _validated_benchmark_config(expected_recognizer=None):
@@ -212,6 +209,12 @@ def _validated_benchmark_config(expected_recognizer=None):
         selected = int(benchmark.get("recommended_workers", 0))
         selected_run = benchmark.get("worker_counts", {}).get(str(selected), {})
         selected_peak = int(selected_run.get("process_tree_peak_bytes", 0))
+        reference_ledger_signature = benchmark.get("reference_ledger_signature_sha256")
+        candidate_ledger_signature = benchmark.get("candidate_ledger_signature_sha256")
+        reference_event_signature = benchmark.get("reference_event_signature_sha256")
+        candidate_event_signature = benchmark.get("candidate_event_signature_sha256")
+        selected_ledger_signature = selected_run.get("ledger_signature_sha256")
+        selected_event_signature = selected_run.get("event_signature_sha256")
         if (benchmark.get("status") != "complete" or benchmark.get("parity_passed") is not True
                 or benchmark.get("benchmark_protocol_version") != BENCHMARK_PROTOCOL_VERSION
                 or benchmark.get("policy_scope") != BENCHMARK_POLICY_SCOPE
@@ -220,8 +223,17 @@ def _validated_benchmark_config(expected_recognizer=None):
                 or benchmark.get("source_unchanged_during_run") is not True
                 or benchmark.get("source_sha256") != _current_execution_source_hashes()
                 or benchmark.get("source_sha256_after") != _current_execution_source_hashes()
-                or benchmark.get("reference_ledger_signature_sha256") !=
-                    benchmark.get("candidate_ledger_signature_sha256")
+                or not _is_sha256_hex(reference_ledger_signature)
+                or not _is_sha256_hex(candidate_ledger_signature)
+                or reference_ledger_signature != candidate_ledger_signature
+                or not _is_sha256_hex(selected_ledger_signature)
+                or selected_ledger_signature != reference_ledger_signature
+                or benchmark.get("event_parity_passed") is not True
+                or not _is_sha256_hex(reference_event_signature)
+                or not _is_sha256_hex(candidate_event_signature)
+                or reference_event_signature != candidate_event_signature
+                or not _is_sha256_hex(selected_event_signature)
+                or selected_event_signature != reference_event_signature
                 or benchmark.get("accounting_checks_passed") is not True
                 or benchmark.get("data_revisions_match_references") is not True
                 or benchmark.get("performance_gate_passed") is not True
@@ -231,8 +243,9 @@ def _validated_benchmark_config(expected_recognizer=None):
                 or recognizer not in ("v7", "boundary_first")
                 or (expected_recognizer is not None and recognizer != expected_recognizer)
                 or selected not in BENCHMARK_WORKER_COUNTS
-                or selected != 8
                 or selected_run.get("parity_passed") is not True
+                or selected_run.get("event_parity_passed") is not True
+                or selected_event_signature != reference_event_signature
                 or selected_run.get("accounting_checks_passed") is not True
                 or selected_run.get("data_revisions_match_references") is not True
                 or selected_run.get("execution_mode") != "spawn"
@@ -317,6 +330,8 @@ def resolve_daily_research_config(workers=None, recognizer=None, execution_mode=
         "versions": _version_metadata(),
         "trading_rules": {"initial_cash_per_symbol": STARTING_CASH, "lot_size": LOT_SIZE,
                            "stop_fraction": STOP_FRACTION, "target_fraction": TARGET_FRACTION,
+                           "target_method": "signal_pattern_first_measured_target",
+                           "target_unlock_rule": "bull_flag_close_above_frozen_first_wave_high",
                            "commission": 0.0, "slippage": 0.0, "max_hold_sessions": None,
                            "end_of_period_close": True},
     }
@@ -390,25 +405,37 @@ def _recognition_experiment_metadata(recognition_config):
         experiment_id = recognition_config.get("experiment_id", experiment_id)
         minimum_tests = recognition_config.get("minimum_neckline_tests")
         admission_types = recognition_config.get("admission_types")
+        internal_rebound_coverage = recognition_config.get("require_internal_rebound_coverage", False)
+        minimum_anchor_span = recognition_config.get("require_minimum_anchor_span", False)
     else:
         minimum_tests = getattr(recognition_config, "minimum_neckline_tests", None)
         admission_types = getattr(recognition_config, "admission_types", None)
-    if experiment_id is None and isinstance(config_value, (tuple, list)) and config_value:
+        internal_rebound_coverage = getattr(recognition_config, "require_internal_rebound_coverage", False)
+        minimum_anchor_span = getattr(recognition_config, "require_minimum_anchor_span", False)
+    if isinstance(recognition_config, (tuple, list)) and config_value:
         experiment_id = config_value[0]
         if len(config_value) > 1:
             minimum_tests = config_value[1]
-        if len(config_value) > 2:
+        if len(config_value) == 3:  # legacy: (experiment, minimum_tests, admission_types)
             admission_types = config_value[2]
+        elif len(config_value) >= 4:  # current: (experiment, minimum_tests, selection_order, admission_types, ...)
+            admission_types = config_value[3]
+            if len(config_value) >= 5:
+                internal_rebound_coverage = config_value[4]
+            if len(config_value) >= 6:
+                minimum_anchor_span = config_value[5]
+            if len(config_value) >= 6:
+                minimum_anchor_span = config_value[5]
     if experiment_id is None:
         return None
     cache_key = json.loads(json.dumps(config_value, ensure_ascii=False, default=_json_default))
-    if admission_types is None and isinstance(cache_key, (tuple, list)) and len(cache_key) > 2:
-        admission_types = cache_key[2]
     result = {"experiment_id": str(experiment_id)}
     if minimum_tests is not None:
         result["minimum_neckline_tests"] = int(minimum_tests)
     if admission_types is not None:
         result["admission_types"] = sorted(str(value) for value in admission_types)
+    result["require_internal_rebound_coverage"] = bool(internal_rebound_coverage)
+    result["require_minimum_anchor_span"] = bool(minimum_anchor_span)
     result["cache_key"] = cache_key
     return result
 
@@ -447,6 +474,7 @@ def _signal_cache_identity(instrument, provenance, date_to, trade_start, recogni
         "trade_start": str(trade_start) if trade_start is not None else None,
         "tick_size": provenance.get("tick_size"),
         "tick_size_source": provenance.get("tick_size_source"),
+        "tick_rule_version": provenance.get("tick_rule_version", TICK_RULE_VERSION),
         "recognizer": str(recognizer),
         "versions": {"recognizer_version": RECOGNIZER_VERSION,
                      "engine_version": (BOUNDARY_FIRST_ENGINE_VERSION if recognizer == "boundary_first"
@@ -503,11 +531,12 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
         "data_revision": loaded["data_revision"],
         "tick_size": loaded["tick_size"],
         "tick_size_source": loaded["tick_size_source"],
+        "tick_rule_version": loaded.get("tick_rule_version", TICK_RULE_VERSION),
+        "tick_size_source_urls": loaded.get("tick_size_source_urls", list(TICK_SIZE_SOURCE_URLS.values())),
         "first_date": loaded["first_date"],
         "last_date": loaded["last_date"],
         "normalized_rows": int(loaded["normalized_rows"]),
-        "warnings": [] if loaded["tick_size_source"] == "registry" else [
-            "tick size unresolved; baseline 0.01 fallback used"],
+        "warnings": [],
     }
     bars = loaded["bars"].copy()
     if bars.empty:
@@ -523,6 +552,23 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
     bars = bars.loc[bars["date"].notna() & (bars["date"].dt.normalize() <= cutoff)].copy()
     bars = bars.sort_values("date", kind="mergesort").drop_duplicates("date", keep="last").reset_index(drop=True)
     provenance["used_last_date"] = bars.date.max().date().isoformat() if not bars.empty else None
+    bar_provenance = dict(bars.attrs.get("provenance", {}) or {})
+    bar_provenance.update({
+        "source": loaded["source"],
+        "data_revision": loaded["data_revision"],
+        "data_version": loaded["data_revision"],
+        "first_date": loaded["first_date"],
+        "last_date": loaded["last_date"],
+        "normalized_rows": int(loaded["normalized_rows"]),
+        "tick_size": loaded["tick_size"],
+        "tick_size_source": loaded["tick_size_source"],
+        "tick_rule_version": loaded.get("tick_rule_version", TICK_RULE_VERSION),
+        "source_path": str(Path(instrument.path).resolve()),
+        "date_to": str(date_to),
+        "cutoff": str(date_to),
+        "used_last_date": provenance["used_last_date"],
+    })
+    bars.attrs["provenance"] = bar_provenance
     if bars.empty:
         if progress_callback:
             progress_callback({"phase": "no_bars_before_cutoff", "bars_completed": 0, "bars_total": 0})
@@ -814,6 +860,7 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
                        "recognition_config": _recognition_config_value(recognition_config) or {},
                        "initial_cash": STARTING_CASH, "lot_size": LOT_SIZE,
                        "stop_pct": STOP_FRACTION, "target_pct": TARGET_FRACTION,
+                       "target_method": "signal_pattern_first_measured_target",
                        "end_of_period_close": True},
     }
     recognition_experiment = _recognition_experiment_metadata(recognition_config)
@@ -1243,6 +1290,30 @@ def _write_benchmark_progress(path, snapshot, progress_callback=None):
         progress_callback(dict(snapshot))
 
 
+def _normalized_order_ref(raw, refs):
+    """Map process-local Backtrader refs to first-seen stable account-local ids."""
+    if raw not in refs:
+        refs[raw] = len(refs) + 1
+    return refs[raw]
+
+
+def _normalize_order_refs(value, refs):
+    """Copy nested event data while normalizing only ephemeral broker refs."""
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            if key == "order_ref":
+                normalized[key] = _normalized_order_ref(item, refs)
+            else:
+                normalized[key] = _normalize_order_refs(item, refs)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_order_refs(item, refs) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_normalize_order_refs(item, refs) for item in value)
+    return value
+
+
 def _account_ledger_payloads(report):
     """Full stable per-account signal and Backtrader ledger, with ephemeral refs normalized."""
     accounts = []
@@ -1250,12 +1321,7 @@ def _account_ledger_payloads(report):
         account = json.loads(Path(row["account_json"]).read_text(encoding="utf-8"))
         refs, events = {}, []
         for event in account.get("order_events", []):
-            item = dict(event)
-            if "order_ref" in item:
-                raw = item["order_ref"]
-                if raw not in refs:
-                    refs[raw] = len(refs) + 1
-                item["order_ref"] = refs[raw]
+            item = _normalize_order_refs(event, refs)
             events.append(item)
         accounts.append({"code": account.get("code"), "kind": account.get("kind"),
                          "status": account.get("status"), "signals": account.get("signals"),
@@ -1271,6 +1337,60 @@ def _account_ledger_payloads(report):
 def _account_ledger_signature(report):
     return json.dumps(_account_ledger_payloads(report), sort_keys=True,
                       ensure_ascii=False, default=_json_default)
+
+
+def _signal_event_signature_payload(report):
+    """Return causal pattern identity, frozen geometry, and persisted event data."""
+    signal_fields = (
+        "signal_date", "entry_date", "pattern_ids", "pattern_types", "pattern_tags",
+        "patterns", "pattern", "instance_id", "pattern_instance_id", "structure_id",
+        "boundary_version_id", "frozen_boundary", "events", "event", "pattern_events",
+        "structure_events", "lifecycle_events", "event_history", "state_history", "lifecycle",
+    )
+    account_event_fields = {
+        "events", "pattern_events", "structure_events", "lifecycle_events", "event_history",
+        "pattern_instances", "boundary_instances", "instance_events", "boundary_events",
+    }
+    accounts = []
+    for row in report.get("account_summaries", []):
+        account = json.loads(Path(row["account_json"]).read_text(encoding="utf-8"))
+        signals = []
+        for signal in account.get("signals", []):
+            if not isinstance(signal, dict):
+                signals.append(signal)
+                continue
+            signals.append({key: signal[key] for key in signal_fields if key in signal})
+        persisted_events = {
+            key: value for key, value in account.items()
+            if key in account_event_fields or key.endswith(("_events", "_history"))
+        }
+        refs = {}
+        # Match _account_ledger_payloads: order_events establish the account-local
+        # ref numbering before any other event or signal payload is normalized.
+        normalized_events = {}
+        if "order_events" in persisted_events:
+            normalized_events["order_events"] = _normalize_order_refs(
+                persisted_events["order_events"], refs)
+        for key in sorted(persisted_events):
+            if key == "order_events":
+                continue
+            normalized_events[key] = _normalize_order_refs(persisted_events[key], refs)
+        signals = _normalize_order_refs(signals, refs)
+        persisted_events = normalized_events
+        accounts.append({
+            "kind": account.get("kind", row.get("kind")),
+            "code": account.get("code", row.get("code")),
+            "signals": signals,
+            "persisted_events": persisted_events,
+        })
+    accounts.sort(key=lambda item: (str(item.get("kind", "")), str(item.get("code", ""))))
+    return accounts
+
+
+def _signal_event_signature_sha256(report):
+    payload = json.dumps(_signal_event_signature_payload(report), sort_keys=True,
+                         ensure_ascii=False, default=_json_default, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _first_value_difference(reference, candidate, path="$"):
@@ -1343,7 +1463,8 @@ def _all_ledger_checks_pass(report, expected_count):
 
 def _sum_recognition_stats(rows):
     fields = ("boundary_pairs_generated", "boundary_pairs_reused", "coverage_checks",
-              "coverage_reused", "candidate_evaluations", "candidate_refreshes")
+              "coverage_reused", "candidate_evaluations", "candidate_refreshes",
+              "pressure_window_builds", "pressure_window_cache_hits", "date_index_builds")
     return {field: sum(int(row.get("recognition_stats", {}).get(field, 0) or 0) for row in rows)
             for field in fields}
 

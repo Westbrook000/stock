@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from datetime import date, timedelta
@@ -16,6 +17,12 @@ import pandas as pd
 ALIASES = {"date": ["date", "日期", "交易日期"], "code": ["code", "代码", "证券代码"],
            "name": ["name", "名称", "证券简称"], "open": ["open", "开盘"], "high": ["high", "最高"],
            "low": ["low", "最低"], "close": ["close", "收盘"], "volume": ["volume", "成交量", "成交股数"]}
+
+TICK_SIZE_SOURCE_URLS = {
+    "sse": "https://www.sse.com.cn/lawandrules/sselawsrules2025/fund/trading/c/c_20260424_10817739.shtml",
+    "szse": "https://docs.static.szse.cn/www/lawrules/rule/trade/current/W020260424690713155663.pdf",
+}
+TICK_RULE_VERSION = "exchange-asset-class-tick-v1"
 
 
 @dataclass(frozen=True)
@@ -46,6 +53,35 @@ class MarketDataResult:
     provisional_bars: pd.DataFrame = field(default_factory=pd.DataFrame)
     source_rows: int = 0
     normalized_rows: int = 0
+
+
+def resolve_instrument_tick(root: str | Path, instrument: InstrumentFile, registry_entry=None):
+    """Resolve registry overrides, then the instrument-kind exchange tick rule.
+
+    Exchange defaults reflect current order-price increments only; they do not
+    reconstruct historical tick schedules or adjustment-basis changes.
+    """
+    if registry_entry is None:
+        registry_path = Path(os.environ.get(
+            "CAISEN_INSTRUMENTS", Path(root) / "caisen-system" / "config" / "instruments.json"))
+        try:
+            entries = json.loads(registry_path.read_text(encoding="utf-8")).get("instruments", {})
+            registry_entry = entries.get("%s:%s" % (instrument.kind, instrument.code), {})
+        except (OSError, ValueError, TypeError):
+            registry_entry = {}
+    if not isinstance(registry_entry, dict):
+        registry_entry = {}
+    if registry_entry.get("tick_size") is not None:
+        tick_size = float(registry_entry["tick_size"])
+        if not math.isfinite(tick_size) or tick_size <= 0:
+            raise ValueError("registry tick_size must be a positive finite number")
+        return tick_size, "registry"
+    asset_class = str(registry_entry.get("exchange_asset_class") or instrument.kind).lower()
+    if asset_class == "etf":
+        return 0.001, "exchange_asset_class"
+    if asset_class == "stock":
+        return 0.01, "exchange_asset_class"
+    raise ValueError("unsupported exchange asset class for tick-size default: %s" % asset_class)
 
 
 def discover_instruments(root: str | Path = ".") -> list[InstrumentFile]:
@@ -132,13 +168,9 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".") -> Marke
             source_rows=source_rows,
         )
 
-    adjustment, source_api, registry_quality, refresh_metadata = _instrument_metadata(root, instrument, raw_bytes)
-    for quality_key, warning in (
-        ("volume_unit_verified", "volume unit is not verified for this file hash"),
-        ("corporate_actions_verified", "corporate-action adjustment is not verified for this file hash"),
-    ):
-        if not registry_quality.get(quality_key, False):
-            warnings.append(warning)
+    file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    adjustment, source_api, registry_quality, refresh_metadata = _instrument_metadata(
+        root, instrument, file_sha256)
 
     prior_close = normalized["close"].shift(1)
     overnight_move = (normalized["open"] / prior_close - 1.0).abs()
@@ -149,10 +181,12 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".") -> Marke
     if data_breaks:
         warnings.append("unverified price discontinuity split %d segment(s)" % len(data_breaks))
 
-    file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     version_source = file_sha256
-    version_material = "market-normalize-v2|%s|%s|%s|%s" % (
-        version_source, instrument.kind, instrument.code, adjustment
+    tick_size = registry_quality["tick_size"]
+    tick_source = registry_quality["tick_size_source"]
+    version_material = "market-normalize-v3|%s|%s|%s|%s|%s|%s|%s" % (
+        version_source, instrument.kind, instrument.code, adjustment,
+        TICK_RULE_VERSION, tick_size, tick_source
     )
     data_version = hashlib.sha256(version_material.encode("utf-8")).hexdigest()[:20]
     segments = []
@@ -163,8 +197,6 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".") -> Marke
             "end_date": str(group["date"].iloc[-1].date()),
             "bar_count": int(len(group)),
         })
-    if not registry_quality.get("registry_hash_bound", False):
-        warnings.append("instrument registry is not bound to the current file hash")
     status = "usable" if not warnings else "usable_with_warnings"
     normalized.attrs["quality"] = {
         **registry_quality,
@@ -186,6 +218,9 @@ def load_daily_bars(instrument: InstrumentFile, root: str | Path = ".") -> Marke
         "adjustment_basis": adjustment,
         "latest_date": str(normalized["date"].iloc[-1].date()),
         "refresh": refresh_metadata,
+        "tick_size": tick_size,
+        "tick_size_source": tick_source,
+        "tick_rule_version": TICK_RULE_VERSION,
     }
     return MarketDataResult(
         instrument=instrument,
@@ -216,7 +251,7 @@ def _normalize_code(value, expected):
     return code
 
 
-def _instrument_metadata(root, instrument, raw_bytes):
+def _instrument_metadata(root, instrument, raw_hash):
     root_path = Path(root)
     basis_path = root_path / "data" / "market_data_current" / ".market-data-basis.json"
     adjustment = "unknown"
@@ -229,9 +264,8 @@ def _instrument_metadata(root, instrument, raw_bytes):
             source_api = basis.get("source_apis", {}).get(instrument.kind, source_api)
         except (OSError, ValueError):
             pass
-    raw_hash = hashlib.sha256(raw_bytes).hexdigest()
     registry_path = Path(os.environ.get("CAISEN_INSTRUMENTS", root_path / "caisen-system" / "config" / "instruments.json"))
-    quality = {}
+    entry = {}
     if registry_path.is_file():
         try:
             entries = json.loads(registry_path.read_text(encoding="utf-8")).get("instruments", {})
@@ -243,11 +277,15 @@ def _instrument_metadata(root, instrument, raw_bytes):
                 "corporate_actions_verified": bool(bound and entry.get("corporate_actions_verified")),
                 "trading_rules_verified": bool(bound and entry.get("trading_rules_verified")),
                 "category": entry.get("category", "unclassified"),
-                "tick_size": float(entry.get("tick_size", 0.01)),
                 "lot_size": int(entry.get("lot_size", 100)),
             }
         except (OSError, ValueError, TypeError):
             quality = {"registry_hash_bound": False}
+    else:
+        quality = {}
+    tick_size, tick_source = resolve_instrument_tick(root_path, instrument, entry)
+    quality.update({"tick_size": tick_size, "tick_size_source": tick_source,
+                    "tick_size_source_urls": list(TICK_SIZE_SOURCE_URLS.values())})
     return adjustment, source_api, quality, refresh_metadata
 
 
@@ -298,6 +336,8 @@ def load_local_history(code: str, kind: str, root: str = ".") -> Optional[pd.Dat
         out.attrs["provenance"]["file_sha256"] = hashlib.sha256(handle.read()).hexdigest()
     out.attrs["provenance"]["cutoff"] = str(out["date"].max().date()) if len(out) else None
     registry=os.environ.get("CAISEN_INSTRUMENTS",os.path.join(root,"caisen-system","config","instruments.json"))
+    instrument = InstrumentFile(str(code), kind, path)
+    entry = {}
     if os.path.isfile(registry):
         with open(registry,"r",encoding="utf-8") as handle:
             entries=json.load(handle).get("instruments",{})
@@ -307,13 +347,22 @@ def load_local_history(code: str, kind: str, root: str = ".") -> Optional[pd.Dat
             "volume_unit_verified":bool(bound and entry.get("volume_unit_verified")),
             "corporate_actions_verified":bool(bound and entry.get("corporate_actions_verified")),
             "registry_hash_bound":bool(bound),
-            "tick_size":float(entry.get("tick_size",0.01)),
             "lot_size":int(entry.get("lot_size",100)),
             "settlement_days":int(entry.get("settlement_days",1)),
             "trading_rules_verified":bool(bound and entry.get("trading_rules_verified")),
             "price_limit_pct":entry.get("price_limit_pct"),
             "category":entry.get("category","unclassified"),
         })
+    tick_size, tick_source = resolve_instrument_tick(root, instrument, entry)
+    out.attrs["quality"].update({"tick_size":tick_size, "tick_size_source":tick_source,
+                                 "tick_size_source_urls":list(TICK_SIZE_SOURCE_URLS.values())})
+    version_material = "market-local-history-v2|%s|%s|%s|%s|%s" % (
+        out.attrs["quality"].get("data_version"), TICK_RULE_VERSION, tick_size, tick_source, kind)
+    out.attrs["quality"]["data_version"] = hashlib.sha256(version_material.encode("utf-8")).hexdigest()[:16]
+    out.attrs["provenance"]["data_version"] = out.attrs["quality"]["data_version"]
+    out.attrs["provenance"]["tick_size"] = tick_size
+    out.attrs["provenance"]["tick_size_source"] = tick_source
+    out.attrs["provenance"]["tick_rule_version"] = TICK_RULE_VERSION
     return out
 
 

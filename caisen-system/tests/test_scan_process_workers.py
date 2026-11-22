@@ -82,7 +82,8 @@ def test_scan_worker_persists_spawn_results_and_progress_from_explicit_root(tmp_
     assert run["scanned"] == 3 and run["progress"] == 1
     assert total == 3
     assert {row["code"] for row in rows} == {"000001", "000002", "510001"}
-    assert api._jobs["spawn-scan"]["results"] == rows
+    assert "results" not in api._jobs["spawn-scan"]
+    assert api._jobs["spawn-scan"]["result_count"] == len(rows)
 
 
 def test_service_shutdown_cancels_queued_spawn_scan_work():
@@ -191,7 +192,8 @@ def test_running_scan_shutdown_saves_finished_rows_and_marks_run_interrupted(tmp
     assert total == run["scanned"]
     codes = [row["code"] for row in rows]
     assert len(codes) == len(set(codes))
-    assert rows == api._jobs["shutdown-scan"]["results"]
+    assert "results" not in api._jobs["shutdown-scan"]
+    assert api._jobs["shutdown-scan"]["result_count"] == len(rows)
     assert saved_patterns
     assert api._jobs["shutdown-scan"]["status"] == "interrupted"
     deadline = time.monotonic() + 3
@@ -256,7 +258,8 @@ def test_interrupted_scan_keeps_sparse_completion_ordinals_without_duplicates(mo
     assert run["status"] == "interrupted"
     assert run["scanned"] == total == 3
     assert [row["code"] for row in rows] == ["000000", "000005", "000009"]
-    assert rows == api._jobs["sparse-shutdown"]["results"]
+    assert "results" not in api._jobs["sparse-shutdown"]
+    assert api._jobs["sparse-shutdown"]["result_count"] == len(rows)
 
 
 def test_shutdown_during_initial_submission_marks_scan_interrupted(tmp_path):

@@ -23,7 +23,9 @@ def test_daily_backtest_routes_use_fixed_universe_and_persist_report(monkeypatch
                                         "breakout_close_buffer_previous_atr_multiple": 1.0,
                                         "recognition_experiment": None},
                  "trading_rules": {"initial_cash_per_symbol": 100000, "lot_size": 100,
-                                   "stop_fraction": 0.08, "target_fraction": 0.2,
+                                   "stop_fraction": 0.08, "target_fraction": None,
+                                   "target_method": "signal_pattern_first_measured_target",
+                                   "target_unlock_rule": "bull_flag_close_above_frozen_first_wave_high",
                                    "commission": 0.0, "slippage": 0.0,
                                    "max_hold_sessions": None, "end_of_period_close": True}}
 
@@ -43,7 +45,8 @@ def test_daily_backtest_routes_use_fixed_universe_and_persist_report(monkeypatch
                 "account_files": [],
                 "universe": {"id": "daily_800_stock_200_etf_v1", "total": 1000,
                              "selected_account_count": 1000},
-                "parameters": {"initial_cash": 100000, "stop_pct": 0.08, "target_pct": 0.2,
+                "parameters": {"initial_cash": 100000, "stop_pct": 0.08, "target_pct": None,
+                               "target_method": "signal_pattern_first_measured_target",
                                "workers": 8, "worker_source": "benchmark-current",
                                "recognizer": "boundary_first", "execution_mode": "spawn"},
                 "recognition_rules": effective["recognition_rules"],

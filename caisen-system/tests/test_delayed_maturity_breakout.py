@@ -70,15 +70,54 @@ def _159122_bars_through_june_2026():
     return bars[bars.date <= "2026-06-22"].reset_index(drop=True)
 
 
-def test_159122_same_frozen_boundary_premature_break_is_not_reissued_after_maturity():
-    bars = _159122_bars_through_june_2026()
+def test_159122_pairing_day_and_delayed_maturity_crosses_are_separate_instances():
+    from caisen.daily_incremental import DailyRecognitionSession
+    from caisen.research_config import RecognitionExperimentConfig, recognition_experiment
 
-    for recognizer in ("v7", "boundary_first"):
-        signals = generate_daily_signals(bars, "159122", "etf", recognizer=recognizer)
-        assert any(item["signal_date"] == "2026-05-06"
-                   and "w_bottom" in item["pattern_types"] for item in signals)
-        assert not any(item["signal_date"] == "2026-06-22"
-                       and "w_bottom" in item["pattern_types"] for item in signals)
+    bars = _159122_bars_through_june_2026()
+    session = DailyRecognitionSession(
+        "159122", "etf", tick_size=0.001, total_bars=len(bars),
+        provenance={"data_version": "fixture-loaded-bars", "tick_size": 0.001,
+                    "tick_size_source": "explicit_argument"})
+    config = RecognitionExperimentConfig(
+        "internal_rebound_coverage_g1_v1", require_internal_rebound_coverage=True)
+    signals = []
+    with recognition_experiment(config):
+        for row in bars.to_dict("records"):
+            signals.extend(session.append_bar(row))
+
+    def lifecycle(pattern):
+        return next(item["value"] for item in pattern.evidence
+                    if item["code"] == "joint_lifecycle")
+
+    november_w = next(pattern for pattern in session.retired_patterns.values()
+                      if pattern.pattern_type == "w_bottom"
+                      and pattern.key_points.get("pivot_1_date") == "2025-11-05")
+    november_lifecycle = lifecycle(november_w)
+    assert november_lifecycle["paired_at"] == "2026-05-06"
+    assert november_w.state == "expired"
+    assert november_w.confirmation_date is None
+    consumed = [event for event in november_lifecycle["events"]
+                if event["kind"] == "pairing_day_cross_consumed"]
+    assert len(consumed) == 1
+    assert consumed[0]["date"] == "2026-05-06"
+    assert not any(event["kind"] == "confirmed" for event in november_lifecycle["events"])
+
+    december_w = next(pattern for pattern in session.retired_patterns.values()
+                      if pattern.pattern_type == "w_bottom"
+                      and pattern.key_points.get("pivot_1_date") == "2025-12-16")
+    december_lifecycle = lifecycle(december_w)
+    assert december_lifecycle["paired_at"] == "2026-06-16"
+    assert december_w.state == "expired"
+    assert december_w.confirmation_date is None
+    rejected = [event for event in december_lifecycle["events"]
+                if event["kind"] == "rejected_too_early"]
+    assert len(rejected) == 1
+    assert rejected[0]["occurred_at"] == "2026-05-06"
+    assert rejected[0]["date"] == rejected[0]["recorded_at"] == "2026-06-16"
+
+    assert not any(signal["signal_date"] in {"2026-05-06", "2026-06-22"}
+                   and "w_bottom" in signal["pattern_types"] for signal in signals)
 
     batch = detect_main_bottoms(bars, code="159122", kind="etf", timeframe="1d",
                                 background_bars=bars)
@@ -122,7 +161,7 @@ def test_boundary_phase_equivalence_catches_touch_extensions_but_not_a_distinct_
     assert not _same_neckline_boundary_phase(original, distinct, tick_size=0.01)
 
 
-def test_boundary_phase_equivalence_matches_replaced_touch_ids_in_overlapping_window():
+def test_boundary_phase_equivalence_rejects_different_lines_without_shared_anchors():
     from caisen.main_bottoms import _same_neckline_boundary_phase
 
     consumed = {
@@ -139,7 +178,7 @@ def test_boundary_phase_equivalence_matches_replaced_touch_ids_in_overlapping_wi
                   for index in (15, 65)],
     }
 
-    assert _same_neckline_boundary_phase(consumed, replacement, tick_size=0.01)
+    assert not _same_neckline_boundary_phase(consumed, replacement, tick_size=0.01)
 
 
 def test_boundary_phase_equivalence_checks_projection_at_first_cross_after_shared_touches():

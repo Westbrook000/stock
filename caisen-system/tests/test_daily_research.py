@@ -49,6 +49,25 @@ def test_production_universe_rejects_wrong_id_or_sample_counts(tmp_path):
         raise AssertionError("production universe must have the fixed ID and 800/200 counts")
 
 
+def test_recognition_stats_roll_up_pressure_window_cache_counters():
+    from caisen.daily_research import _sum_recognition_stats
+
+    rows = [
+        {"recognition_stats": {"pressure_window_builds": 4,
+                               "pressure_window_cache_hits": 9,
+                               "date_index_builds": 1}},
+        {"recognition_stats": {"pressure_window_builds": 3,
+                               "pressure_window_cache_hits": 2,
+                               "date_index_builds": 0}},
+    ]
+
+    totals = _sum_recognition_stats(rows)
+
+    assert totals["pressure_window_builds"] == 7
+    assert totals["pressure_window_cache_hits"] == 11
+    assert totals["date_index_builds"] == 1
+
+
 def test_runner_cuts_off_future_bars_and_writes_once_with_grouped_metrics(tmp_path, monkeypatch):
     universe = {"id": "fixture", "seed": 20261101, "date": "2026-11-01",
                 "stocks": ["600001"], "etfs": ["510001"]}
@@ -75,9 +94,19 @@ def test_runner_cuts_off_future_bars_and_writes_once_with_grouped_metrics(tmp_pa
         if progress_callback:
             progress_callback({"phase": "recognition", "bars_completed": len(bars),
                                "bars_total": len(bars), "current_date": "2026-10-30"})
+        snapshots = [
+            {"pattern_id": "p1", "pattern_type": "w_bottom", "direction": "bullish",
+                 "confirmed_at": 0, "evidence": [
+                     {"code": "neckline_selection", "value": {"frozen": True}},
+                     {"code": "targets", "value": {"prices": [12], "available": True}}]},
+            {"pattern_id": "p2", "pattern_type": "triangle_bottom", "direction": "bullish",
+                 "confirmed_at": 0, "evidence": [
+                     {"code": "neckline_selection", "value": {"frozen": True}},
+                     {"code": "targets", "value": {"prices": [13], "available": True}}]},
+        ]
         return [{"signal_date": "2026-10-28", "entry_date": "2026-10-29",
                  "pattern_ids": ["p1", "p2"], "pattern_types": ["w_bottom", "triangle_bottom"],
-                 "pattern": {"evidence": [{"code": "neckline_selection", "value": {"frozen": True}}]},
+                     "pattern": snapshots[0], "patterns": snapshots,
                  "pattern_tags": [{"pattern_id": "p1", "pattern_type": "w_bottom"},
                                   {"pattern_id": "p2", "pattern_type": "triangle_bottom"}]}]
     incremental.generate_daily_signals = generate
@@ -317,8 +346,10 @@ def test_account_payload_stamps_experiment_on_account_and_signals_only_when_conf
     account = _account_from_prepared(prepared, "600001", "stock")
     expected = {"experiment_id": "neckline_min3_v1", "minimum_neckline_tests": 3,
         "admission_types": ["bull_flag", "inverse_head_shoulders", "triangle_bottom", "w_bottom"],
-        "cache_key": ["neckline_min3_v1", 3,
-                      ["bull_flag", "inverse_head_shoulders", "triangle_bottom", "w_bottom"]]}
+        "require_internal_rebound_coverage": False,
+        "require_minimum_anchor_span": False,
+        "cache_key": ["neckline_min3_v1", 3, "test_count_first",
+                      ["bull_flag", "inverse_head_shoulders", "triangle_bottom", "w_bottom"], False, False]}
 
     assert account["recognition_experiment"] == expected
     assert account["signals"][0]["recognition_experiment"] == expected
@@ -536,8 +567,13 @@ def test_benchmark_normalizes_real_backtrader_refs_but_detects_fill_or_equity_ch
         ("2026-01-03", 10, 10.5, 9.5, 10.2, 1000),
         ("2026-01-04", 10.2, 10.5, 10, 10.4, 1000),
     ], columns=["date", "open", "high", "low", "close", "volume"])
+    pattern = {"pattern_id": "p1", "pattern_type": "w_bottom", "direction": "bullish",
+               "confirmed_at": 0,
+               "evidence": [{"code": "targets", "value": {"prices": [12], "available": True}}]}
     signal = {"signal_date": "2026-01-01", "entry_date": "2026-01-02",
-              "pattern_ids": ["p1"], "pattern_types": ["w_bottom"]}
+              "pattern_ids": ["p1"], "pattern_types": ["w_bottom"],
+              "pattern": pattern, "patterns": [pattern],
+              "pattern_tags": [{"pattern_id": "p1", "pattern_type": "w_bottom"}]}
     first = simulate_fixed_trades(bars, [signal])
     second = simulate_fixed_trades(bars, [signal])
     refs = [event["order_ref"] for event in first["order_events"]]
@@ -638,42 +674,117 @@ def test_direct_research_loader_records_stat_revision_without_hashing_or_quality
     assert result["tick_size"] == 0.01
 
 
+def test_daily_research_propagates_loaded_revision_into_real_pattern_context():
+    from caisen.daily_research import _prepare_account
+    from caisen.research_config import RecognitionExperimentConfig
+
+    source = Path("/tmp/caisen-structure-boundary-worker-inputs-20261112-v2/data/stocks/600108.csv")
+    revision_stat = source.stat()
+    expected_revision = "mtime_ns:%d,size:%d" % (revision_stat.st_mtime_ns, revision_stat.st_size)
+    config = RecognitionExperimentConfig(
+        "internal_rebound_coverage_g1_v1", require_internal_rebound_coverage=True)
+    prepared = _prepare_account(InstrumentFile("600108", "stock", str(source)),
+                                root=Path(__file__).parents[1], date_to="2024-10-08",
+                                trade_start=None, recognizer="boundary_first",
+                                recognition_config=config)
+
+    assert prepared["provenance"]["data_revision"] == expected_revision
+    assert prepared["bars"].attrs["provenance"]["data_version"] == expected_revision
+    assert prepared["bars"].attrs["provenance"]["source_path"] == str(source.resolve())
+    signal = next(signal for signal in prepared["signals"] if signal["signal_date"] == "2024-10-08"
+                  and "w_bottom" in signal["pattern_types"])
+    pattern = next(pattern for pattern in signal["patterns"]
+                   if pattern["pattern_type"] == "w_bottom"
+                   and pattern["key_points"].get("pivot_1_date") == "2024-02-06"
+                   and pattern["key_points"].get("pivot_2_date") == "2024-09-18")
+    evidence = {item["code"]: item["value"] for item in pattern["evidence"]}
+    context = evidence["joint_lifecycle"]["recognition_context"]
+    assert context["data_version"] == expected_revision
+    assert signal["signal_date"] == "2024-10-08"
+    assert abs(pattern["neckline"]["slope"] * (len(prepared["bars"]) - 1)
+               + pattern["neckline"]["intercept"] - 2.758) <= 0.02
+
+
 def test_workers_none_consumes_only_a_completed_parity_checked_recommendation(tmp_path, monkeypatch):
     from caisen import daily_research
-    assert daily_research.BENCHMARK_PATH.name == "benchmark-execution-v5-current-rules-36.json"
+    assert daily_research.BENCHMARK_PATH.name == \
+        "benchmark-execution-v7-current-rules-36-flag-history.json"
     path = tmp_path / "benchmark.json"
     monkeypatch.setattr(daily_research, "BENCHMARK_PATH", path)
-    path.write_text(json.dumps({"status": "complete", "benchmark_protocol_version": 5,
+    path.write_text(json.dumps({"status": "complete", "benchmark_protocol_version": 6,
                                 "policy_scope": daily_research.BENCHMARK_POLICY_SCOPE,
                                 "reference_count": 36,
                                 "reference_mode": "single_process_same_current_code",
                                 "source_unchanged_during_run": True,
                                 "source_sha256": daily_research._current_execution_source_hashes(),
                                 "source_sha256_after": daily_research._current_execution_source_hashes(),
-                                "reference_ledger_signature_sha256": "same",
-                                "candidate_ledger_signature_sha256": "same",
+                                "reference_ledger_signature_sha256": "a" * 64,
+                                "candidate_ledger_signature_sha256": "a" * 64,
+                                "reference_event_signature_sha256": "b" * 64,
+                                "candidate_event_signature_sha256": "b" * 64,
+                                "event_parity_passed": True,
                                 "accounting_checks_passed": True,
                                 "data_revisions_match_references": True,
                                 "performance_gate_passed": True,
                                 "speedup_vs_serial": 2.0,
                                 "universe_id": "daily_800_stock_200_etf_v1",
                                 "parity_passed": True, "versions": daily_research._version_metadata(),
-                                "recommended_workers": 8,
+                                "recommended_workers": 10,
                                 "recommended_recognizer": "boundary_first",
                                 "process_tree_peak_bytes": 1024,
                                 "process_tree_memory_cap_bytes": daily_research.BENCHMARK_PROCESS_TREE_RSS_CAP,
-                                "worker_counts": {"8": {"process_tree_peak_bytes": 1024,
+                                "worker_counts": {"10": {"process_tree_peak_bytes": 1024,
                                     "account_count": 36, "execution_mode": "spawn",
+                                    "ledger_signature_sha256": "a" * 64,
+                                    "event_signature_sha256": "b" * 64,
+                                    "event_parity_passed": True,
                                     "accounting_checks_passed": True,
                                     "data_revisions_match_references": True,
                                     "parity_passed": True, "memory_status": "pass"}}}))
-    assert daily_research._resolve_workers(None) == (8, str(path))
-    assert daily_research._resolve_execution_config() == (8, str(path), "boundary_first")
+    valid_certificate = json.loads(path.read_text())
+    assert daily_research._resolve_workers(None) == (10, str(path))
+    assert daily_research._resolve_execution_config() == (10, str(path), "boundary_first")
+    resolved = daily_research.resolve_daily_research_config()
+    assert resolved["workers"] == 10
+    assert resolved["worker_source"] == str(path)
     assert daily_research._resolve_execution_config(workers=2) == (2, "explicit", "boundary_first")
     assert daily_research._resolve_execution_config(recognizer="v7") == (1, "default_ineligible_benchmark", "v7")
-    corrupted_hash = json.loads(path.read_text())
+    missing_events = json.loads(json.dumps(valid_certificate))
+    missing_events["reference_event_signature_sha256"] = None
+    missing_events["candidate_event_signature_sha256"] = None
+    missing_events["worker_counts"]["10"]["event_signature_sha256"] = None
+    path.write_text(json.dumps(missing_events))
+    assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
+    malformed_ledgers = json.loads(json.dumps(valid_certificate))
+    malformed_ledgers["reference_ledger_signature_sha256"] = "invalid"
+    malformed_ledgers["candidate_ledger_signature_sha256"] = "invalid"
+    malformed_ledgers["worker_counts"]["10"]["ledger_signature_sha256"] = "invalid"
+    path.write_text(json.dumps(malformed_ledgers))
+    assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
+    for bad_signature in ("", "not-a-digest", "c" * 64):
+        malformed_events = json.loads(json.dumps(valid_certificate))
+        malformed_events["candidate_event_signature_sha256"] = bad_signature
+        malformed_events["worker_counts"]["10"]["event_signature_sha256"] = bad_signature
+        path.write_text(json.dumps(malformed_events))
+        assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
+        malformed_ledger_signature = json.loads(json.dumps(valid_certificate))
+        malformed_ledger_signature["candidate_ledger_signature_sha256"] = bad_signature
+        malformed_ledger_signature["worker_counts"]["10"]["ledger_signature_sha256"] = bad_signature
+        path.write_text(json.dumps(malformed_ledger_signature))
+        assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
+    missing_signature = json.loads(json.dumps(valid_certificate))
+    missing_signature.pop("reference_event_signature_sha256")
+    missing_signature["worker_counts"]["10"].pop("event_signature_sha256")
+    path.write_text(json.dumps(missing_signature))
+    assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
+    corrupted_hash = json.loads(json.dumps(valid_certificate))
     corrupted_hash["source_sha256_after"] = {"caisen/main_bottoms.py": "stale"}
     path.write_text(json.dumps(corrupted_hash))
+    assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
+    assert daily_research.resolve_daily_research_config()["workers"] == 1
+    corrupted_events = dict(valid_certificate)
+    corrupted_events["candidate_event_signature_sha256"] = "different-events"
+    path.write_text(json.dumps(corrupted_events))
     assert daily_research._resolve_workers(None) == (1, "default_ineligible_benchmark")
     stale = daily_research._version_metadata()
     stale.update({"recognizer_version": "caisen-daily-continuous-v3",
@@ -714,6 +825,69 @@ def test_workers_none_consumes_only_a_completed_parity_checked_recommendation(tm
     path.unlink()
     monkeypatch.setattr(daily_research, "LEGACY_BENCHMARK_PATH", tmp_path / "missing-legacy-benchmark.json")
     assert daily_research._resolve_workers(None) == (1, "default_no_benchmark")
+
+
+def test_signal_event_signature_tracks_instance_frozen_boundary_and_events(tmp_path):
+    from caisen.daily_research import _signal_event_signature_sha256
+
+    account_path = tmp_path / "account.json"
+    report = {"account_summaries": [{"kind": "stock", "code": "600001",
+                                     "account_json": str(account_path)}]}
+    signal = {"signal_date": "2026-01-02", "entry_date": "2026-01-05",
+              "pattern_ids": ["600001:p1"], "pattern_types": ["w_bottom"],
+              "pattern_tags": [{"pattern_id": "600001:p1", "instance_id": "instance-1",
+                                 "structure_id": "structure-1", "boundary_version_id": "line-v1",
+                                 "frozen_boundary": {"slope": 0.01, "intercept": 10.0},
+                                 "events": [{"type": "confirmed", "occurred_at": "2026-01-02"}]}]}
+    account_path.write_text(json.dumps({"kind": "stock", "code": "600001", "signals": [signal],
+                                        "pattern_events": [{"instance_id": "instance-1",
+                                                            "type": "confirmed"}]}))
+    baseline = _signal_event_signature_sha256(report)
+
+    changed = json.loads(account_path.read_text())
+    changed["signals"][0]["pattern_tags"][0]["instance_id"] = "instance-2"
+    account_path.write_text(json.dumps(changed))
+    assert _signal_event_signature_sha256(report) != baseline
+
+    changed = json.loads(account_path.read_text())
+    changed["signals"][0]["pattern_tags"][0]["frozen_boundary"]["intercept"] = 10.5
+    account_path.write_text(json.dumps(changed))
+    assert _signal_event_signature_sha256(report) != baseline
+
+    changed["signals"][0]["pattern_tags"][0]["frozen_boundary"]["intercept"] = 10.0
+    changed["pattern_events"][0]["type"] = "invalidated"
+    account_path.write_text(json.dumps(changed))
+    assert _signal_event_signature_sha256(report) != baseline
+
+
+def test_signal_event_signature_normalizes_only_ephemeral_broker_order_refs(tmp_path):
+    from caisen.daily_research import _signal_event_signature_sha256
+
+    account_path = tmp_path / "account.json"
+    report = {"account_summaries": [{"kind": "stock", "code": "600001",
+                                     "account_json": str(account_path)}]}
+    baseline_account = {
+        "kind": "stock", "code": "600001",
+        "signals": [{"signal_date": "2026-01-02", "instance_id": "instance-1",
+                     "boundary_version_id": "line-v1"}],
+        "order_events": [{"order_ref": 787, "status": "completed", "filled": 100,
+                          "price": 12.34, "dt": "2026-01-05T01:30:00"},
+                         {"order_ref": 787, "status": "notification", "filled": 100,
+                          "price": 12.34, "dt": "2026-01-05T01:30:00"}],
+    }
+    account_path.write_text(json.dumps(baseline_account))
+    baseline = _signal_event_signature_sha256(report)
+
+    # Backtrader refs are process-local; semantic event/fill fields are identical.
+    candidate = json.loads(json.dumps(baseline_account))
+    for event in candidate["order_events"]:
+        event["order_ref"] = 76
+    account_path.write_text(json.dumps(candidate))
+    assert _signal_event_signature_sha256(report) == baseline
+
+    candidate["order_events"][0]["price"] = 12.35
+    account_path.write_text(json.dumps(candidate))
+    assert _signal_event_signature_sha256(report) != baseline
 
 
 def test_default_daily_config_uses_current_recognizer_and_exposes_effective_rules(tmp_path, monkeypatch):

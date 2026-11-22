@@ -17,3 +17,10 @@
 
 .button-link{display:inline-block;padding:9px 13px;border-radius:6px;background:#176b87;color:#fff;text-decoration:none}.fixed-history{margin-top:24px}.fixed-history h2{font-size:18px}
 #detailRows .main-children{margin:12px 0;padding:10px 12px;border:1px solid #d3e2e7;border-radius:7px;background:#f7fbfc}#detailRows .main-children summary{cursor:pointer;font-weight:650;color:#176b87}.main-selected{background:#fff0ce;color:#7a4f00}
+
+.chart-pattern { margin: 10px 0 4px; padding: 9px 12px; border-left: 3px solid #176b87; background: #eef5f8; color: #20394a; font-size: 13px; line-height: 1.6; scroll-margin-top: 16px; }
+.chart-pattern:empty { display: none; }
+.pattern-card details.evidence > summary { cursor: pointer; color: #176b87; }
+
+.action-WATCH { background: #e5f0fb; color: #225b87; }
+.decision-WATCH { border-left-color: #3275a5; }

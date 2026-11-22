@@ -23,7 +23,7 @@
     kind: { stock: "股票", etf: "ETF" },
     timeframe: { "1d": "日线", "1w": "周线" },
     shape: { w_bottom: "W底", inverse_head_shoulders: "头肩底", triangle_bottom: "底部三角形", bull_flag: "上升旗形", m_top: "M顶", head_shoulders: "头肩顶", triangle_top: "顶部三角形", bear_flag: "下跌旗形", spring: "破底翻", false_breakout: "假突破", multi_shape: "多形态", unknown: "未知" },
-    reason: { stop_loss: "止损", take_profit: "止盈", end_of_period: "期末强平", insufficient_cash: "资金不足", position_already_open: "已有持仓", no_next_t1_session: "无T+1交易日" },
+    reason: { stop_loss: "止损", take_profit: "止盈", measured_target_already_passed: "测算目标已越过，次日开盘退出", missing_measured_target: "缺少可用形态测算目标", measured_target_not_above_entry: "测算目标不高于实际入场价", end_of_period: "期末强平", insufficient_cash: "资金不足", position_already_open: "已有持仓", no_next_t1_session: "无T+1交易日" },
     holdout: { historical_development_analysis: "历史留出数据已暴露，非独立样本" }
   };
 

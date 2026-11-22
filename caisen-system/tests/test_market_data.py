@@ -73,8 +73,8 @@ def test_load_daily_bars_preserves_file_hash_adjustment_and_latest_history(tmp_p
     assert result.source == "local_csv"
     assert result.bars.close.tolist() == [10.5, 11.5]
     assert result.data_version
-    assert result.quality_status == "usable_with_warnings"
-    assert not any("code mismatch" in warning for warning in result.warnings)
+    assert result.quality_status == "usable"
+    assert result.warnings == []
 
 
 def test_load_daily_bars_drops_and_reports_bad_rows_and_duplicates(tmp_path):
@@ -283,7 +283,7 @@ def test_full_inventory_reports_discovered_readable_warning_insufficient_failed(
     stocks.mkdir(parents=True)
     etfs.mkdir(parents=True)
     valid = "日期,代码,名称,开盘,最高,最低,收盘,成交量\n2026-01-05,000001,A,10,11,9,10,100\n"
-    (stocks / "000001.csv").write_text(valid, encoding="utf-8-sig")
+    (stocks / "000001.csv").write_text(valid + "2026-01-05,000001,A,10,11,9,10,100\n", encoding="utf-8-sig")
     (stocks / "000002.csv").write_text("日期,代码,名称\n2026-01-05,000002,B\n", encoding="utf-8-sig")
     (etfs / "510001.csv").write_text("", encoding="utf-8-sig")
 

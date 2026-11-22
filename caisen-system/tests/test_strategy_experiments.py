@@ -42,6 +42,15 @@ def test_open_admission_projects_frozen_line_and_uses_signal_close_atr():
     assert accepted[0]["patterns"][0]["evidence"][-1]["code"] == "entry_admission"
 
 
+def test_span_first_experiment_changes_only_neckline_ordering():
+    spec, admission_policy = fb._experiment_spec(fb.EXPERIMENT_NECKLINE_SPAN_FIRST)
+
+    assert spec.neckline_selection_order == "span_first"
+    assert spec.minimum_neckline_tests is None
+    assert spec.admission_types is None
+    assert admission_policy == "none"
+
+
 def test_open_admission_rejects_missing_emitted_breakout_evidence():
     accepted, decisions = fb._open_admission_gate(_bars(), [_signal(breakout=False)])
 

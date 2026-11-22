@@ -1,7 +1,15 @@
 import json
+import hashlib
 import os
 import sqlite3
 from contextlib import contextmanager
+
+
+class LifecycleEventConflict(ValueError):
+    """An append-only lifecycle event key already has a different payload."""
+
+
+_UNSET = object()
 
 
 def database_path():
@@ -18,6 +26,31 @@ def connect(path=None):
         db.executescript("""
         CREATE TABLE IF NOT EXISTS patterns(pattern_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS pattern_snapshots(pattern_id TEXT NOT NULL, data_version TEXT NOT NULL, payload TEXT NOT NULL, observed_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(pattern_id,data_version));
+        CREATE TABLE IF NOT EXISTS pattern_lifecycle_events(
+            analysis_batch_id TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+            data_version TEXT NOT NULL,
+            pattern_id TEXT NOT NULL,
+            boundary_version_id TEXT NOT NULL,
+            event_date TEXT,
+            event_kind TEXT NOT NULL,
+            lifecycle_schema_version TEXT NOT NULL,
+            recognition_context_json TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(analysis_batch_id,instance_id,event_sequence)
+        );
+        CREATE INDEX IF NOT EXISTS lifecycle_events_instance_version
+            ON pattern_lifecycle_events(instance_id,data_version,event_sequence);
+        CREATE TABLE IF NOT EXISTS pattern_lifecycle_event_aliases(
+            analysis_batch_id TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL CHECK(event_sequence > 0),
+            pattern_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(analysis_batch_id,instance_id,event_sequence,pattern_id)
+        );
         CREATE TABLE IF NOT EXISTS jobs(job_id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS backtests(backtest_id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS scan_runs(
@@ -54,20 +87,276 @@ def connect(path=None):
         db.close()
 
 
-def save_pattern(pattern, db=None):
-    return save_patterns([pattern], db=db)
+def save_pattern(pattern, db=None, analysis_batch_id=None, recognition_context=_UNSET):
+    return save_patterns([pattern], db=db, analysis_batch_id=analysis_batch_id,
+                         recognition_context=recognition_context)
 
 
-def save_patterns(patterns, db=None):
+def save_patterns(patterns, db=None, analysis_batch_id=None, recognition_context=_UNSET):
     payloads = [pattern.to_dict() if hasattr(pattern, "to_dict") else pattern for pattern in patterns]
     if not payloads:
         return
+    lifecycle_rows = []
+    for payload in payloads:
+        lifecycle_rows.extend(_lifecycle_event_rows(
+            payload, analysis_batch_id=analysis_batch_id,
+            recognition_context=recognition_context))
+    _validate_event_batch(lifecycle_rows)
     with connect() if db is None else _yield(db) as conn:
-        snapshots = [(payload["pattern_id"], payload.get("data_version", "unknown"),
-                      json.dumps(payload, ensure_ascii=False)) for payload in payloads]
-        current = [(payload["pattern_id"], json.dumps(payload, ensure_ascii=False)) for payload in payloads]
-        conn.executemany("INSERT OR IGNORE INTO pattern_snapshots(pattern_id,data_version,payload) VALUES(?,?,?)", snapshots)
-        conn.executemany("INSERT OR REPLACE INTO patterns(pattern_id,payload,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)", current)
+        savepoint = "save_pattern_batch"
+        conn.execute("SAVEPOINT " + savepoint)
+        try:
+            _assert_existing_events_compatible(conn, lifecycle_rows)
+            snapshots = [(payload["pattern_id"], payload.get("data_version", "unknown"),
+                          json.dumps(payload, ensure_ascii=False)) for payload in payloads]
+            current = [(payload["pattern_id"], json.dumps(payload, ensure_ascii=False)) for payload in payloads]
+            conn.executemany("INSERT OR IGNORE INTO pattern_snapshots(pattern_id,data_version,payload) VALUES(?,?,?)", snapshots)
+            conn.executemany("INSERT OR REPLACE INTO patterns(pattern_id,payload,updated_at) VALUES(?,?,CURRENT_TIMESTAMP)", current)
+            _append_lifecycle_events(conn, lifecycle_rows)
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+            conn.execute("RELEASE SAVEPOINT " + savepoint)
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT " + savepoint)
+
+
+def _canonical_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False)
+
+
+def _is_real_data_version(value):
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return value.strip().lower() not in {"unknown", "none", "null", "unavailable"}
+
+
+def _joint_lifecycle(payload):
+    for item in payload.get("evidence", []) or []:
+        if isinstance(item, dict) and item.get("code") == "joint_lifecycle":
+            value = item.get("value")
+            return value if isinstance(value, dict) else None
+    return None
+
+
+def _recognition_context(payload, lifecycle, explicit_context):
+    if explicit_context is not _UNSET:
+        return explicit_context
+    if "recognition_context" in lifecycle:
+        return lifecycle["recognition_context"]
+    if "recognition_context" in payload:
+        return payload["recognition_context"]
+    if "recognition_experiment" in payload:
+        return payload["recognition_experiment"]
+    return None
+
+
+def _analysis_batch_id(payload, data_version, lifecycle_schema_version,
+                       recognition_context, explicit_batch_id):
+    selected = explicit_batch_id
+    if selected is None:
+        selected = payload.get("analysis_batch_id")
+    if selected is not None:
+        if not isinstance(selected, str) or not selected.strip():
+            raise ValueError("analysis_batch_id must be a non-empty string")
+        return selected.strip()
+    identity = {
+        "code": payload.get("code"), "kind": payload.get("kind"),
+        "timeframe": payload.get("timeframe"), "data_version": data_version,
+        "rule_version": payload.get("rule_version"),
+        "source_rule_version": payload.get("source_rule_version"),
+        "lifecycle_schema_version": lifecycle_schema_version,
+        "recognition_context": recognition_context,
+    }
+    return hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()
+
+
+def _lifecycle_event_rows(payload, analysis_batch_id=None, recognition_context=_UNSET):
+    if not isinstance(payload, dict):
+        return []
+    data_version = payload.get("data_version")
+    if not _is_real_data_version(data_version):
+        return []
+    lifecycle = _joint_lifecycle(payload)
+    if lifecycle is None:
+        return []
+    schema_version = lifecycle.get("schema_version")
+    instance_id = lifecycle.get("instance_id")
+    boundary_version_id = lifecycle.get("boundary_version_id")
+    pattern_id = payload.get("pattern_id")
+    events = lifecycle.get("events")
+    if (not isinstance(schema_version, str) or not schema_version.strip()
+            or not isinstance(instance_id, str) or not instance_id.strip()
+            or not isinstance(boundary_version_id, str) or not boundary_version_id.strip()
+            or not isinstance(pattern_id, str) or not pattern_id.strip()
+            or not isinstance(events, list)):
+        return []
+    context = _recognition_context(payload, lifecycle, recognition_context)
+    context_json = _canonical_json(context)
+    batch_id = _analysis_batch_id(payload, data_version, schema_version, context,
+                                  analysis_batch_id)
+    rows = []
+    previous_sequence = 0
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("joint_lifecycle.events entries must be objects")
+        sequence = event.get("sequence")
+        if (not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1
+                or sequence <= previous_sequence):
+            raise ValueError("joint_lifecycle.events must be in strictly increasing sequence order")
+        if event.get("instance_id") != instance_id:
+            raise ValueError("lifecycle event instance_id does not match its lifecycle")
+        if event.get("boundary_version_id") != boundary_version_id:
+            raise ValueError("lifecycle event boundary_version_id does not match its lifecycle")
+        event_kind = event.get("kind")
+        if not isinstance(event_kind, str) or not event_kind.strip():
+            raise ValueError("lifecycle event kind must be a non-empty string")
+        rows.append({
+            "analysis_batch_id": batch_id,
+            "instance_id": instance_id,
+            "event_sequence": sequence,
+            "data_version": data_version,
+            "pattern_id": pattern_id,
+            "boundary_version_id": boundary_version_id,
+            "event_date": event.get("date"),
+            "event_kind": event_kind,
+            "lifecycle_schema_version": schema_version,
+            "recognition_context_json": context_json,
+            "payload_json": _canonical_json(event),
+        })
+        previous_sequence = sequence
+    return rows
+
+
+def _validate_event_batch(rows):
+    seen = {}
+    immutable_fields = ("data_version", "boundary_version_id", "event_date",
+                        "event_kind", "lifecycle_schema_version", "recognition_context_json",
+                        "payload_json")
+    for row in rows:
+        key = (row["analysis_batch_id"], row["instance_id"], row["event_sequence"])
+        previous = seen.get(key)
+        if previous is not None and any(previous[field] != row[field] for field in immutable_fields):
+            raise LifecycleEventConflict("conflicting lifecycle event payload in one save batch for %s" % (key,))
+        seen[key] = row
+
+
+def _assert_existing_events_compatible(conn, rows):
+    keys = set((row["analysis_batch_id"], row["instance_id"], row["event_sequence"])
+               for row in rows)
+    for batch_id, instance_id, sequence in keys:
+        existing = _fetchone_dict(conn,
+            "SELECT data_version,boundary_version_id,event_date,event_kind,"
+            "lifecycle_schema_version,recognition_context_json,payload_json "
+            "FROM pattern_lifecycle_events "
+            "WHERE analysis_batch_id=? AND instance_id=? AND event_sequence=?",
+            (batch_id, instance_id, sequence))
+        if existing is None:
+            continue
+        incoming = next(row for row in rows
+                        if (row["analysis_batch_id"], row["instance_id"], row["event_sequence"])
+                        == (batch_id, instance_id, sequence))
+        immutable_fields = ("data_version", "boundary_version_id", "event_date",
+                            "event_kind", "lifecycle_schema_version", "recognition_context_json",
+                            "payload_json")
+        if any(existing[field] != incoming[field] for field in immutable_fields):
+            raise LifecycleEventConflict(
+                "lifecycle event key already has a different immutable payload: %s" %
+                ((batch_id, instance_id, sequence),))
+
+
+def _append_lifecycle_events(conn, rows):
+    fields = ("analysis_batch_id", "instance_id", "event_sequence", "data_version",
+              "pattern_id", "boundary_version_id", "event_date", "event_kind",
+              "lifecycle_schema_version", "recognition_context_json", "payload_json")
+    if not rows:
+        return
+    placeholders = ",".join("?" for _ in fields)
+    columns = ",".join(fields)
+    statement = "INSERT OR IGNORE INTO pattern_lifecycle_events (%s) VALUES (%s)" % (columns, placeholders)
+    for row in rows:
+        conn.execute(statement, tuple(row[field] for field in fields))
+        existing = _fetchone_dict(conn,
+            "SELECT data_version,boundary_version_id,event_date,event_kind,"
+            "lifecycle_schema_version,recognition_context_json,payload_json "
+            "FROM pattern_lifecycle_events "
+            "WHERE analysis_batch_id=? AND instance_id=? AND event_sequence=?",
+            (row["analysis_batch_id"], row["instance_id"], row["event_sequence"]))
+        immutable_fields = ("data_version", "boundary_version_id", "event_date",
+                            "event_kind", "lifecycle_schema_version", "recognition_context_json",
+                            "payload_json")
+        if existing is None or any(existing[field] != row[field] for field in immutable_fields):
+            raise LifecycleEventConflict("lifecycle event changed while being appended")
+        conn.execute(
+            "INSERT OR IGNORE INTO pattern_lifecycle_event_aliases "
+            "(analysis_batch_id,instance_id,event_sequence,pattern_id) VALUES(?,?,?,?)",
+            (row["analysis_batch_id"], row["instance_id"], row["event_sequence"],
+             row["pattern_id"]))
+
+
+def get_lifecycle_events(analysis_batch_id=None, instance_id=None, data_version=None, db=None):
+    clauses, params = [], []
+    for column, value in (("analysis_batch_id", analysis_batch_id),
+                          ("instance_id", instance_id), ("data_version", data_version)):
+        if value is not None:
+            clauses.append(column + "=?")
+            params.append(value)
+    query = "SELECT * FROM pattern_lifecycle_events"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY analysis_batch_id,instance_id,event_sequence"
+    with connect() if db is None else _yield(db) as conn:
+        rows = _fetchall_dicts(conn, query, params)
+    result = []
+    for row in rows:
+        item = row
+        item["payload"] = json.loads(item.pop("payload_json"))
+        item["recognition_context"] = json.loads(item.pop("recognition_context_json"))
+        item["sequence"] = item["event_sequence"]
+        item["date"] = item["event_date"]
+        item["kind"] = item["event_kind"]
+        result.append(item)
+    return result
+
+
+def get_lifecycle_event_aliases(analysis_batch_id=None, instance_id=None,
+                                event_sequence=None, db=None):
+    clauses, params = [], []
+    for column, value in (("analysis_batch_id", analysis_batch_id),
+                          ("instance_id", instance_id),
+                          ("event_sequence", event_sequence)):
+        if value is not None:
+            clauses.append(column + "=?")
+            params.append(value)
+    query = "SELECT * FROM pattern_lifecycle_event_aliases"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY analysis_batch_id,instance_id,event_sequence,pattern_id"
+    with connect() if db is None else _yield(db) as conn:
+        rows = _fetchall_dicts(conn, query, params)
+    return rows
+
+
+def _fetchone_dict(conn, query, params=()):
+    cursor = conn.execute(query, params)
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    if isinstance(row, sqlite3.Row):
+        return dict(row)
+    return dict(zip((column[0] for column in cursor.description), row))
+
+
+def _fetchall_dicts(conn, query, params=()):
+    cursor = conn.execute(query, params)
+    rows = cursor.fetchall()
+    if not rows:
+        return []
+    if isinstance(rows[0], sqlite3.Row):
+        return [dict(row) for row in rows]
+    columns = [column[0] for column in cursor.description]
+    return [dict(zip(columns, row)) for row in rows]
 
 
 def get_pattern(pattern_id, db=None):
@@ -276,14 +565,51 @@ def get_scan_run(run_id):
         row = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (run_id,)).fetchone()
     if row is None:
         return None
+    params = json.loads(row["params_json"])
     return {
         "run_id": row["run_id"], "status": row["status"],
-        "params": json.loads(row["params_json"]), "progress": row["progress"],
+        "params": params, "versions": params.get("versions"), "progress": row["progress"],
         "scanned": row["scanned"], "total": row["total"],
         "inventory": json.loads(row["inventory_json"]), "rule_version": row["rule_version"],
         "app_version": row["app_version"], "error": row["error"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+
+
+def scan_result_count(run_id):
+    with connect() as db:
+        return int(db.execute("SELECT COUNT(*) FROM scan_results WHERE run_id=?", (run_id,)).fetchone()[0])
+
+
+def compact_completed_scan_job(run_id):
+    """Drop the duplicated job.results blob only when the paged snapshot is complete."""
+    with connect() as db:
+        run = db.execute("SELECT * FROM scan_runs WHERE run_id=?", (run_id,)).fetchone()
+        job = db.execute("SELECT status,payload FROM jobs WHERE job_id=?", (run_id,)).fetchone()
+        if run is None or job is None or run["status"] not in ("completed", "partial_failed"):
+            return False
+        result_count = int(db.execute(
+            "SELECT COUNT(*) FROM scan_results WHERE run_id=?", (run_id,)
+        ).fetchone()[0])
+        if result_count != int(run["scanned"]):
+            return False
+        valid_array = db.execute(
+            "SELECT json_valid(payload),json_type(payload,'$.results'),json_array_length(payload,'$.results') "
+            "FROM jobs WHERE job_id=?", (run_id,)
+        ).fetchone()
+        if (not valid_array or valid_array[0] != 1 or valid_array[1] != "array"
+                or int(valid_array[2] or 0) != result_count):
+            return False
+        params = json.loads(run["params_json"])
+        compact = {
+            "job_type": "scan", "status": run["status"], "progress": run["progress"],
+            "scanned": run["scanned"], "total": run["total"], "result_count": result_count,
+            "rule_version": run["rule_version"], "versions": params.get("versions"),
+            "inventory": json.loads(run["inventory_json"]), "error": run["error"],
+        }
+        db.execute("UPDATE jobs SET status=?,payload=? WHERE job_id=?",
+                   (run["status"], json.dumps(compact, ensure_ascii=False, allow_nan=False), run_id))
+        return True
 
 
 def query_scan_results(run_id, search=None, category=None, action=None, kind=None, pattern_types=None,

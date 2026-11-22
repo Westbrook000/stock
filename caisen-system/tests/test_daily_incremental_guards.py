@@ -107,9 +107,12 @@ def test_cached_breakout_pre_maturity_cross_consumes_same_frozen_boundary(monkey
     assert early == []
     assert after_maturity == []
     assert session.consumed_neckline_phases
-    detail = {item["code"]: item["value"] for item in
-              next(iter(session.active.values()))["pattern"].evidence}
+    candidate = next(iter(session.active.values()))
+    assert candidate["pattern"].state == "expired"
+    detail = {item["code"]: item["value"] for item in candidate["pattern"].evidence}
     assert detail["neckline_selection"]["early_breakouts"][0]["date"] == "2024-06-30"
+    assert detail["main_structure"]["terminal_state"] == "expired"
+    assert detail["joint_lifecycle"]["state_at"] == "expired"
     next_low = Pivot(1, session.date_strings[1], 9.0, "low", 2,
                      session.date_strings[1], "3ATR|8%")
     new_structure = {"family": "w_bottom", "sequence": [next_low]}
@@ -268,6 +271,8 @@ def test_same_day_independent_main_patterns_are_merged_into_one_signal(monkeypat
     monkeypatch.setattr(incremental, "_make_main_pattern",
                         lambda _frame, _code, _kind, _tf, family, *_args, **_kwargs:
                         [first if family == "w_bottom" else second])
+    session._attach_session_lifecycle(first, discovered_at="2025-04-01")
+    session._attach_session_lifecycle(second, discovered_at="2025-04-01")
 
     emitted = session.append_bar(_bar(current_date))
 
@@ -294,13 +299,16 @@ def test_major_w_bottom_suppresses_a_contained_smaller_triangle_buy():
         pattern_type="w_bottom", direction="bullish", state="confirmed",
         formed_at="2024-02-06", confirmed_at=1, confirmation_date="2026-01-09",
         key_points={"pivot_1_date": "2024-02-06", "pivot_2_date": "2024-09-18",
+                    "first_trough_index": 100, "latest_anchor_index": 800,
                     "pivot_scale": "5atr_12pct"},
         evidence=[
             {"code": "main_structure", "value": {
                 "role": "main", "family": "w_bottom", "pivot_scale": "5atr_12pct",
-                "first_trough_date": "2024-02-06", "structure_end_date": "2025-12-30"}},
+                "first_trough_date": "2024-02-06", "structure_end_date": "2025-12-30",
+                "support_lower": 38.0}},
             {"code": "neckline_selection", "value": {"structure_known_at": "2024-09-26"}},
         ],
+        neckline={"slope": 0.0, "intercept": 50.0},
         last_observed_date="2026-01-09",
     )
     child = Pattern(
@@ -309,11 +317,80 @@ def test_major_w_bottom_suppresses_a_contained_smaller_triangle_buy():
         formed_at="2025-03-31", confirmed_at=2, confirmation_date="2026-01-09",
         key_points={"pivot_1_date": "2025-03-31", "pivot_2_date": "2025-04-09",
                     "pivot_3_date": "2025-04-30", "pivot_4_date": "2025-11-17",
-                    "pivot_5_date": "2025-12-17", "pivot_scale": "3atr_8pct"},
+                    "pivot_5_date": "2025-12-17", "first_trough_index": 350,
+                    "latest_anchor_index": 750, "pivot_scale": "3atr_8pct"},
         evidence=[{"code": "main_structure", "value": {
             "role": "main", "family": "triangle_bottom", "pivot_scale": "3atr_8pct",
-            "first_trough_date": "2025-03-31", "structure_end_date": "2025-12-19"}}],
+            "first_trough_date": "2025-03-31", "structure_end_date": "2025-12-19",
+            "support_lower": 44.0}}],
+        neckline={"slope": 0.0, "intercept": 45.0},
         last_observed_date="2026-01-09",
     )
 
     assert DailyRecognitionSession._nested_ids([parent, child], "2026-01-09") == {"inner-triangle"}
+
+
+def test_w_pressure_search_uses_observation_window_not_one_year_before_first_trough():
+    from caisen.schemas import Pivot
+
+    dates = pd.bdate_range("2018-01-02", periods=2000)
+    session = DailyRecognitionSession("W-LONG-PRESSURE", "stock")
+    session.bars = [dict(date=day, open=10.0, high=10.3, low=9.8,
+                         close=10.0, volume=1000) for day in dates]
+    session.date_strings = [str(day.date()) for day in dates]
+    session.high_values = [10.3] * len(dates)
+    session.low_values = [9.8] * len(dates)
+    session.close_values = [10.0] * len(dates)
+    session.atr_values = [0.5] * len(dates)
+    first = Pivot(1400, session.date_strings[1400], 8.5, "low", 1402,
+                  session.date_strings[1402], "3ATR|8%")
+    middle = Pivot(1500, session.date_strings[1500], 12.5, "high", 1502,
+                   session.date_strings[1502], "3ATR|8%")
+    last = Pivot(1700, session.date_strings[1700], 8.6, "low", 1702,
+                 session.date_strings[1702], "3ATR|8%")
+    old_external = Pivot(900, session.date_strings[900], 12.5, "high", 902,
+                         session.date_strings[902], "neckline_test_2ATR")
+    reaction_test = Pivot(1600, session.date_strings[1600], 12.5, "high", 1602,
+                          session.date_strings[1602], "neckline_test_2ATR")
+    session.scale_pivots["3atr_8pct"] = [middle]
+    session.pressure["pivots"] = [old_external, reaction_test]
+    session._index_low_pivot(first)
+    candidate = {"family": "w_bottom", "scale": "3atr_8pct",
+                 "sequence": [first, last], "pattern": None}
+
+    assert (pd.Timestamp(first.date) - pd.Timestamp(old_external.date)).days > 365
+    assert session._has_pressure_test_pair(candidate)
+    assert session._pressure_pivot_can_change_candidate(candidate, reaction_test)
+
+
+def test_ihs_external_pressure_touches_cannot_replace_both_internal_reaction_tests():
+    from caisen.schemas import Pivot
+
+    dates = pd.bdate_range("2020-01-02", periods=1600)
+    session = DailyRecognitionSession("IHS-EXTERNAL", "stock")
+    session.bars = [dict(date=day, open=10.0, high=10.3, low=9.5,
+                         close=10.0, volume=1000) for day in dates]
+    session.date_strings = [str(day.date()) for day in dates]
+    session.high_values = [10.3] * len(dates)
+    session.low_values = [9.5] * len(dates)
+    session.close_values = [10.0] * len(dates)
+    session.atr_values = [0.5] * len(dates)
+    sequence = [
+        Pivot(800, session.date_strings[800], 10.0, "low", 802,
+              session.date_strings[802], "3ATR|8%"),
+        Pivot(1000, session.date_strings[1000], 8.0, "low", 1002,
+              session.date_strings[1002], "3ATR|8%"),
+        Pivot(1200, session.date_strings[1200], 10.1, "low", 1202,
+              session.date_strings[1202], "3ATR|8%"),
+    ]
+    session._index_low_pivot(sequence[1])
+    session.pressure["pivots"] = [
+        Pivot(500, session.date_strings[500], 12.0, "high", 502,
+              session.date_strings[502], "neckline_test_2ATR"),
+        Pivot(650, session.date_strings[650], 12.0, "high", 652,
+              session.date_strings[652], "neckline_test_2ATR"),
+    ]
+    candidate = {"family": "inverse_head_shoulders", "scale": "3atr_8pct",
+                 "sequence": sequence, "pattern": None}
+
+    assert not session._has_pressure_test_pair(candidate)

@@ -620,10 +620,14 @@
     }
   ],
   "main_structure_extension": {
-    "source_rule_version": "caisen-main-bottoms-v11-evidence-first-v3",
-    "neckline_selection_rule_version": "pattern_matched_pressure_envelope_v7-evidence-first-v3",
-    "main_pattern_rule_version": "caisen-v24-main-bottom-evidence-first-v3",
-    "breakout_candidate_rule": "candidate_own_frozen_neckline_v1",
+    "source_rule_version": "caisen-main-bottoms-v17-relative-neckline-height-100",
+    "neckline_selection_rule_version": "joint_structure_boundary_v4_relative_height",
+    "main_pattern_rule_version": "caisen-v27-relative-neckline-height",
+    "main_structure_suppression": {
+      "version": "price_envelope_containment_v1",
+      "merge_identical_anchors_across_scales": true,
+      "require_parent_price_envelope_containment": true
+    },
     "neckline_selection_order": [
       "independent_test_count_desc",
       "test_span_desc",
@@ -667,22 +671,19 @@
       "candidate_reversal_atr_multiple": 2.0,
       "candidate_reversal_scope": "causal_pressure_point_confirmation_only",
       "minimum_independent_groups": 2,
-      "consumed_boundary_phase_rule": "same_structure_shared_evidence_subtick_frozen_line_v3",
+      "consumed_boundary_phase_rule": "same_structure_equivalent_frozen_neckline_v1",
       "consumed_boundary_phase_rationale": "同一结构锚点的已触发缓冲突破会消耗等价冻结颈线；新增同线触点不得重新发出买点。不同压力线及新的结构锚点仍可独立确认。",
-      "lookback_calendar_years": 1,
+      "lookback_scope": "observation_anchored_structure_window",
       "minimum_separation_daily_sessions": 10,
       "minimum_separation_weekly_bars": 2,
       "minimum_departure_atr": 1.0,
       "tolerance_atr": 0.5,
       "minimum_tolerance_ticks": 2,
-      "w_bottom_rim_association_ceiling_relative": 0.2,
       "w_bottom_rim_snap_relative": 0.05,
       "formation_coverage": "all_highs_from_structure_start_through_max_structure_known_and_line_frozen",
       "post_formation_weak_crossings_allowed": true,
-      "premature_failure_scope": "frozen_boundary_only",
-      "boundary_identity": "same_coefficients_or_two_shared_pressure_anchors_with_sub_half_tick_price_deviation",
-      "first_boundary_crossing_audit": "own_line_since_structure_and_line_known_before_selection",
-      "rejected_boundary_matching": "same_boundary_identity_not_ATR_price_zone"
+      "w_bottom_rim_association_tolerance_atr": 0.5,
+      "w_bottom_rim_association_rationale": "W底颈线必须与两底间最高已确认反弹匹配；结构外压力点只能增加独立测试证据，不能替代中间反弹。价格匹配容差沿用0.5ATR及两个报价单位。"
     },
     "neckline_slope": {
       "maximum_cumulative_relative_rise": 0.05,
@@ -713,6 +714,9 @@
     "w_bottom": {
       "maximum_trough_gap_ratio": 0.15
     },
+    "neckline_relative_height": {
+      "maximum_ratio": 1.0
+    },
     "low_position": {
       "full_history_position_max": 0.3,
       "prepattern_lookback_calendar_years": 2,
@@ -723,7 +727,6 @@
     "child_suppression": {
       "same_timeframe_only": true,
       "known_by_child_action_date": true
-    },
-    "selection_before_price_confirmation": true
+    }
   }
 }

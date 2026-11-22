@@ -1,12 +1,275 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 
+from caisen import store
+from caisen.daily_incremental import DailyRecognitionSession
+from caisen.schemas import Pattern, Pivot
 from caisen.store import connect, get_pattern, save_pattern, save_patterns
 
 
 class StoreTests(unittest.TestCase):
+    @staticmethod
+    def _lifecycle_pattern(data_version="bars-v1", event_kind="paired"):
+        return {
+            "pattern_id": "stock:W:one", "code": "000008", "kind": "stock",
+            "timeframe": "1d", "pattern_type": "w_bottom", "data_version": data_version,
+            "rule_version": "pattern-v1", "source_rule_version": "source-v1", "state": "forming",
+            "evidence": [{"code": "joint_lifecycle", "value": {
+                "schema_version": "joint-pattern-instance-v2", "instance_id": "instance-1",
+                "boundary_version_id": "boundary-1",
+                "recognition_context": {"experiment_id": "g1-v1"}, "events": [
+                    {"instance_id": "instance-1", "boundary_version_id": "boundary-1",
+                     "sequence": 1, "date": "2024-01-10", "kind": event_kind,
+                     "reason": "fixture"},
+                    {"instance_id": "instance-1", "boundary_version_id": "boundary-1",
+                     "sequence": 2, "date": "2024-05-10", "kind": "invalidated",
+                     "reason": "close_below_instance_boundary"},
+                ]}}],
+        }
+
+    def test_lifecycle_events_are_idempotent_and_isolated_by_data_version(self):
+        self.assertTrue(callable(getattr(store, "get_lifecycle_events", None)))
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                first = self._lifecycle_pattern("bars-v1")
+                second = self._lifecycle_pattern("bars-v2")
+                save_pattern(first)
+                save_pattern(first)
+                save_pattern(second)
+                s1 = self._lifecycle_pattern("bars-v1")
+                s1["evidence"][0]["value"]["recognition_context"] = {"experiment_id": "s1-v1"}
+                save_pattern(s1)
+
+                v1 = store.get_lifecycle_events(instance_id="instance-1", data_version="bars-v1")
+                v2 = store.get_lifecycle_events(instance_id="instance-1", data_version="bars-v2")
+
+                g1_batch = next(item["analysis_batch_id"] for item in v1
+                                if item["recognition_context"] == {"experiment_id": "g1-v1"})
+                s1_batch = next(item["analysis_batch_id"] for item in v1
+                                if item["recognition_context"] == {"experiment_id": "s1-v1"})
+                g1_v1 = store.get_lifecycle_events(analysis_batch_id=g1_batch)
+                self.assertEqual([item["sequence"] for item in g1_v1], [1, 2])
+                self.assertEqual([item["kind"] for item in g1_v1], ["paired", "invalidated"])
+                self.assertNotEqual(g1_batch, s1_batch)
+                self.assertEqual(g1_v1[0]["instance_id"], v1[0]["instance_id"])
+                self.assertEqual(len(v2), 2)
+                self.assertNotEqual(g1_batch, v2[0]["analysis_batch_id"])
+                self.assertEqual(g1_v1[1]["payload"]["reason"], "close_below_instance_boundary")
+                with connect() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM pattern_snapshots").fetchone()[0], 2)
+                    self.assertEqual(db.execute("SELECT count(*) FROM pattern_lifecycle_events").fetchone()[0], 6)
+                    snapshot = db.execute(
+                        "SELECT payload FROM pattern_snapshots WHERE pattern_id=? AND data_version=?",
+                        ("stock:W:one", "bars-v1")).fetchone()[0]
+                    saved_snapshot = json.loads(snapshot)
+                    saved_context = next(item["value"] for item in saved_snapshot["evidence"]
+                                         if item["code"] == "joint_lifecycle")["recognition_context"]
+                    self.assertEqual(saved_context, {"experiment_id": "g1-v1"})
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
+    def test_lifecycle_event_conflict_rejects_rewrite_atomically(self):
+        self.assertTrue(hasattr(store, "LifecycleEventConflict"))
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                original = self._lifecycle_pattern()
+                save_pattern(original, recognition_context={"experiment_id": "g1-v1"})
+                changed = self._lifecycle_pattern(event_kind="weak_crossing")
+                changed["state"] = "confirmed"
+
+                with self.assertRaises(store.LifecycleEventConflict):
+                    save_pattern(changed, recognition_context={"experiment_id": "g1-v1"})
+
+                self.assertEqual(get_pattern("stock:W:one").get("state"), "forming")
+                saved = store.get_lifecycle_events(instance_id="instance-1", data_version="bars-v1")
+                self.assertEqual([item["kind"] for item in saved], ["paired", "invalidated"])
+                with connect() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM pattern_snapshots").fetchone()[0], 1)
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
+    def test_legacy_or_unknown_patterns_do_not_create_invented_lifecycle_events(self):
+        self.assertTrue(callable(getattr(store, "get_lifecycle_events", None)))
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                save_pattern({"pattern_id": "legacy", "data_version": "unknown",
+                              "evidence": [{"code": "joint_lifecycle", "value": {
+                                  "schema_version": "joint-pattern-instance-v2",
+                                  "instance_id": "missing-schema", "boundary_version_id": "boundary",
+                                  "events": [{"kind": "confirmed"}]}}]})
+                save_pattern({"pattern_id": "legacy-schema", "data_version": "bars-v1",
+                              "evidence": [{"code": "joint_lifecycle", "value": {
+                                  "instance_id": "old-instance", "boundary_version_id": "old-boundary",
+                                  "events": [{"kind": "confirmed"}]}}]})
+                save_pattern({"pattern_id": "no-lifecycle", "data_version": "bars-v1"})
+                self.assertEqual(store.get_lifecycle_events(), [])
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
+    def test_lifecycle_rows_must_already_be_in_event_sequence_order(self):
+        self.assertTrue(callable(getattr(store, "get_lifecycle_events", None)))
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                pattern = self._lifecycle_pattern()
+                lifecycle = pattern["evidence"][0]["value"]
+                lifecycle["events"].reverse()
+                with self.assertRaises(ValueError):
+                    save_pattern(pattern, recognition_context={"experiment_id": "g1-v1"})
+                self.assertEqual(store.get_lifecycle_events(), [])
+                with connect() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM pattern_snapshots").fetchone()[0], 0)
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
+    def test_batch_conflict_is_rejected_before_any_pattern_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                first = self._lifecycle_pattern("bars-v1")
+                second = self._lifecycle_pattern("bars-v2")
+                second["pattern_id"] = "stock:W:two"
+                with self.assertRaises(store.LifecycleEventConflict):
+                    save_patterns([first, second], analysis_batch_id="same-batch")
+                with connect() as db:
+                    self.assertEqual(db.execute("SELECT count(*) FROM pattern_snapshots").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT count(*) FROM patterns").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT count(*) FROM pattern_lifecycle_events").fetchone()[0], 0)
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
+    def test_external_plain_sqlite_connection_supports_atomic_lifecycle_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "state.sqlite3")
+            with connect(path):
+                pass
+            db = sqlite3.connect(path)
+            try:
+                pattern = self._lifecycle_pattern()
+                save_pattern(pattern, db=db, analysis_batch_id="external-batch")
+                save_pattern(pattern, db=db, analysis_batch_id="external-batch")
+                history = store.get_lifecycle_events(analysis_batch_id="external-batch", db=db)
+                self.assertEqual([item["sequence"] for item in history], [1, 2])
+
+                changed = self._lifecycle_pattern(event_kind="weak_crossing")
+                with self.assertRaises(store.LifecycleEventConflict):
+                    save_pattern(changed, db=db, analysis_batch_id="external-batch")
+                self.assertEqual([item["kind"] for item in
+                                  store.get_lifecycle_events(analysis_batch_id="external-batch", db=db)],
+                                 ["paired", "invalidated"])
+                self.assertEqual(db.execute("SELECT count(*) FROM pattern_snapshots").fetchone()[0], 1)
+            finally:
+                db.close()
+
+    def test_same_instance_source_pattern_ids_are_append_only_aliases(self):
+        self.assertTrue(callable(getattr(store, "get_lifecycle_event_aliases", None)))
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                first = self._lifecycle_pattern()
+                second = self._lifecycle_pattern()
+                second["pattern_id"] = "stock:W:alternate-source-id"
+                save_patterns([first, second], analysis_batch_id="same-instance-batch")
+
+                events = store.get_lifecycle_events(analysis_batch_id="same-instance-batch")
+                aliases = store.get_lifecycle_event_aliases(
+                    analysis_batch_id="same-instance-batch", instance_id="instance-1")
+                self.assertEqual([event["pattern_id"] for event in events],
+                                 ["stock:W:one", "stock:W:one"])
+                self.assertEqual({row["pattern_id"] for row in aliases},
+                                 {"stock:W:one", "stock:W:alternate-source-id"})
+                self.assertEqual(len(aliases), 4)
+
+                changed = self._lifecycle_pattern()
+                changed["pattern_id"] = "stock:W:third-alias"
+                changed["evidence"][0]["value"]["events"][1]["reason"] = "changed_history"
+                with self.assertRaises(store.LifecycleEventConflict):
+                    save_pattern(changed, analysis_batch_id="same-instance-batch")
+                aliases_after_conflict = store.get_lifecycle_event_aliases(
+                    analysis_batch_id="same-instance-batch", instance_id="instance-1")
+                self.assertEqual({row["pattern_id"] for row in aliases_after_conflict},
+                                 {"stock:W:one", "stock:W:alternate-source-id"})
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
+    def test_session_prefix_future_prefix_and_terminal_lifecycle_are_append_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CAISEN_DB")
+            os.environ["CAISEN_DB"] = os.path.join(tmp, "state.sqlite3")
+            try:
+                session = DailyRecognitionSession(
+                    "FIXTURE", "stock", tick_size=0.01,
+                    provenance={"data_version": "prefix-freeze-1"})
+                session.append_bar({"date": "2025-01-01", "open": 10.6, "high": 10.8,
+                                    "low": 10.4, "close": 10.6, "volume": 100})
+                session.append_bar({"date": "2025-01-02", "open": 10.5, "high": 10.6,
+                                    "low": 10.2, "close": 10.4, "volume": 100})
+                points = (Pivot(0, "2025-01-01", 10.0, "low", 0, "2025-01-01", "2ATR|5%"),
+                          Pivot(1, "2025-01-02", 10.1, "low", 1, "2025-01-02", "2ATR|5%"))
+                pattern = Pattern(
+                    "session-instance", "FIXTURE", "stock", "1d", "w_bottom", "bullish", "forming",
+                    "2025-01-01", None,
+                    key_points={"pivot_1_date": "2025-01-01", "pivot_1_kind": "low",
+                                "pivot_1": 10.0, "pivot_2_date": "2025-01-02",
+                                "pivot_2_kind": "low", "pivot_2": 10.1},
+                    neckline={"slope": 0.0, "intercept": 10.5}, invalidation=9.0,
+                    evidence=[{"code": "main_structure", "value": {
+                        "role": "main", "support_lower": 9.0,
+                        "structure_known_at": "2025-01-02", "structure_end_date": "2025-01-02"}},
+                              {"code": "neckline_selection", "value": {
+                                  "line_frozen_at": "2025-01-02",
+                                  "effective_start_date": "2025-01-01"}},
+                              {"code": "recognition_context", "value": dict(session.recognition_context)}],
+                    data_version="prefix-freeze-1", last_observed_date="2025-01-02",
+                    rule_version="engine-v1", source_rule_version="source-v1")
+                candidate_key = ("w_bottom", "2atr_5pct", ((0, "low"), (1, "low")))
+                session.active[candidate_key] = {
+                    "family": "w_bottom", "scale": "2atr_5pct", "sequence": points,
+                    "pattern": pattern, "structure_known_at": 1}
+
+                from caisen.structure_boundary import attach_joint_lifecycle
+                attach_joint_lifecycle(pattern, discovered_at="2025-01-02",
+                                       discovery_kind="session_observation")
+                prefix = pattern.to_dict()
+                save_pattern(prefix, analysis_batch_id="prefix-run-1")
+                save_pattern(prefix, analysis_batch_id="prefix-run-1")
+                original_history = store.get_lifecycle_events(analysis_batch_id="prefix-run-1")
+                self.assertEqual([event["kind"] for event in original_history], ["paired"])
+
+                session.append_bar({"date": "2025-01-03", "open": 8.9, "high": 9.0,
+                                    "low": 8.7, "close": 8.8, "volume": 120})
+                terminal = session.retired_patterns[next(iter(session.retired_patterns))]
+                terminal_payload = terminal.to_dict()
+                save_pattern(terminal_payload, analysis_batch_id="prefix-run-1")
+
+                final_history = store.get_lifecycle_events(analysis_batch_id="prefix-run-1")
+                self.assertEqual([event["sequence"] for event in final_history], [1, 2])
+                self.assertEqual([event["kind"] for event in final_history],
+                                 ["paired", "invalidated"])
+                self.assertEqual(final_history[0]["payload"], original_history[0]["payload"])
+                self.assertEqual(final_history[1]["data_version"], "prefix-freeze-1")
+            finally:
+                if previous is None: os.environ.pop("CAISEN_DB", None)
+                else: os.environ["CAISEN_DB"] = previous
+
     def test_batch_saves_patterns_and_snapshots_in_one_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             previous = os.environ.get("CAISEN_DB")

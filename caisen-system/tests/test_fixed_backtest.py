@@ -19,16 +19,171 @@ def bars(rows):
     return pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
 
 
+def _signal_with_pattern(pattern, signal_date="2024-01-01", entry_date="2024-01-02"):
+    return {"signal_date": signal_date, "entry_date": entry_date,
+            "pattern_ids": [pattern["pattern_id"]],
+            "pattern_types": [pattern["pattern_type"]],
+            "pattern_tags": [{"pattern_id": pattern["pattern_id"],
+                              "pattern_type": pattern["pattern_type"]}],
+            "pattern": pattern, "patterns": [pattern]}
+
+
+def _signal_with_target(pattern_id="p1", target=12.2, signal_date="2024-01-01", entry_date="2024-01-02"):
+    pattern = {"pattern_id": pattern_id, "pattern_type": "w_bottom", "direction": "bullish",
+               "confirmed_at": 0,
+               "evidence": [{"code": "targets", "value": {"prices": [target], "available": True}}]}
+    return _signal_with_pattern(pattern, signal_date, entry_date)
+
+
+def test_measured_target_uses_the_exact_signal_pattern_geometry():
+    frame = bars([
+        ("2024-01-01", 10, 10, 10, 10, 1000),
+        ("2024-01-02", 10, 10.2, 9.9, 10, 1000),
+        ("2024-01-03", 13.5, 14, 13, 13.8, 1000),
+    ])
+    pattern = {"pattern_id": "p1", "pattern_type": "w_bottom", "direction": "bullish",
+               "confirmed_at": 0, "key_points": {},
+               "evidence": [{"code": "targets", "value": {"prices": [13.5], "available": True}}]}
+    result = simulate_fixed_trades(frame, [_signal_with_pattern(pattern)])
+    trade = result["trades"][0]
+    assert trade["exit_reason"] == "take_profit"
+    assert trade["target_price"] == 13.5
+    assert trade["target_fraction"] is None
+    assert trade["measured_target_source_pattern_id"] == "p1"
+
+
+def test_locked_flag_target_unlocks_only_after_first_wave_high_close():
+    frame = bars([
+        ("2024-01-01", 14, 14.5, 13.8, 14, 1000),
+        ("2024-01-02", 14, 14.2, 13.7, 14, 1000),
+        ("2024-01-03", 14, 16.2, 13.9, 16, 1000),
+        ("2024-01-04", 16, 17.2, 15.8, 17, 1000),
+    ])
+    pattern = {"pattern_id": "flag-1", "pattern_type": "bull_flag", "direction": "bullish",
+               "confirmed_at": 0,
+               "key_points": {"pivot_1": 10, "pivot_2": 15, "pivot_5": 12,
+                              "pivot_1_kind": "low", "pivot_2_kind": "high",
+                              "pivot_5_kind": "low"},
+               "evidence": [{"code": "flag_breakout", "value": {
+                   "date": "2024-01-01", "prior_high": 15, "impulse_size": 5,
+                   "measured_target_locked": True, "target": None}}]}
+    result = simulate_fixed_trades(frame, [_signal_with_pattern(pattern)])
+    trade = result["trades"][0]
+    assert trade["measured_target_status"] == "active"
+    assert trade["measured_target_price"] == 17
+    assert trade["measured_target_unlocked_date"] == "2024-01-03"
+    assert trade["exit_date"] == "2024-01-04"
+    assert trade["exit_reason"] == "take_profit"
+
+
+def test_future_bars_do_not_unlock_a_flag_at_the_signal_close():
+    frame = bars([
+        ("2024-01-01", 14, 14.5, 13.8, 14, 1000),
+        ("2024-01-02", 14, 16.2, 13.7, 16, 1000),
+    ])
+    pattern = {"pattern_id": "flag-1", "pattern_type": "bull_flag", "direction": "bullish",
+               "confirmed_at": 0,
+               "key_points": {"pivot_1": 10, "pivot_2": 15, "pivot_5": 12,
+                              "pivot_1_kind": "low", "pivot_2_kind": "high",
+                              "pivot_5_kind": "low"},
+               "evidence": [{"code": "flag_breakout", "value": {
+                   "date": "2024-01-01", "prior_high": 15, "impulse_size": 5,
+                   "measured_target_locked": True, "target": None}}]}
+    signal = _signal_with_pattern(pattern)
+    selection = fixed_backtest_module._select_measured_target(
+        signal, 14, frame, {"2024-01-01": 0, "2024-01-02": 1})
+    assert selection["status"] == "pending_prior_high"
+
+
+def test_overshot_flag_target_exits_at_next_open_but_keeps_gap_stop_priority():
+    pattern = {"pattern_id": "flag-1", "pattern_type": "bull_flag", "direction": "bullish",
+               "confirmed_at": 0,
+               "key_points": {"pivot_1": 10, "pivot_2": 15, "pivot_5": 12,
+                              "pivot_1_kind": "low", "pivot_2_kind": "high",
+                              "pivot_5_kind": "low"},
+               "evidence": [{"code": "flag_breakout", "value": {
+                   "date": "2024-01-01", "prior_high": 15, "impulse_size": 5,
+                   "measured_target_locked": True, "target": None}}]}
+    signal = _signal_with_pattern(pattern)
+    prefix = [
+        ("2024-01-01", 14, 14.5, 13.8, 14, 1000),
+        ("2024-01-02", 14, 14.2, 13.7, 14, 1000),
+        ("2024-01-03", 16, 18.2, 15.8, 18, 1000),
+    ]
+    for opening, expected_reason, expected_price in (
+            (16.5, "measured_target_already_passed", 16.5),
+            (12, "stop_loss", 12)):
+        frame = bars(prefix + [("2024-01-04", opening, 17, 11.5, opening, 1000)])
+        result = simulate_fixed_trades(frame, [signal])
+        trade = result["trades"][0]
+        assert trade["measured_target_unlocked_date"] == "2024-01-03"
+        assert trade["exit_reason"] == expected_reason
+        assert trade["exit_price"] == expected_price
+
+
+def test_signal_without_a_recoverable_measured_target_is_rejected():
+    frame = bars([
+        ("2024-01-01", 10, 10, 10, 10, 1000),
+        ("2024-01-02", 10, 10.2, 9.9, 10, 1000),
+        ("2024-01-03", 10, 10.2, 9.9, 10, 1000),
+    ])
+    pattern = {"pattern_id": "p1", "pattern_type": "w_bottom", "direction": "bullish",
+               "confirmed_at": 0, "key_points": {}, "evidence": []}
+    result = simulate_fixed_trades(frame, [_signal_with_pattern(pattern)])
+    assert result["trades"] == []
+    assert result["rejections"][0]["reason"] == "missing_measured_target"
+
+
+def test_primary_signal_target_is_not_borrowed_from_a_sibling_shape():
+    frame = bars([
+        ("2024-01-01", 10, 10, 10, 10, 1000),
+        ("2024-01-02", 10, 10.2, 9.9, 10, 1000),
+        ("2024-01-03", 10, 10.2, 9.9, 10, 1000),
+    ])
+    primary = {"pattern_id": "primary", "pattern_type": "w_bottom", "direction": "bullish",
+               "confirmed_at": 0, "key_points": {}, "evidence": []}
+    sibling = {"pattern_id": "sibling", "pattern_type": "inverse_head_shoulders",
+               "direction": "bullish", "confirmed_at": 0,
+               "evidence": [{"code": "targets", "value": {"prices": [15], "available": True}}]}
+    signal = {**_signal_with_pattern(primary), "pattern_ids": ["primary", "sibling"],
+              "patterns": [primary, sibling]}
+    result = simulate_fixed_trades(frame, [signal])
+    assert result["trades"] == []
+    assert result["rejections"][0]["reason"] == "missing_measured_target"
+
+
+def test_main_target_reconstruction_is_identical_for_full_and_sliced_bars():
+    frame = bars([
+        ("2024-01-01", 12, 12.5, 11.5, 12, 1000),
+        ("2024-01-02", 12, 13, 12, 12.5, 1000),
+        ("2024-01-03", 14, 14.5, 13.5, 14, 1000),
+        ("2024-01-04", 14, 14.5, 13.8, 14, 1000),
+        ("2024-01-05", 16, 16.7, 15.8, 16.5, 1000),
+    ])
+    pattern = {"pattern_id": "w-main", "pattern_type": "w_bottom", "direction": "bullish",
+               "confirmed_at": 2, "key_points": {
+                   "pivot_1": 10, "pivot_1_kind": "low", "pivot_1_index": 0,
+                   "pivot_2": 11, "pivot_2_kind": "low", "pivot_2_index": 2,
+               }, "neckline": {"slope": 0, "intercept": 13},
+               "evidence": [{"code": "neckline_breakout", "value": {
+                   "date": "2024-01-03", "index": 2, "close": 14,
+                   "frozen_neckline": 13}},
+                   {"code": "targets", "value": {"prices": [], "available": False}}]}
+    signal = _signal_with_pattern(pattern, "2024-01-03", "2024-01-04")
+    full = simulate_fixed_trades(frame, [signal])
+    sliced = simulate_fixed_trades(frame.iloc[1:].reset_index(drop=True), [signal])
+    assert full["trades"][0]["measured_target_price"] == 16.5
+    assert sliced["trades"][0]["measured_target_price"] == 16.5
+    assert full["trades"][0]["exit_reason"] == sliced["trades"][0]["exit_reason"] == "take_profit"
+
+
 def test_fixed_stop_precedes_same_day_target_and_gap_stop_uses_open():
     frame = bars([
         ("2024-01-01", 10, 10, 10, 10, 1000),
         ("2024-01-02", 10, 10.1, 9.9, 10, 1000),
         ("2024-01-03", 8.8, 12.2, 8.7, 11, 1000),
     ])
-    result = simulate_fixed_trades(frame, [{
-        "signal_date": "2024-01-01", "entry_date": "2024-01-02",
-        "pattern_ids": ["p1"], "pattern_types": ["w_bottom"],
-    }])
+    result = simulate_fixed_trades(frame, [_signal_with_target()])
     trade = result["trades"][0]
     assert trade["entry_price"] == 10
     assert trade["exit_date"] == "2024-01-03"
@@ -50,10 +205,7 @@ def test_last_position_is_closed_by_backtrader_at_final_close():
         ("2024-01-02", 10, 10.1, 9.9, 10, 1000),
         ("2024-01-03", 11, 11.5, 10, 11.25, 1000),
     ])
-    result = simulate_fixed_trades(frame, [{
-        "signal_date": "2024-01-01", "entry_date": "2024-01-02",
-        "pattern_ids": ["p1"], "pattern_types": ["w_bottom"],
-    }])
+    result = simulate_fixed_trades(frame, [_signal_with_target()])
     assert result["trades"][0]["exit_reason"] == "end_of_period"
     assert result["trades"][0]["exit_price"] == 11.25
     assert result["order_events"][-1]["role"] == "end_of_period"
@@ -66,10 +218,7 @@ def test_same_day_stop_and_target_touch_fills_stop_first_at_stop_price():
         ("2024-01-02", 10, 10.1, 9.9, 10, 1000),
         ("2024-01-03", 10, 12.2, 8.7, 11, 1000),
     ])
-    result = simulate_fixed_trades(frame, [{
-        "signal_date": "2024-01-01", "entry_date": "2024-01-02",
-        "pattern_ids": ["p1"], "pattern_types": ["w_bottom"],
-    }])
+    result = simulate_fixed_trades(frame, [_signal_with_target(target=12.2)])
     trade = result["trades"][0]
     assert trade["exit_reason"] == "stop_loss"
     assert abs(trade["exit_price"] - 9.2) < 1e-9
@@ -84,10 +233,7 @@ def test_exit_children_do_not_trigger_on_entry_day():
         ("2024-01-03", 10, 11, 9.5, 10.5, 1000),
         ("2024-01-04", 10.5, 10.7, 10.2, 10.5, 1000),
     ])
-    result = simulate_fixed_trades(frame, [{
-        "signal_date": "2024-01-01", "entry_date": "2024-01-02",
-        "pattern_ids": ["p1"], "pattern_types": ["w_bottom"],
-    }])
+    result = simulate_fixed_trades(frame, [_signal_with_target(target=12.2)])
     assert result["trades"][0]["entry_date"] == "2024-01-02"
     assert result["trades"][0]["exit_date"] == "2024-01-04"
     assert result["trades"][0]["exit_reason"] == "end_of_period"
@@ -100,10 +246,7 @@ def test_entry_on_last_bar_is_rejected_to_preserve_t_plus_one_exit_rule():
         ("2024-01-01", 10, 10, 10, 10, 1000),
         ("2024-01-02", 10, 10.1, 9.9, 10, 1000),
     ])
-    result = simulate_fixed_trades(frame, [{
-        "signal_date": "2024-01-01", "entry_date": "2024-01-02",
-        "pattern_ids": ["p1"], "pattern_types": ["w_bottom"],
-    }])
+    result = simulate_fixed_trades(frame, [_signal_with_target()])
     assert result["trades"] == []
     assert result["rejections"][0]["reason"] == "no_next_t1_session"
 
@@ -122,7 +265,7 @@ def test_no_trade_and_no_loss_metrics_are_valid_nulls():
 
 
 def test_strategy_version_is_explicit():
-    assert STRATEGY_VERSION == "daily_four_patterns_fixed_8_20_v1"
+    assert STRATEGY_VERSION == "daily_four_patterns_measured_target_v2"
     assert fixed_backtest_module.SUPPORTED_STRATEGY_VERSIONS == {STRATEGY_VERSION}
 
 
@@ -223,8 +366,8 @@ def test_incremental_signal_reaches_backtrader_only_at_next_open(monkeypatch):
     frame=bars([("2024-02-05",10,10,10,10,1000),
                 ("2024-02-06",10.2,10.3,10.1,10.2,1000),
                 ("2024-02-07",10.3,10.4,10.2,10.3,1000)])
-    source=[dict(signal_date="2024-02-05",entry_date="2024-02-06",pattern_ids=["main"],
-                 pattern_types=["w_bottom"],pattern_tags=[dict(pattern_id="main",neckline_selection=dict(selected_candidate_id="neck-1"))])]
+    source=[{**_signal_with_target("main", target=12.0, signal_date="2024-02-05", entry_date="2024-02-06"),
+             "pattern_tags":[dict(pattern_id="main",neckline_selection=dict(selected_candidate_id="neck-1"))]}]
     monkeypatch.setattr(daily_incremental,"generate_daily_signals",lambda *a,**k: source)
     signals=fixed_backtest_module._prefix_signals(frame,"1d","AAA","stock")
     result=simulate_fixed_trades(frame,signals)

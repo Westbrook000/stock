@@ -1,3 +1,6 @@
+import pandas as pd
+import pytest
+
 from caisen.decision import _label, rank_scan_results, synthesize_decision
 
 
@@ -15,25 +18,48 @@ def pattern(pattern_type="w_bottom", direction="bullish", state="confirmed", tar
         "confirmation_date": "2026-10-10" if state == "confirmed" else None,
         "invalidation": 9.5,
         "targets": targets if targets is not None else [12.0],
+        "evidence": [{"code": "targets", "value": {"available": True, "prices": [12.0]}}],
         "volume_verified": False,
         "execution_rules_verified": False,
     }
     result.update(extra)
+    if pattern_type == "bull_flag" and "evidence" not in extra:
+        result["evidence"].append({"code": "flag_breakout", "value": {
+            "prior_high": 12.0, "impulse_size": 7.0}})
+        result["key_points"] = {"pivot_1": 5.0, "pivot_2": 12.0, "pivot_5": 9.0}
     return result
 
 
-def test_confirmed_bullish_plan_allows_unverified_volume_with_warnings():
+def scan_bars(date="2026-10-10", close=10.0):
+    return pd.DataFrame({"date": [date], "close": [close], "high": [close + .1], "low": [close - .1]})
+
+
+def test_confirmed_bullish_plan_does_not_require_metadata_verification():
     result = synthesize_decision(
         "000001", "stock", {"1d": [pattern()], "1w": []},
         {"1d": 10.0}, {"1d": "usable_with_warnings", "1w": "insufficient"},
+        bars_by_timeframe={"1d": scan_bars()},
     )
 
     assert result["action"] == "CONSIDER_BUY"
     assert result["selected_plan"]["pattern_id"] == "id-w_bottom"
     assert "volume_data_unverified" not in result["selected_plan"]["reason_codes"]
     assert result["data_quality"]["1w"] == "insufficient"
-    assert "volume unit or corporate-action adjustment is unverified" in result["selected_plan"]["data_warnings"]
+    assert result["selected_plan"]["data_warnings"] == []
     assert "probability" not in result
+
+
+def test_only_first_confirmation_day_can_create_a_scan_buy_action():
+    candidate = pattern()
+    result = synthesize_decision(
+        "000001", "stock", {"1d": [candidate], "1w": []},
+        {"1d": 10.0}, {"1d": "usable", "1w": "insufficient"},
+        bars_by_timeframe={"1d": [{"date": "2026-10-11"}]},
+    )
+
+    assert result["action"] == "WAIT"
+    assert result["selected_plan"] is None
+    assert result["candidate_plans"] == []
 
 
 def test_complete_main_bottom_waiting_for_neckline_is_not_labeled_as_unformed():
@@ -42,15 +68,28 @@ def test_complete_main_bottom_waiting_for_neckline_is_not_labeled_as_unformed():
     assert _label(candidate) == "W底，已成型，等待颈线有效突破"
 
 
+def test_expired_pattern_is_not_kept_as_an_active_decision_pattern():
+    expired = pattern(state="expired", evidence=[{"code": "main_structure", "value": {
+        "role": "main", "terminal_state": "expired"}}])
+
+    result = synthesize_decision(
+        "000001", "stock", {"1d": [expired], "1w": []},
+        {"1d": 10.0}, {"1d": "usable", "1w": "insufficient"},
+    )
+
+    assert result["reason_codes"] == ["no_current_pattern"]
+
+
 def test_only_three_migrated_bullish_bottom_shapes_can_create_buy_plans():
-    allowed = ("w_bottom", "inverse_head_shoulders", "triangle_bottom")
-    excluded = ("spring", "bull_flag", "bear_flag", "m_top", "false_breakout", "head_shoulders", "triangle_top")
+    allowed = ("w_bottom", "inverse_head_shoulders", "triangle_bottom", "bull_flag")
+    excluded = ("spring", "bear_flag", "m_top", "false_breakout", "head_shoulders", "triangle_top")
 
     for pattern_type in allowed:
         candidate = pattern(pattern_type, volume_verified=True, execution_rules_verified=True)
         result = synthesize_decision(
             "000001", "stock", {"1d": [candidate], "1w": []},
             {"1d": 10.0}, {"1d": "usable", "1w": "insufficient"},
+            bars_by_timeframe={"1d": scan_bars()},
         )
         assert result["selected_plan"]["decision"] == "CONSIDER_BUY", pattern_type
 
@@ -73,6 +112,7 @@ def test_one_qualified_timeframe_is_sufficient_for_buy_recommendation():
     result = synthesize_decision(
         "000001", "stock", {"1d": [daily], "1w": [weekly]},
         {"1d": 10.0, "1w": 10.0}, {"1d": "usable", "1w": "usable"},
+        bars_by_timeframe={"1d": scan_bars(), "1w": scan_bars()},
     )
     assert result["action"] == "CONSIDER_BUY"
     assert result["selected_plan"]["timeframe"] == "1d"
@@ -83,12 +123,14 @@ def test_main_bottom_shapes_can_pass_without_volume_and_use_fixed_fill_risk():
         candidate = pattern(
             pattern_type, volume_verified=False, execution_rules_verified=True,
             evidence=[{"code":"main_structure", "value":{"role":"main","signal_eligible":True}},
-                      {"code":"main_selection", "value":{"selected":True}},
-                      {"code":"volume_support", "value":{"status":"unknown"}}],
+                      {"code":"main_selection", "value":{"selected":True, "primary_pattern_id":"id-"+pattern_type}},
+                      {"code":"volume_support", "value":{"status":"unknown"}},
+                      {"code":"targets", "value":{"available":True,"prices":[12.0]}}],
         )
         result = synthesize_decision(
             "000001", "stock", {"1d": [candidate], "1w": []},
             {"1d": 10.0}, {"1d": "usable", "1w": "insufficient"},
+            bars_by_timeframe={"1d": scan_bars()},
         )
 
         assert result["action"] == "CONSIDER_BUY", pattern_type
@@ -97,17 +139,19 @@ def test_main_bottom_shapes_can_pass_without_volume_and_use_fixed_fill_risk():
         assert result["selected_plan"]["planned_risk_pct"] == .08
         assert result["selected_plan"]["reward_risk"] == 2.5
         assert result["selected_plan"]["stop_basis"] == "actual_entry_fixed_fraction"
-        assert result["selected_plan"]["data_warnings"]
+        assert result["selected_plan"]["data_warnings"] == []
 
 
 def test_main_bottom_requires_explicit_structure_signal_eligibility():
     candidate = pattern(
         "w_bottom", volume_verified=False,
-        evidence=[{"code":"main_structure", "value":{"role":"main","signal_eligible":False}}],
+        evidence=[{"code":"main_structure", "value":{"role":"main","signal_eligible":False}},
+                  {"code":"targets", "value":{"available":True,"prices":[12.0]}}],
     )
     result = synthesize_decision(
         "000001", "stock", {"1d": [candidate]},
         {"1d": 10.0}, {"1d": "usable"},
+        bars_by_timeframe={"1d": scan_bars()},
     )
 
     assert result["action"] == "WAIT"
@@ -118,7 +162,8 @@ def test_selected_main_structure_suppresses_nested_child_buy_plan():
     main = pattern(
         "w_bottom", pattern_id="main", volume_verified=False,
         evidence=[{"code":"main_structure", "value":{"role":"main","signal_eligible":True}},
-                  {"code":"main_selection", "value":{"selected":True}}],
+                  {"code":"main_selection", "value":{"selected":True,"primary_pattern_id":"main"}},
+                  {"code":"targets", "value":{"available":True,"prices":[12.0]}}],
     )
     child = pattern("bull_flag", pattern_id="child", parent_id="main",
                     volume_verified=True, execution_rules_verified=True,
@@ -127,6 +172,7 @@ def test_selected_main_structure_suppresses_nested_child_buy_plan():
     result = synthesize_decision(
         "000001", "stock", {"1d": [main, child]},
         {"1d": 10.0}, {"1d": "usable"},
+        bars_by_timeframe={"1d": scan_bars()},
     )
 
     assert result["action"] == "CONSIDER_BUY"
@@ -201,13 +247,14 @@ def test_bull_flag_plan_ignores_locked_measured_target_and_uses_fixed_actual_fil
         "bull_flag", volume_verified=False, execution_rules_verified=True,
         evidence=[{"code": "measured_target_locked", "value": True}],
     )
-    plan = build_trade_plan(locked_flag, 10.0)
+    plan = build_trade_plan(locked_flag, 10.0, bars=scan_bars())
 
-    assert plan["decision"] == "CONSIDER_BUY"
+    assert plan["decision"] == "WAIT"
     assert round(plan["stop"], 2) == 9.2
-    assert plan["targets"] == [12.0]
+    assert plan["targets"] == []
+    assert plan["measured_target_status"] == "missing"
     assert plan["stop_basis"] == "actual_entry_fixed_fraction"
-    assert "volume unit or corporate-action adjustment is unverified" in plan["data_warnings"]
+    assert plan["data_warnings"] == []
 
 
 def test_unsupported_bearish_pattern_does_not_enter_new_path_conflict_logic():
@@ -215,6 +262,7 @@ def test_unsupported_bearish_pattern_does_not_enter_new_path_conflict_logic():
         "000001", "stock",
         {"1d": [pattern(direction="bullish")], "1w": [pattern("head_shoulders", "bearish")]},
         {"1d": 10.0, "1w": 10.0}, {"1d": "usable", "1w": "usable"},
+        bars_by_timeframe={"1d": scan_bars(), "1w": scan_bars()},
     )
 
     assert result["action"] == "CONSIDER_BUY"
@@ -227,6 +275,7 @@ def test_unsupported_bearish_signal_does_not_trigger_sell_warning():
     result = synthesize_decision(
         "000001", "stock", {"1d": [pattern("m_top", "bearish")]},
         {"1d": 10.0}, {"1d": "usable"},
+        bars_by_timeframe={"1d": scan_bars()},
     )
     assert result["action"] == "WAIT"
     assert result["reason_codes"] == ["no_current_pattern"]
@@ -253,18 +302,20 @@ def test_bullish_structure_with_existing_position_can_be_hold():
 
 
 def test_fixed_8_20_execution_ignores_legacy_structural_risk_and_shape_target():
-    candidate = pattern(invalidation=9.0, targets=[10.9])
+    candidate = pattern(invalidation=9.0, targets=[10.9],
+                        evidence=[{"code":"targets", "value":{"available":True,"prices":[10.9]}}])
     result = synthesize_decision(
         "000001", "stock", {"1d": [candidate]},
         {"1d": 10.0}, {"1d": "usable"},
+        bars_by_timeframe={"1d": scan_bars()},
     )
     plan = result["selected_plan"]
     assert result["action"] == "CONSIDER_BUY"
     assert round(plan["stop"], 2) == 9.2
-    assert plan["targets"] == [12.0]
+    assert plan["targets"] == [10.9]
     assert plan["shape_targets"] == [10.9]
     assert plan["planned_risk_pct"] == .08
-    assert plan["reward_risk"] == 2.5
+    assert plan["reward_risk"] == pytest.approx(1.125)
     assert plan["highest_allowed_entry"] is None
 
 
@@ -272,6 +323,7 @@ def test_missing_weekly_data_never_counts_as_a_confirmed_timeframe():
     result = synthesize_decision(
         "000001", "stock", {"1d": [pattern(volume_verified=True)], "1w": []},
         {"1d": 10.0}, {"1d": "usable_with_warnings", "1w": "insufficient"},
+        bars_by_timeframe={"1d": scan_bars()},
     )
     assert result["action"] == "CONSIDER_BUY"
     assert result["rank"]["confirmed_timeframes"] == 1
@@ -294,6 +346,45 @@ def test_buy_scan_sort_is_rule_based_and_stable():
     assert [item["code"] for item in rank_scan_results(records)] == ["000001", "000002", "000003"]
 
 
+def test_decision_only_selects_pattern_ids_from_emitted_first_confirmation_signals():
+    selected = pattern(pattern_id="emitted-primary", confirmation_date="2026-10-10",
+                       evidence=[{"code": "targets", "value": {"available": True, "prices": [13.0]}}])
+    sibling = pattern("inverse_head_shoulders", pattern_id="unemitted-sibling",
+                      confirmation_date="2026-10-10",
+                      evidence=[{"code": "targets", "value": {"available": True, "prices": [14.0]}}])
+    bars = pd.DataFrame({"date": ["2026-10-10"], "close": [10.0], "high": [10.1], "low": [9.9]})
+    result = synthesize_decision(
+        "000001", "stock", {"1d": [selected, sibling], "1w": []},
+        {"1d": 10.0}, {"1d": "usable"}, bars_by_timeframe={"1d": bars},
+        allowed_pattern_ids_by_timeframe={"1d": {"emitted-primary"}},
+    )
+    assert result["action"] == "CONSIDER_BUY"
+    assert result["selected_plan"]["pattern_id"] == "emitted-primary"
+
+
+def test_missing_primary_target_waits_instead_of_using_valid_secondary_flag_target():
+    primary = pattern("w_bottom", pattern_id="emitted-main",
+                      evidence=[
+                          {"code": "main_structure", "value": {"role": "main", "signal_eligible": True}},
+                          {"code": "main_selection", "value": {"selected": True,
+                                                                      "primary_pattern_id": "emitted-main"}},
+                      ])
+    secondary = pattern("bull_flag", pattern_id="secondary-flag",
+                        evidence=[{"code": "flag_breakout", "value": {
+                            "prior_high": 12.0, "impulse_size": 7.0}}])
+    secondary["key_points"] = {"pivot_1": 5.0, "pivot_2": 12.0, "pivot_5": 9.0}
+    bars = scan_bars()
+    result = synthesize_decision(
+        "000001", "stock", {"1d": [primary, secondary], "1w": []},
+        {"1d": 10.0}, {"1d": "usable"}, bars_by_timeframe={"1d": bars},
+        allowed_pattern_ids_by_timeframe={"1d": {"emitted-main"}},
+    )
+    assert result["action"] == "WAIT"
+    assert result["selected_plan"] is None
+    assert [plan["pattern_id"] for plan in result["candidate_plans"]] == ["emitted-main"]
+    assert "missing_measured_target" in result["candidate_plans"][0]["reason_codes"]
+
+
 def test_main_bottom_keeps_neckline_as_structure_reference_but_stop_uses_actual_fill():
     candidate = pattern(
         "w_bottom", pattern_id="main-stop", invalidation=8.0, targets=[16.0],
@@ -301,12 +392,15 @@ def test_main_bottom_keeps_neckline_as_structure_reference_but_stop_uses_actual_
             {"code":"main_structure","value":{"role":"main","signal_eligible":True,
              "neckline_at_observed":13.0,"plan_stop_level":12.98,"support_lower":8.0,
              "support_upper":8.5,"first_trough_date":"2024-01-01"}},
-            {"code":"main_selection","value":{"selected":True}},
+            {"code":"main_selection","value":{"selected":True,"primary_pattern_id":"main-stop"}},
+                {"code":"neckline_breakout","value":{"frozen_neckline":13.0}},
+            {"code":"targets","value":{"available":True,"prices":[16.68]}},
         ],
     )
     result = synthesize_decision(
         "000001", "stock", {"1d":[candidate]},
         {"1d":13.9}, {"1d":"usable"},
+        bars_by_timeframe={"1d":scan_bars(close=13.9)},
     )
 
     plan = result["selected_plan"]
@@ -317,4 +411,4 @@ def test_main_bottom_keeps_neckline_as_structure_reference_but_stop_uses_actual_
     assert plan["stop_basis"] == "actual_entry_fixed_fraction"
     assert plan["main_bottom_reference"]["support_lower"] == 8.0
     assert plan["planned_risk_pct"] == .08
-    assert plan["reward_risk"] == 2.5
+    assert plan["reward_risk"] == pytest.approx(2.5)

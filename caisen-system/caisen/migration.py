@@ -7,6 +7,7 @@ SUPPORTED_NEW_PATH_TYPES = (
     "w_bottom",
     "inverse_head_shoulders",
     "triangle_bottom",
+    "bull_flag",
 )
 UNSUPPORTED_REASON = "not_migrated_to_causal_main_engine"
 

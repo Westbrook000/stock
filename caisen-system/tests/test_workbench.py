@@ -27,11 +27,16 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
                    InstrumentFile("000003", "stock", "bad.csv")]
     bullish = Pattern(pattern_id="pattern-1", code="000001", kind="stock", timeframe="1d",
                pattern_type="w_bottom", direction="bullish", state="confirmed",
-               formed_at="2026-10-01", confirmed_at=10, confirmation_date="2026-10-15",
+               formed_at="2026-10-01", confirmed_at=10, confirmation_date="2026-10-16",
                invalidation=9.6, targets=[12.0], volume_verified=True,
         execution_rules_verified=False,
         evidence=[{"code":"main_structure", "value":{"role":"main","signal_eligible":True}},
-                  {"code":"main_selection", "value":{"selected":True}}])
+                  {"code":"main_selection", "value":{"selected":True,"decided_at":"2026-10-16",
+                                                            "primary_pattern_id":"pattern-1"}},
+                  {"code":"targets", "value":{"prices":[12.0],"available":True}}])
+    bullish_signal = {"signal_date":"2026-10-16","entry_date":None,
+                      "pattern_ids":["pattern-1"],"pattern_types":["w_bottom"],
+                      "pattern":bullish.to_dict(),"patterns":[bullish.to_dict()]}
 
     monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
     def load(instrument, root):
@@ -40,10 +45,17 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
         return MarketDataResult(instrument, bars=make_bars(), quality_status="usable_with_warnings",
                                 warnings=["fixture provenance warning"], data_version="fixture-v1")
     def weekly(result, **kwargs):
-        return MarketDataResult(result.instrument, quality_status="insufficient", warnings=["calendar missing"])
+        if isinstance(result, MarketDataResult):
+            return MarketDataResult(result.instrument, quality_status="insufficient",
+                                    warnings=["calendar missing"])
+        return pd.DataFrame()
     monkeypatch.setattr(api, "load_daily_bars", load)
     monkeypatch.setattr(api, "aggregate_weekly", weekly)
-    monkeypatch.setattr(api, "detect_main_bottoms", lambda bars, code, kind, tf, **kwargs: [bullish] if code == "000001" and tf == "1d" else [])
+    monkeypatch.setattr(api, "recognize_daily_history", lambda *args, **kwargs: {
+        "patterns": [bullish] if args[1] == "000001" else [],
+        "signals": [bullish_signal] if args[1] == "000001" else [], "performance": {}})
+    monkeypatch.setattr(api, "recognize_weekly_history", lambda *args, **kwargs: {
+        "patterns": [], "signals": [], "performance": {}})
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
@@ -96,31 +108,35 @@ def test_scan_request_rejects_invalid_prefilters():
         api.start_scan({"timeframes": ["1d"], "date_from": "not-a-date"})
 
 
-def test_scan_date_window_slices_before_weekly_aggregation_and_pattern_detection(monkeypatch):
+def test_scan_date_cutoff_precedes_weekly_aggregation_but_keeps_earlier_background(monkeypatch):
     result = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
     weekly_dates = []
     detected_dates = []
-    background_dates = []
     monkeypatch.setattr(api, "discover_instruments", lambda root: [result.instrument])
     monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: result)
     def aggregate(sliced, **kwargs):
-        weekly_dates.extend(sliced.bars.date.dt.strftime("%Y-%m-%d").tolist())
-        return MarketDataResult(sliced.instrument, bars=sliced.bars.tail(1).copy(), quality_status="usable")
-    def detect(frame, *args, **kwargs):
+        source = sliced.bars if isinstance(sliced, MarketDataResult) else sliced
+        weekly_dates.append(source.date.dt.strftime("%Y-%m-%d").tolist())
+        weekly = source.tail(1).copy()
+        return (MarketDataResult(sliced.instrument, bars=weekly, quality_status="usable")
+                if isinstance(sliced, MarketDataResult) else weekly)
+    def recognize_weekly(frame, *args, **kwargs):
         detected_dates.extend(frame.date.dt.strftime("%Y-%m-%d").tolist())
-        background_dates.extend(kwargs["background_bars"].date.dt.strftime("%Y-%m-%d").tolist())
-        return []
+        return {"patterns": [], "signals": [], "performance": {}}
     monkeypatch.setattr(api, "aggregate_weekly", aggregate)
-    monkeypatch.setattr(api, "detect_main_bottoms", detect)
+    def recognize_daily(frame, *args, **kwargs):
+        detected_dates.extend(frame.date.dt.strftime("%Y-%m-%d").tolist())
+        return {"patterns": [], "signals": [], "performance": {}}
+    monkeypatch.setattr(api, "recognize_daily_history", recognize_daily)
+    monkeypatch.setattr(api, "recognize_weekly_history", recognize_weekly)
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
     api._scan_worker("window-job", {"timeframes": ["1d", "1w"], "date_from": "2026-10-15", "date_to": "2026-10-15"}, executor_factory=ThreadPoolExecutor)
 
     row = api._jobs["window-job"]["results"][0]
-    assert weekly_dates == ["2026-10-15"]
-    assert detected_dates == ["2026-10-15", "2026-10-15"]
-    assert background_dates == ["2026-10-14", "2026-10-15", "2026-10-14", "2026-10-15"]
+    assert weekly_dates == [["2026-10-14", "2026-10-15"]]
+    assert detected_dates == ["2026-10-14", "2026-10-15", "2026-10-15"]
     assert row["latest_date"] == "2026-10-15"
     assert row["analysis_window"] == {"requested_from":"2026-10-15", "requested_to":"2026-10-15",
                                        "from":"2026-10-15", "to":"2026-10-15",
@@ -154,7 +170,10 @@ def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(
     monkeypatch.setattr(api, "discover_instruments", lambda root: [instrument])
     monkeypatch.setattr(api, "load_daily_bars", lambda item, root: MarketDataResult(item, bars=make_bars()))
     monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
-    monkeypatch.setattr(api, "detect_main_bottoms", lambda *args, **kwargs: [w_bottom, m_top])
+    monkeypatch.setattr(api, "recognize_daily_history", lambda *args, **kwargs: {
+        "patterns": [w_bottom, m_top], "signals": [], "performance": {}})
+    monkeypatch.setattr(api, "recognize_weekly_history", lambda *args, **kwargs: {
+        "patterns": [], "signals": [], "performance": {}})
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("scan must not call the legacy recognizer")))
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
@@ -187,7 +206,9 @@ def test_backtest_page_has_one_fixed_daily_research_entry():
     assert "fetchJson('/api/v1/backtests'" in js
     assert "fetchJson('/api/v1/fixed-backtests'" not in js
     assert "strategy_version:$(`" not in js and "fixedStrategyVersion" not in js and "cash:100000" not in js
-    assert "日线策略回测" in html and "实际成交后按 8% 止损、20% 止盈" in html
+    assert "日线策略回测" in html and "实际成交后按 8% 止损" in html
+    assert "本次信号形态的冻结等幅测算目标" in html
+    assert "未找到有效形态目标的信号不入场" in html
     assert "候选结构反转距离为 2×ATR" in html
     assert "突破收盘需高于冻结颈线至少 1×前一根已完成 ATR" in html
     assert "不启用试验性的 min3 颈线或开盘价过滤" in html
@@ -200,12 +221,24 @@ def test_backtest_page_has_one_fixed_daily_research_entry():
 def test_modified_workbench_assets_use_current_cache_version():
     from pathlib import Path
     html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
-    for asset in ("pattern-chart.js", "app.js"):
-        expected_version = "20261105-backtest-effective-config-v2" if asset == "app.js" else "20261031-neckline-v2"
-        assert f"/static/{asset}?v={expected_version}" in html
-    for asset in ("app.css", "refresh_report.js", "scan-filters.js", "http-client.js", "fixed-backtest-report.js"):
+    assert "/static/pattern-chart.js?v=20261120-anchor-offset" in html
+    assert "/static/app.js?v=20261122-relative-neckline-height" in html
+    assert "/static/app.css?v=20261120-watch-window" in html
+    for asset in ("refresh_report.js", "scan-filters.js", "http-client.js"):
         assert f"/static/{asset}?v=20261029v7" in html
+    assert "/static/fixed-backtest-report.js?v=20261029v8-measured-target" in html
     assert "20261027v6" not in html
+
+
+def test_backtest_job_ui_respects_saved_historical_target_metadata():
+    from pathlib import Path
+    app = (Path(__file__).parents[1] / "caisen" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "savedTargetFraction=trading.target_fraction??params.target_pct" in app
+    assert "固定止盈 ${Number(savedTargetFraction)*100}%" in app
+    assert "targetMethod==='signal_pattern_first_measured_target'?'信号形态首个有效等幅目标'" in app
+    assert "targetMethod==='signal_pattern_first_measured_target'?'（旗形等收盘突破前高）':''" in app
+    assert "止盈规则 未记录" in app and "止损规则 未记录" in app
+    assert "Number(trading.stop_fraction??0.08)" not in app
 
 
 def test_workbench_html_contains_one_click_scan_and_detail_navigation():
@@ -253,13 +286,16 @@ def test_scan_results_filter_after_completion_without_resubmitting_the_scan():
     assert 'id="resetScanFilters"' in html
     assert "全部十招" in html
     assert "全部 12 招" not in html
-    assert "CaisenScanFilters.filterScanRows(scanRows" in js
-    assert "筛选后 ${visibleScanRows.length} / ${scanRows.length}" in js
+    assert "CaisenScanResults.buildQuery" in js
+    assert "筛选后 ${scanTotal} / ${count}" in js
+    assert "/api/v1/scans/${encodeURIComponent(scanRunId)}/results?${query}" in js
+    assert "current.results" not in js
     assert "没有标的符合当前筛选" in js
     assert "pattern_type:$('scanPattern')" not in js
     assert "/static/scan-filters.js" in html
+    assert "/static/scan-results.js?v=20261117-v1" in html
     filtering = js.split("function applyScanFilters", 1)[1].split("function renderScan", 1)[0]
-    assert "fetch(" not in filtering
+    assert "loadScanResultPage" in filtering
 
 
 def test_pattern_card_distinguishes_engine_and_source_rule_versions():
@@ -306,21 +342,25 @@ def test_detail_chart_returns_full_history_and_preview_weekly_bars(monkeypatch):
     weekly_payload = api.analysis("000001", timeframe="1w")
 
     assert len(daily_payload["_bars"]) == len(daily)
-    assert daily_payload["_chart_offset"] == len(daily) - 500
+    assert daily_payload["_chart_offset"] == 0  # fewer than five calendar years
     assert weekly_payload["chart_is_preview"] is True
     assert len(weekly_payload["_bars"]) == len(weekly_preview)
 
 
-def test_weekly_analysis_uses_full_daily_history_as_quality_background(monkeypatch):
+def test_weekly_analysis_uses_full_weekly_prefix_in_shared_session(monkeypatch):
     daily = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
     weekly = MarketDataResult(daily.instrument, bars=daily.bars.tail(1).copy(), quality_status="usable")
     seen = {}
     monkeypatch.setattr(api, "_market_data", lambda code, kind: daily)
     monkeypatch.setattr(api, "aggregate_weekly", lambda result, calendar=None: weekly)
-    def detect(frame, code, kind, timeframe, **kwargs):
-        seen[timeframe] = kwargs["background_bars"].date.dt.strftime("%Y-%m-%d").tolist()
-        return []
-    monkeypatch.setattr(api, "detect_main_bottoms", detect)
+    def recognize_weekly(frame, code, kind, **kwargs):
+        seen["1w"] = frame.date.dt.strftime("%Y-%m-%d").tolist()
+        return {"patterns": [], "signals": [], "performance": {}}
+    def recognize_daily(frame, code, kind, **kwargs):
+        seen["1d"] = frame.date.dt.strftime("%Y-%m-%d").tolist()
+        return {"patterns": [], "signals": [], "performance": {}}
+    monkeypatch.setattr(api, "recognize_daily_history", recognize_daily)
+    monkeypatch.setattr(api, "recognize_weekly_history", recognize_weekly)
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
     monkeypatch.setattr(api, "synthesize_decision", lambda *args, **kwargs: {"action": "WAIT"})
 
@@ -328,7 +368,7 @@ def test_weekly_analysis_uses_full_daily_history_as_quality_background(monkeypat
 
     expected = daily.bars.date.dt.strftime("%Y-%m-%d").tolist()
     assert seen["1d"] == expected
-    assert seen["1w"] == expected
+    assert seen["1w"] == weekly.bars.date.dt.strftime("%Y-%m-%d").tolist()
 
 
 def test_detail_chart_exposes_range_controls_and_both_zoom_modes():
@@ -645,10 +685,11 @@ def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monke
     assert result["status"] == "partial_failed"
     assert result["scanned"] == result["total"] == 12
     assert progress_updates == [*range(1, 13), 12]
-    assert result["results"][0]["code"] == "000009"
-    assert result["results"][-1]["state"] == "data_error"
+    assert "results" not in result
+    assert result["result_count"] == 12
+    assert saved[0]["code"] == "000009"
+    assert saved[-1]["state"] == "data_error"
     assert total == 12
-    assert [row["code"] for row in saved] == [row["code"] for row in result["results"]]
-    assert saved == result["results"]
+    assert len(saved) == result["result_count"]
     assert run["status"] == "partial_failed"
     assert run["scanned"] == 12 and run["progress"] == 1

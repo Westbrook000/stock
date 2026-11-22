@@ -1,4 +1,4 @@
-"""Causal fixed 8% stop / 20% target pattern replay.
+"""Causal fixed 8% stop / measured-pattern-target replay.
 
 Each code/timeframe is an isolated cash account. Signal discovery is causal:
 the recognizer only sees bars available at that observation, while retaining
@@ -21,17 +21,19 @@ from .migration import migration_status
 
 STRATEGY_VERSION_V1 = "pattern_fixed_8_20_v1"
 STRATEGY_VERSION_V2 = "pattern_fixed_8_20_main_parent_v2"
-STRATEGY_VERSION = "daily_four_patterns_fixed_8_20_v1"
+STRATEGY_VERSION = "daily_four_patterns_measured_target_v2"
 SUPPORTED_STRATEGY_VERSIONS = frozenset({STRATEGY_VERSION})
 MAIN_BOTTOM_TYPES = {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}
 PATTERN_TYPES = set(MAIN_BOTTOM_TYPES) | {"bull_flag"}
 LOT_SIZE = 100
 STARTING_CASH = 100000.0
 STOP_FRACTION = 0.08
-TARGET_FRACTION = 0.20
+TARGET_FRACTION = None
+TARGET_METHOD = "signal_pattern_first_measured_target"
 EXPERIMENT_BASELINE = "baseline_four_type_v1"
 EXPERIMENT_OPEN_ADMISSION = "open_admission_four_tags_v1"
 EXPERIMENT_NECKLINE_MIN3 = "neckline_min3_v1"
+EXPERIMENT_NECKLINE_SPAN_FIRST = "neckline_span_first_v1"
 EXPERIMENT_PATTERN_TYPES = frozenset(PATTERN_TYPES)
 
 
@@ -88,10 +90,193 @@ def calculate_metrics(trades, starting_cash, ending_equity, daily_equity):
     }
 
 
+def _pattern_value(pattern, code):
+    for item in pattern.get("evidence", []) or []:
+        if isinstance(item, dict) and item.get("code") == code:
+            return item.get("value") or {}
+    return {}
+
+
+def _signal_pattern_payloads(signal):
+    """Recover full snapshots only by the exact pattern id carried by the signal."""
+    snapshots = {}
+    for pattern in signal.get("patterns", []) or []:
+        if isinstance(pattern, dict) and pattern.get("pattern_id"):
+            snapshots[str(pattern["pattern_id"])] = pattern
+    pattern = signal.get("pattern")
+    if isinstance(pattern, dict) and pattern.get("pattern_id"):
+        snapshots[str(pattern["pattern_id"])] = pattern
+    primary_id = signal.get("primary_pattern_id") or signal.get("pattern_id")
+    if not primary_id and isinstance(pattern, dict):
+        primary_id = pattern.get("pattern_id")
+    if not primary_id:
+        primary_id = next(iter(signal.get("pattern_ids", []) or []), None)
+    if not primary_id:
+        primary_id = next((item.get("pattern_id") for item in signal.get("pattern_tags", []) or []
+                           if isinstance(item, dict)), None)
+    if not primary_id:
+        return []
+    return [(str(primary_id), snapshots.get(str(primary_id)))]
+
+
+def _signal_global_index(pattern, signal_date, bars, date_to_index):
+    value = pattern.get("confirmed_at")
+    try:
+        if value is not None and math.isfinite(float(value)):
+            return int(value)
+    except (TypeError, ValueError):
+        pass
+    breakout = _pattern_value(pattern, "neckline_breakout")
+    value = breakout.get("index")
+    try:
+        if value is not None and math.isfinite(float(value)):
+            return int(value)
+    except (TypeError, ValueError):
+        pass
+    local_signal = date_to_index.get(str(signal_date))
+    key_points = pattern.get("key_points", {}) or {}
+    for key, anchor_date in key_points.items():
+        if not key.startswith("pivot_") or not key.endswith("_date") or not anchor_date:
+            continue
+        try:
+            anchor_index = int(key_points[key[:-5] + "_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        local_anchor = date_to_index.get(str(anchor_date)[:10])
+        if local_signal is not None and local_anchor is not None:
+            return anchor_index + local_signal - local_anchor
+    return local_signal
+
+
+def _measured_pattern_target(pattern, signal, bars, date_to_index):
+    """Return an active frozen target or a bull-flag target that awaits its high break."""
+    pattern_type = pattern.get("pattern_type")
+    if pattern.get("direction") not in (None, "bullish"):
+        return None
+    signal_date = str(signal.get("signal_date"))[:10]
+    breakout = _pattern_value(pattern, "neckline_breakout")
+    if pattern_type == "bull_flag":
+        flag = _pattern_value(pattern, "flag_breakout")
+        geometry = _pattern_value(pattern, "flag_geometry")
+        points = pattern.get("key_points", {}) or {}
+        anchors = geometry.get("anchors") or []
+        try:
+            wave_low = float(points["pivot_1"])
+            first_wave_high = float(flag.get("prior_high", points.get("pivot_2")))
+            pullback_value = points.get("pivot_5")
+            if pullback_value is None:
+                pullback_value = anchors[4]["price"]
+            pullback_low = float(pullback_value)
+        except (KeyError, IndexError, TypeError, ValueError):
+            try:
+                wave_low = float(anchors[0]["price"])
+                first_wave_high = float(anchors[1]["price"])
+                pullback_low = float(anchors[4]["price"])
+            except (KeyError, IndexError, TypeError, ValueError):
+                return None
+        impulse = float(flag.get("impulse_size", first_wave_high - wave_low))
+        if not all(math.isfinite(value) for value in (wave_low, first_wave_high, pullback_low, impulse)) or impulse <= 0:
+            return None
+        signal_index = date_to_index.get(signal_date)
+        signal_close = (float(bars.iloc[signal_index].close) if signal_index is not None else
+                        float(flag.get("close", float("nan"))))
+        if signal_close > first_wave_high:
+            return {"price": pullback_low + impulse, "status": "active",
+                    "source_pattern_id": pattern.get("pattern_id"),
+                    "method": "bull_flag_pullback_low_plus_first_wave_impulse",
+                    "unlocked_date": signal_date}
+        return {"price": None, "status": "pending_prior_high",
+                "source_pattern_id": pattern.get("pattern_id"),
+                "method": "bull_flag_pullback_low_plus_first_wave_impulse",
+                "first_wave_high": first_wave_high, "pullback_low": pullback_low,
+                "impulse": impulse}
+
+    stored = _pattern_value(pattern, "targets")
+    prices = stored.get("prices") or []
+    try:
+        target = float(prices[0])
+        if stored.get("available") is not False and math.isfinite(target) and target > 0:
+            return {"price": target, "status": "active", "source_pattern_id": pattern.get("pattern_id"),
+                    "method": "stored_frozen_pattern_measured_target"}
+    except (IndexError, TypeError, ValueError):
+        pass
+
+    points = pattern.get("key_points", {}) or {}
+    low_pivots = []
+    for key, price in points.items():
+        if not key.startswith("pivot_") or not key[6:].isdigit():
+            continue
+        number = key[6:]
+        if points.get("pivot_%s_kind" % number) != "low":
+            continue
+        try:
+            low_pivots.append((int(points["pivot_%s_index" % number]), float(price)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    low_pivots.sort()
+    line = pattern.get("neckline") or _pattern_value(pattern, "main_structure").get("neckline")
+    signal_index = _signal_global_index(pattern, signal_date, bars, date_to_index)
+    if not low_pivots or not isinstance(line, dict) or signal_index is None:
+        return None
+    try:
+        slope, intercept = float(line["slope"]), float(line["intercept"])
+        signal_close = (float(bars.iloc[date_to_index[signal_date]].close)
+                        if signal_date in date_to_index else float(breakout["close"]))
+        frozen_neckline = breakout.get("frozen_neckline")
+        neckline_at_signal = (float(frozen_neckline) if frozen_neckline is not None
+                              else slope * signal_index + intercept)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+    if pattern_type == "w_bottom":
+        height = neckline_at_signal - sum(price for _, price in low_pivots) / len(low_pivots)
+    elif pattern_type == "inverse_head_shoulders":
+        height = neckline_at_signal - min(price for _, price in low_pivots)
+    elif pattern_type == "triangle_bottom":
+        lower_slope = ((low_pivots[-1][1] - low_pivots[0][1]) /
+                       (low_pivots[-1][0] - low_pivots[0][0])
+                       if low_pivots[-1][0] != low_pivots[0][0] else 0.0)
+        lower_intercept = low_pivots[0][1] - lower_slope * low_pivots[0][0]
+        first_trough = int(points.get("first_trough_index", low_pivots[0][0]))
+        height = (slope * first_trough + intercept) - (lower_slope * first_trough + lower_intercept)
+    else:
+        return None
+    if not math.isfinite(height) or height <= 0:
+        return None
+    target = signal_close + height
+    if not math.isfinite(target) or target <= 0:
+        return None
+    return {"price": target, "status": "active", "source_pattern_id": pattern.get("pattern_id"),
+            "method": "signal_close_plus_frozen_structure_height"}
+
+
+def _select_measured_target(signal, entry_price, bars, date_to_index):
+    pending = None
+    invalid = False
+    for pattern_id, pattern in _signal_pattern_payloads(signal):
+        if not isinstance(pattern, dict) or str(pattern.get("pattern_id")) != pattern_id:
+            continue
+        measured = _measured_pattern_target(pattern, signal, bars, date_to_index)
+        if measured is None:
+            continue
+        if measured["status"] == "pending_prior_high":
+            pending = pending or measured
+            continue
+        if float(measured["price"]) > float(entry_price):
+            return measured
+        invalid = True
+    if pending is not None:
+        return pending
+    return {"price": None, "status": "invalid" if invalid else "missing",
+            "source_pattern_id": None, "method": TARGET_METHOD}
+
+
 class _FixedRiskRewardStrategy(bt.Strategy):
-    params = (("signals", None), ("lot_size", LOT_SIZE), ("last_date", None))
+    params = (("signals", None), ("lot_size", LOT_SIZE), ("last_date", None),
+              ("bars", None), ("date_to_index", None))
 
     def __init__(self):
+        self.bars = self.p.bars
+        self.date_to_index = self.p.date_to_index
         self.by_entry = defaultdict(list)
         for signal in self.p.signals:
             self.by_entry[_iso(signal["entry_date"])].append(dict(signal))
@@ -106,6 +291,19 @@ class _FixedRiskRewardStrategy(bt.Strategy):
 
     def next_open(self):
         today = self.data.datetime.date(0).isoformat()
+        if self.position.size and self.position_meta and self.position_meta.get("target_overshot"):
+            if float(self.data.open[0]) <= self.position_meta["stop_price"]:
+                # Preserve the stop's gap fill when the next open crosses it.
+                self.position_meta["target_overshot"] = False
+            else:
+                for order in self.exit_orders.values():
+                    if order.alive():
+                        self.cancel(order)
+                order = self.close(exectype=bt.Order.Market)
+                self.pending = order.ref
+                self.order_meta[order.ref] = {"role": "measured_target_already_passed"}
+                self.position_meta["target_overshot"] = False
+                return
         if self.position.size:
             for signal in self.by_entry.get(today, []):
                 self.rejections.append({"signal_date": signal["signal_date"], "entry_date": today,
@@ -116,6 +314,18 @@ class _FixedRiskRewardStrategy(bt.Strategy):
             return
         for signal in self.by_entry.get(today, []):
             opening = float(self.data.open[0])
+            measured = _select_measured_target(signal, opening, self.bars,
+                                               self.date_to_index)
+            if measured["status"] == "missing":
+                self.rejections.append({"signal_date": signal["signal_date"], "entry_date": today,
+                                        "pattern_ids": signal.get("pattern_ids", []),
+                                        "reason": "missing_measured_target"})
+                continue
+            if measured["status"] == "invalid":
+                self.rejections.append({"signal_date": signal["signal_date"], "entry_date": today,
+                                        "pattern_ids": signal.get("pattern_ids", []),
+                                        "reason": "measured_target_not_above_entry"})
+                continue
             lot = int(signal.get("lot_size", self.p.lot_size))
             shares = int(self.broker.getcash() // (opening * lot)) * lot
             if shares <= 0:
@@ -125,7 +335,8 @@ class _FixedRiskRewardStrategy(bt.Strategy):
             order = self.buy(size=shares, exectype=bt.Order.Market)
             self.pending = order.ref
             self.order_meta[order.ref] = {"role": "entry", "signal": signal, "shares": shares,
-                                          "signal_date": signal["signal_date"]}
+                                          "signal_date": signal["signal_date"],
+                                          "measured_target": measured}
             break
 
     def next(self):
@@ -139,6 +350,22 @@ class _FixedRiskRewardStrategy(bt.Strategy):
             order = self.close(exectype=bt.Order.Market)
             self.pending = order.ref
             self.order_meta[order.ref] = {"role": "end_of_period"}
+        elif self.position.size and self.position_meta and self.position_meta.get("measured_target_status") == "pending_prior_high":
+            target_meta = self.position_meta
+            if float(self.data.close[0]) > target_meta["first_wave_high"]:
+                target = target_meta["pullback_low"] + target_meta["impulse"]
+                target_meta.update({"target_price": float(target), "measured_target_price": float(target),
+                                    "measured_target_status": "active",
+                                    "measured_target_unlocked_date": today})
+                if target <= float(self.data.close[0]):
+                    target_meta["target_overshot"] = True
+                else:
+                    stop = next((order for order in self.exit_orders.values()
+                                 if self.order_meta.get(order.ref, {}).get("role") == "stop_loss"), None)
+                    limit = self.sell(size=target_meta["shares"], exectype=bt.Order.Limit,
+                                      price=target, oco=stop)
+                    self.exit_orders[limit.ref] = limit
+                    self.order_meta[limit.ref] = {"role": "take_profit"}
         close = float(self.data.close[0])
         invested_value = float(self.position.size) * close
         self.curve.append({"date": today, "cash": float(self.broker.getcash()),
@@ -162,6 +389,7 @@ class _FixedRiskRewardStrategy(bt.Strategy):
                                       "cash_after": float(self.broker.getcash())})
             if role == "entry":
                 signal = meta["signal"]
+                measured = meta["measured_target"]
                 self.position_meta = {"entry_index": len(self) - 1, "entry_date": date,
                                       "entry_price": float(order.executed.price), "shares": abs(int(order.executed.size)),
                                       "signal_date": signal["signal_date"], "pattern_ids": signal.get("pattern_ids", []),
@@ -169,18 +397,31 @@ class _FixedRiskRewardStrategy(bt.Strategy):
                                       "pattern_tags": signal.get("pattern_tags", []),
                                       "pattern_labels": signal.get("pattern_labels", []),
                                       "stop_price": float(order.executed.price) * (1 - STOP_FRACTION),
-                                      "target_price": float(order.executed.price) * (1 + TARGET_FRACTION),
+                                      "target_price": measured.get("price"),
+                                      "target_fraction": None, "target_method": measured.get("method"),
+                                      "measured_target_price": measured.get("price"),
+                                      "measured_target_source_pattern_id": measured.get("source_pattern_id"),
+                                      "measured_target_status": measured["status"],
+                                      "measured_target_method": measured.get("method"),
+                                      "measured_target_unlocked_date": measured.get("unlocked_date"),
+                                      "first_wave_high": measured.get("first_wave_high"),
+                                      "pullback_low": measured.get("pullback_low"),
+                                      "impulse": measured.get("impulse"),
                                       "split": signal.get("split", "development")}
                 # These children are submitted only after the entry fill. The
                 # broker cannot evaluate them against the already processed
                 # entry bar; it activates them on the next trading bar (T+1).
                 stop = self.sell(size=self.position_meta["shares"], exectype=bt.Order.Stop,
                                  price=self.position_meta["stop_price"])
-                target = self.sell(size=self.position_meta["shares"], exectype=bt.Order.Limit,
-                                   price=self.position_meta["target_price"], oco=stop)
-                self.exit_orders = {stop.ref: stop, target.ref: target}
+                self.exit_orders = {stop.ref: stop}
+                if self.position_meta["measured_target_status"] == "active":
+                    target = self.sell(size=self.position_meta["shares"], exectype=bt.Order.Limit,
+                                       price=self.position_meta["target_price"], oco=stop)
+                    self.exit_orders[target.ref] = target
+                    self.order_meta[target.ref] = {"role": "take_profit"}
+                else:
+                    self.position_meta["measured_target_status"] = "pending_prior_high"
                 self.order_meta[stop.ref] = {"role": "stop_loss"}
-                self.order_meta[target.ref] = {"role": "take_profit"}
             else:
                 entry = self.position_meta
                 if entry:
@@ -196,6 +437,7 @@ class _FixedRiskRewardStrategy(bt.Strategy):
                                         "holding_days": (exit_date - entry_date).days,
                                         "same_bar_stop_target_touched": bool(
                                             float(self.data.low[0]) <= entry["stop_price"]
+                                            and entry["target_price"] is not None
                                             and float(self.data.high[0]) >= entry["target_price"]),
                                         "exit_shares": abs(int(order.executed.size))})
                     self.position_meta = None
@@ -215,6 +457,7 @@ def simulate_fixed_trades(bars, signals, cash=STARTING_CASH, lot_size=LOT_SIZE):
         return {"trades": [], "rejections": [], "daily_equity": [], "order_events": [], "ending_equity": float(cash)}
     frame["date"] = pd.to_datetime(frame["date"])
     frame = frame.sort_values("date", kind="mergesort").drop_duplicates("date", keep="last").reset_index(drop=True)
+    date_to_index = {_iso(value): index for index, value in enumerate(frame.date)}
     final_date = _iso(frame.date.iloc[-1])
     sentinel = frame.iloc[-1].copy()
     sentinel["open"] = sentinel["high"] = sentinel["low"] = sentinel["close"] = float(frame.close.iloc[-1])
@@ -234,7 +477,8 @@ def simulate_fixed_trades(bars, signals, cash=STARTING_CASH, lot_size=LOT_SIZE):
     data = bt.feeds.PandasData(dataname=frame)
     cerebro.adddata(data)
     cerebro.addstrategy(_FixedRiskRewardStrategy, signals=dated_signals, lot_size=int(lot_size),
-                        last_date=final_date)
+                        last_date=final_date, bars=frame.iloc[:-1].reset_index(drop=True),
+                        date_to_index=date_to_index)
     cerebro.broker.setcash(float(cash))
     cerebro.broker.setcommission(commission=0.0)
     cerebro.broker.set_coo(True)
@@ -365,6 +609,9 @@ def _experiment_spec(experiment_id):
     if experiment_id == EXPERIMENT_OPEN_ADMISSION:
         return (RecognitionExperimentConfig(experiment_id, admission_types=EXPERIMENT_PATTERN_TYPES),
                 "entry_open_within_projected_boundary_plus_3_signal_atr")
+    if experiment_id == EXPERIMENT_NECKLINE_SPAN_FIRST:
+        return (RecognitionExperimentConfig(experiment_id, neckline_selection_order="span_first"),
+                "none")
     if experiment_id == EXPERIMENT_NECKLINE_MIN3:
         return (RecognitionExperimentConfig(experiment_id, minimum_neckline_tests=3,
                                             admission_types=EXPERIMENT_PATTERN_TYPES),
@@ -633,8 +880,11 @@ def _result_payload(sim, code, kind, timeframe, starting_cash, signals, split_da
                            "return_on_initial_cash": net / float(starting_cash)}
     assumptions = {"initial_cash_per_security_timeframe": float(starting_cash),
                    "commission": 0.0, "slippage": 0.0, "lot_size": LOT_SIZE,
-                   "stop_fraction": STOP_FRACTION, "target_fraction": TARGET_FRACTION,
-                   "stop_target_from_actual_entry": True, "t_plus_one": True,
+                   "stop_fraction": STOP_FRACTION, "target_fraction": None,
+                   "target_method": TARGET_METHOD,
+                   "stop_from_actual_entry": True, "measured_target_from_signal_pattern": True,
+                   "target_unlock_rule": "bull_flag_close_above_frozen_first_wave_high",
+                   "t_plus_one": True,
                    "weekly_requires_completed_bars": True,
                    "annualization": "CAGR over observed trade period; less than one year remains labeled in metrics",
                    "capital_returns_are_independent_and_must_not_be_summed": True}

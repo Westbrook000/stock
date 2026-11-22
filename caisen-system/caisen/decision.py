@@ -1,13 +1,15 @@
 """Explainable action labels and deterministic candidate ranking."""
 
 from datetime import date
+from math import isfinite
 
 from .patterns import PATTERN_LABELS
 from .plans import BUY_CANDIDATE_PATTERN_TYPES, build_trade_plan
 from .migration import SUPPORTED_NEW_PATH_TYPES, migration_status
+from .structure_boundary import TERMINAL_PATTERN_STATES
 
 
-_ACTION_ORDER = {"CONSIDER_BUY": 0, "WAIT": 1, "HOLD": 2, "SELL_IF_HELD": 3, "INSUFFICIENT_DATA": 4}
+_ACTION_ORDER = {"CONSIDER_BUY": 0, "WATCH": 1, "WAIT": 2, "HOLD": 3, "SELL_IF_HELD": 4, "INSUFFICIENT_DATA": 5}
 
 
 
@@ -32,6 +34,29 @@ def _to_dict(pattern):
     return pattern.to_dict() if hasattr(pattern, "to_dict") else dict(pattern)
 
 
+def _latest_bar_date(bars):
+    if bars is None:
+        return None
+    try:
+        if bars.empty:
+            return None
+        value = bars.iloc[-1]["date"]
+    except (AttributeError, KeyError, IndexError, TypeError):
+        try:
+            value = bars[-1]["date"]
+        except (IndexError, KeyError, TypeError):
+            return None
+    return str(value)[:10]
+
+
+def _is_first_confirmation_today(pattern, timeframe, bars_by_timeframe):
+    if _value(pattern, "state") != "confirmed":
+        return False
+    observed = _latest_bar_date(bars_by_timeframe.get(timeframe))
+    confirmed = _value(pattern, "confirmation_date")
+    return observed is not None and confirmed is not None and str(confirmed)[:10] == observed
+
+
 def _label(pattern):
     name = PATTERN_LABELS.get(_value(pattern, "pattern_type"), _value(pattern, "pattern_type", "形态"))
     state = _value(pattern, "state")
@@ -39,9 +64,7 @@ def _label(pattern):
     if state == "forming":
         label = name + ("，已成型，等待颈线有效突破" if main_bottom else "，未确认")
     elif state == "confirmed":
-        label = name + ("，价格确认，量能仅作辅助" if main_bottom and not _value(pattern, "volume_verified", False)
-                        else "，价格确认" if _value(pattern, "volume_verified", False)
-                        else "，价格确认，量能未核验")
+        label = name + "，价格确认"
     elif state == "invalidated":
         label = name + "，已失效"
     elif state == "target_reached":
@@ -55,9 +78,63 @@ def _label(pattern):
     return label
 
 
+def _watch_candidates(patterns_by_timeframe, prices, qualities, bars, contexts):
+    matches = []
+    for tf, patterns in patterns_by_timeframe.items():
+        context = contexts.get(tf) or {}
+        observed = _latest_bar_date(bars.get(tf))
+        atr = context.get("previous_atr")
+        index = context.get("index")
+        close = prices.get(tf)
+        if (not observed or context.get("date") != observed or not isinstance(index, int)
+                or atr is None or not isfinite(atr) or atr <= 0 or close is None
+                or qualities.get(tf) not in {"usable", "usable_with_warnings"}):
+            continue
+        for pattern in patterns:
+            family = _value(pattern, "pattern_type")
+            if (family not in BUY_CANDIDATE_PATTERN_TYPES or _value(pattern, "state") != "forming"
+                    or _value(pattern, "confirmation_date") or _value(pattern, "direction") != "bullish"
+                    or _value(pattern, "parent_id") or _execution_suppressed(pattern)
+                    or "ambiguous_structure" in (_value(pattern, "flags") or [])):
+                continue
+            lifecycle = _evidence_value(pattern, "joint_lifecycle") or {}
+            if lifecycle and (lifecycle.get("state_at") != "forming"
+                              or lifecycle.get("canonical_confirmation_date")):
+                continue
+            if family == "bull_flag":
+                flag = _evidence_value(pattern, "flag_lifecycle") or {}
+                known = flag.get("known_at")
+                if flag.get("buffered_crossing_consumed_at"):
+                    continue
+            else:
+                structure = _evidence_value(pattern, "main_structure") or {}
+                selection = _evidence_value(pattern, "neckline_selection") or {}
+                if (structure.get("role") != "main" or structure.get("terminal_state")
+                        or structure.get("eligibility_reason") != "awaiting_fresh_neckline_breakout"):
+                    continue
+                frozen, paired = selection.get("line_frozen_at"), (lifecycle.get("paired_at")
+                                      or selection.get("structure_known_at"))
+                known = max(frozen, paired) if frozen and paired else None
+            if not known or str(known)[:10] > observed:
+                continue
+            line = lifecycle.get("boundary") or _value(pattern, "neckline")
+            if not line or line.get("slope") is None or line.get("intercept") is None:
+                continue
+            level = float(line["slope"]) * index + float(line["intercept"])
+            distance = level - close
+            if 1e-12 < distance <= 3 * atr + 1e-12:
+                matches.append({"pattern_id": _value(pattern, "pattern_id"), "pattern_type": family,
+                                "timeframe": tf, "observed_date": observed, "boundary": level,
+                                "close": close, "previous_atr": atr, "distance_atr": distance / atr})
+    return sorted(matches, key=lambda match: (match["distance_atr"], match["timeframe"],
+                                               match["pattern_id"] or ""))
+
+
 def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
                         quality_by_timeframe, bars_by_timeframe=None, cash=100000,
-                        has_position=False, warnings_by_timeframe=None):
+                        has_position=False, warnings_by_timeframe=None,
+                        allowed_pattern_ids_by_timeframe=None, watch_by_timeframe=None,
+                        watch_patterns_by_timeframe=None):
     """Synthesize one ticker row from independent daily/weekly evidence.
 
     ``quality_by_timeframe`` uses market data quality statuses. Missing or
@@ -65,6 +142,12 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
     """
     bars_by_timeframe = bars_by_timeframe or {}
     warnings_by_timeframe = warnings_by_timeframe or {}
+    allowed_pattern_ids_by_timeframe = allowed_pattern_ids_by_timeframe or {}
+    allowed_ids = {
+        tf: ({str(value) for value in allowed_pattern_ids_by_timeframe[tf]}
+             if tf in allowed_pattern_ids_by_timeframe else None)
+        for tf in ("1d", "1w")
+    }
     timeframes = ("1d", "1w")
     patterns = [p for tf in timeframes for p in patterns_by_timeframe.get(tf, [])
                 if _value(p, "pattern_type") in SUPPORTED_NEW_PATH_TYPES]
@@ -74,7 +157,7 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         for tf in timeframes
     }
     active_patterns = [p for p in patterns if _value(p, "state") not in
-                       ("invalidated", "target_reached", "followthrough_confirmed")]
+                       TERMINAL_PATTERN_STATES | {"followthrough_confirmed"}]
     qualities = {tf: quality_by_timeframe.get(tf, "unavailable") for tf in timeframes}
     usable = any(qualities[tf] in ("usable", "usable_with_warnings") and prices_by_timeframe.get(tf) is not None for tf in timeframes)
     if not usable:
@@ -83,7 +166,8 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         return result
 
     confirmed = {tf: [p for p in patterns_by_timeframe.get(tf, [])
-                      if _value(p, "state") == "confirmed" and
+                      if _is_first_confirmation_today(p, tf, bars_by_timeframe)
+                      and (allowed_ids[tf] is None or str(_value(p, "pattern_id")) in allowed_ids[tf]) and
                       "ambiguous_structure" not in (_value(p, "flags", []) or [])]
                  for tf in timeframes}
     directions = {tf: {str(_value(p, "direction")) for p in confirmed[tf]} for tf in timeframes}
@@ -120,9 +204,12 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         if price is None:
             continue
         for pattern in patterns_by_timeframe.get(tf, []):
-            if (_value(pattern, "pattern_type") not in BUY_CANDIDATE_PATTERN_TYPES
+            if (not _is_first_confirmation_today(pattern, tf, bars_by_timeframe)
+                    or _value(pattern, "pattern_type") not in BUY_CANDIDATE_PATTERN_TYPES
                     or _value(pattern, "direction") != "bullish"
-                    or _value(pattern, "state") != "confirmed"):
+                    ):
+                continue
+            if allowed_ids[tf] is not None and str(_value(pattern, "pattern_id")) not in allowed_ids[tf]:
                 continue
             if "ambiguous_structure" in (_value(pattern, "flags", []) or []):
                 continue
@@ -144,6 +231,9 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         plan["timeframe"],
     ))
     selected = passing[0] if passing else None
+    watch = _watch_candidates(
+        watch_patterns_by_timeframe if watch_patterns_by_timeframe is not None else patterns_by_timeframe,
+        prices_by_timeframe, qualities, bars_by_timeframe, watch_by_timeframe or {})
     if conflict and selected is None:
         action, reasons = "WAIT", ["timeframe_direction_conflict"]
     elif selected is not None:
@@ -154,6 +244,8 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
                               "ambiguous_structure" not in (_value(p, "flags", []) or [])
                               for p in active_patterns):
         action, reasons = "HOLD", ["bullish_structure_exists_without_new_entry"]
+    elif watch:
+        action, reasons = "WATCH", ["forming_near_frozen_boundary"]
     elif plans:
         action = "WAIT"
         reasons = sorted({reason for plan in plans for reason in plan.get("reason_codes", [])}) or ["buy_gates_not_met"]
@@ -184,7 +276,9 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
     selected_risk = float(selected.get("planned_risk_pct") or 1.0) if selected else 1.0
     confirmation_dates = [
         str(_value(p, "confirmation_date", ""))
-        for p in patterns if _value(p, "state") == "confirmed" and _value(p, "confirmation_date")
+        for tf in timeframes for p in patterns_by_timeframe.get(tf, [])
+        if _is_first_confirmation_today(p, tf, bars_by_timeframe)
+        and _value(p, "confirmation_date")
     ]
     latest_confirmation = max(confirmation_dates, default="")
     try:
@@ -216,7 +310,7 @@ def synthesize_decision(code, kind, patterns_by_timeframe, prices_by_timeframe,
         "explanation": _explain(action, reasons), "patterns": current_patterns,
         "data_quality": qualities, "data_warnings": quality_warnings,
         "timeframe_conflict": conflict, "confirmed_timeframes": confirmed_timeframes,
-        "selected_plan": selected, "candidate_plans": plans,
+        "selected_plan": selected, "candidate_plans": plans, "watch": watch,
         "rank": rank, "order_submitted": False,
         "pattern_migration": migration_status(),
     }
@@ -230,7 +324,7 @@ def _result(code, kind, action, reasons, patterns, qualities, selected, confirme
         "patterns": [{**_to_dict(p), "display_label": _label(p)} for p in patterns],
         "data_quality": qualities, "data_warnings": [], "timeframe_conflict": False,
         "confirmed_timeframes": confirmed_timeframes, "selected_plan": selected,
-        "candidate_plans": [], "rank": {"action_priority": _ACTION_ORDER[action], "confirmed_timeframes": 0,
+        "candidate_plans": [], "watch": [], "rank": {"action_priority": _ACTION_ORDER[action], "confirmed_timeframes": 0,
         "reward_risk": 0, "risk_pct": 1, "confirmation_date": None, "confirmation_ordinal": 0,
         "tie_break": {"kind": kind, "code": code}}, "order_submitted": False,
         "pattern_migration": migration_status(),
@@ -240,6 +334,8 @@ def _result(code, kind, action, reasons, patterns, qualities, selected, confirme
 def _explain(action, reasons):
     if action == "CONSIDER_BUY":
         return "结构已有效突破确认；下一交易日开盘介入，按实际成交价止损8%、止盈20%。"
+    if action == "WATCH":
+        return "形态已成型，收盘在冻结边界下方 3 ATR 内，尚未确认突破。"
     if action == "SELL_IF_HELD":
         return "检测到已确认的空头/顶部结构；若已有持仓，作为退出风险提示，不代表做空或自动卖出。"
     if action == "INSUFFICIENT_DATA":

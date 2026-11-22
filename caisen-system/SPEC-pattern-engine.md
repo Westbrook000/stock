@@ -73,3 +73,38 @@ Use only the ten active rule IDs in the versioned catalog and their catalog-defi
 ## Limits
 
 Recognition metrics are uncalibrated; no human-label accuracy is claimed. A visual similarity or backtest outcome is not ground truth for whether a chart pattern existed. This module cannot claim a signal is actionable or profitable.
+
+## 2026-11-12 structure-boundary lifecycle amendment
+
+This amendment applies to the four bullish research entries W bottom, inverse head-and-shoulders, triangle bottom, and bull flag. It supersedes conflicting lifecycle text above only for these entries and keeps the original ten-rule catalog and the other six rules unchanged.
+
+- A tradable instance is the immutable pairing of instrument, timeframe, family, structure anchor dates, one frozen boundary version, line tests, structure/boundary known dates, and append-only events. Candidate pressure lines can be shared as proposals; a pattern instance always owns its own copied line.
+- W and inverse head-and-shoulders may use confirmed pressure touches before and after the structure inside the daily five-year / weekly ten-year observation window. The selected line must still geometrically match the structure: W lines must cover the intervening rebound; inverse head-and-shoulders lines must have independent evidence on both reaction legs. External pressure evidence cannot substitute for these required internal relations. Triangle rails remain tied to triangle pivots; bull flag uses its existing channel geometry.
+- The pressure search is anchored to the current observation date, not to the first trough or left shoulder. No additional one-year-before-structure cutoff is applied; all candidate touches inside the applicable five-year / ten-year window are eligible, subject to the shape-specific internal association and coverage checks.
+- Daily bottom structures mature after six calendar months and weekly bottom structures after twelve, counted from the first structural trough. Pressure pivots are confirmed after a 2 ATR reversal. Independent tests retain the existing minimum gaps and departure requirements. Formation coverage uses all highs from the first selected touch group through freeze, with the existing `max(2 ticks, 0.5 ATR14)` tolerance.
+- A selected boundary is ranked using only evidence knowable at that time: independent test count, test span, normalized residual, latest test, then stable anchor order. Breakout price and future trading outcome do not influence boundary selection. Readiness is `max(structure_known_at, line_frozen_at)`.
+- The first close after readiness above the instance's frozen boundary plus `max(previous completed ATR14, 2 ticks)` confirms the instance, subject to the shape's unchanged geometry and maturity rules. A buffered crossing before maturity consumes that boundary phase and cannot be moved forward to create a later first signal. After confirmation, the first close below that same instance's projected frozen line invalidates it. Neither invalidated nor expired instances return to waiting.
+- A genuinely new line can establish a new instance only under a new boundary identity; after an instance fails, the replacement must include at least two independently confirmed pressure tests formed after the failure. A later touch alone, scale relabel, or micro-adjustment does not revive the old event.
+- Scanner and daily Backtrader signals consume the same daily append-only event stream. Weekly scanner analysis is independent and does not affect the daily backtest. Backtrader entry and exits remain next-session open, 8% stop, 20% target, zero costs, and end-of-period liquidation.
+- Daily and weekly scans/details now use the same append-session engine on separate completed-bar streams. Weekly structure search is ten calendar years, maturity is twelve calendar months, and neckline test spacing is two complete weekly bars. An unfinished week remains preview data and cannot create a formal weekly event.
+- Nested suppression is directional and structural: identical confirmed anchor dates across ATR scales are one structure, not parent/child pairs. A distinct parent can suppress a main-pattern child only when its known time interval and frozen price envelope both contain the child; temporal overlap alone is insufficient.
+- Historical research uses the fixed 100-symbol cohort for first paired validation against exact Git `748d3d01`, cutoff 2026-10-30. Only after event and ledger parity checks may the fixed 800-stock/200-ETF cohort run. The 60-minute cold-run goal is measured from data loading through HTML report writing; a miss is reported as a miss.
+- The previous structure-boundary baseline uses source rules `caisen-main-bottoms-v12-structure-boundary`, neckline selector `joint_structure_boundary_v2`, pattern rules `caisen-v25-structure-boundary-v2`, and append-session engine `caisen-joint-pattern-session-v4` (`joint_append_session_v4` recognizer). These identifiers must be stored with each new scan and research run; historical v8/v9 reports retain their original identifiers.
+
+Versioned implementation work is experimental until the paired validation completes. Old scans, reports, and cached signals must keep their original engine/rules identifiers and must not be relabeled as this lifecycle.
+
+### 颈线低位检查（v14）
+
+W 底、头肩底及收敛三角形底部在日线与周线共用此检查。以最早结构低点之前的全部可用同周期行情为基准（不含该低点当根 K 线），上限为历史最低价加上历史高低区间的 50%。每条候选上沿取首末结构低点之间的中点线价（两个投影价的平均），须为正且不超过该上限；缺少有效历史区间时不输出该形态。底点本身的低位或前高回落条件继续独立计算。
+
+候选线在形态几何匹配后、形成区间覆盖与选线排序前分别检查；不合格的候选不会影响其他线。一组结构没有合格上沿时不输出形态。旗形不使用该门槛。选线证据记录中间价、历史范围与上限，规则版本为 `caisen-main-bottoms-v14-neckline-low-position-50`；历史报告保留原口径。
+
+### 扫描短窗口和失效（v15）
+
+扫描、详情截至观察日期，仅送入最近 5 个自然年的日线或 10 个自然年的完整周线，窗口之外只提供低位所用高低价摘要。日线回测保留全部可用历史。两条路径共享失效规则：未确认结构移出搜索窗口、旗形超过 500 根或三角形错过 50%–75% 窗口时，写入一次终态事件和原因。历史确认日与边界保留。
+
+`WATCH` 是观察标签：最新完整 K 线的收盘严格低于同一已成型实例的冻结边界，价差不超过前一根完整 K 线 ATR14 的 3 倍。日周独立；可考虑买入优先；关注不产生交易信号。
+
+### 颈线相对高度（v17）
+
+本规则替换 v14/v15 的颈线历史区间低位门槛。W 底取两底间最高已确认反弹当根的冻结颈线价，以两底均价为参考；头肩底、收敛三角形底部取最低结构低点当根的冻结上沿价，以该点价格为参考。高度比例为（边界价 − 参考价）÷ 参考价，必须大于零且不超过 100%（v16 为 50%）。每条候选线分别检查，通过者才继续参与覆盖检验与排序。底点自身的低位规则、过去行情摘要、旗形和突破条件保持原样。

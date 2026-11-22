@@ -16,7 +16,11 @@ def test_dual_touch_is_disclosed_and_final_equity_reconciles():
         dict(date='2024-01-03',open=10,high=10,low=10,close=10,volume=1000),
         dict(date='2024-01-04',open=10,high=13,low=9,close=11,volume=1000),
     ])
-    result=simulate_fixed_trades(bars,[dict(signal_date='2024-01-02',entry_date='2024-01-03',pattern_ids=['p'])])
+    pattern = {'pattern_id':'p','pattern_type':'w_bottom','direction':'bullish','confirmed_at':0,
+               'evidence':[{'code':'targets','value':{'prices':[12.2],'available':True}}]}
+    signal = {'signal_date':'2024-01-02','entry_date':'2024-01-03','pattern_ids':['p'],
+              'pattern_types':['w_bottom'],'pattern':pattern,'patterns':[pattern]}
+    result=simulate_fixed_trades(bars,[signal])
     trade=result['trades'][0]
     assert trade['exit_reason']=='stop_loss'
     assert trade['same_bar_stop_target_touched'] is True

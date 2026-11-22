@@ -20,6 +20,8 @@ from .indicators import atr, volume_ratio
 from .rules.catalog import load_rule_catalog
 from .research_config import current_recognition_experiment
 from .schemas import Pattern, Pivot
+from .structure_boundary import (TERMINAL_PATTERN_STATES, attach_joint_lifecycle,
+                                 derive_lifecycle_state)
 
 
 MAIN_RULES = load_rule_catalog().get("main_structure_extension", {})
@@ -33,7 +35,6 @@ PIVOT_SCALES = tuple(
     for item in MAIN_RULES.get("pivot_scales", [])
 )
 MIN_STRUCTURE_MONTHS = int(MAIN_RULES.get("minimum_duration_calendar_months", 6))
-NECKLINE_LOOKBACK_YEARS = int(MAIN_RULES.get("neckline_tests", {}).get("lookback_calendar_years", 1))
 NECKLINE_TEST_COUNT = int(MAIN_RULES.get("neckline_tests", {}).get("minimum_independent_groups", 2))
 
 
@@ -44,114 +45,85 @@ def _minimum_neckline_test_count():
     return max(NECKLINE_TEST_COUNT, int(configured)) if configured is not None else NECKLINE_TEST_COUNT
 
 
+def _minimum_anchor_span_evidence(family, sequence, dates, timeframe):
+    """Measure calendar span between required structure anchors, independent of observation time."""
+    duration_rules = MAIN_RULES.get("minimum_duration_calendar_months_by_timeframe", {})
+    minimum_months = int(duration_rules.get(
+        "1w" if timeframe in {"1w", "weekly", "week"} else "1d", MIN_STRUCTURE_MONTHS))
+    if family not in {"w_bottom", "inverse_head_shoulders", "triangle_bottom"}:
+        return {"applies": False, "passed": True, "reason": "family_exempt",
+                "family": family, "minimum_duration_months": minimum_months}
+    ordered = sorted(sequence, key=lambda pivot: pivot.index)
+    if family in {"w_bottom", "inverse_head_shoulders"}:
+        anchors = [pivot for pivot in ordered if pivot.kind == "low"]
+        anchor_role = "first_to_last_structural_low"
+    else:
+        anchors = [ordered[0], ordered[-1]] if len(ordered) >= 2 else ordered
+        anchor_role = "first_to_last_required_triangle_anchor"
+    if len(anchors) < 2:
+        return {"applies": True, "passed": False, "reason": "required_structure_anchors_missing",
+                "family": family, "anchor_role": anchor_role,
+                "minimum_duration_months": minimum_months,
+                "first_anchor_date": None, "last_anchor_date": None,
+                "minimum_anchor_date": None, "actual_span_calendar_days": None}
+    first, last = anchors[0], anchors[-1]
+    first_date = pd.Timestamp(dates[int(first.index)]).normalize()
+    last_date = pd.Timestamp(dates[int(last.index)]).normalize()
+    minimum_date = first_date + pd.DateOffset(months=minimum_months)
+    passed = last_date >= minimum_date
+    return {"applies": True, "passed": bool(passed),
+            "reason": "structure_anchor_span_satisfied" if passed else "structure_anchor_span_too_short",
+            "family": family, "anchor_role": anchor_role,
+            "minimum_duration_months": minimum_months,
+            "first_anchor_date": first_date.date().isoformat(),
+            "last_anchor_date": last_date.date().isoformat(),
+            "minimum_anchor_date": minimum_date.date().isoformat(),
+            "actual_span_calendar_days": int((last_date - first_date).days)}
+
+
+def _neckline_candidate_order(candidate):
+    """Return the configured experimental ordering for auditable candidates."""
+    score = tuple(candidate["score"])
+    experiment = current_recognition_experiment()
+    if experiment is not None and experiment.neckline_selection_order == "span_first":
+        return (score[1], score[0], *score[2:])
+    return score
+
+
+def _neckline_selection_reason():
+    experiment = current_recognition_experiment()
+    if experiment is not None and experiment.neckline_selection_order == "span_first":
+        return "longest_independent_test_span_then_most_tests_then_lowest_residual_then_latest_test"
+    return "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test"
+
+
 def _recognition_experiment_cache_key():
     experiment = current_recognition_experiment()
     return experiment.cache_key() if experiment is not None else None
 
 
 def _same_neckline_boundary_phase(consumed, candidate, tick_size=0.01):
-    """Match exact lines or shared-evidence numerical refits below half a tick.
-
-    ATR tolerances validate candle contact; they do not identify a boundary.
-    A materially new supported line owns its own first crossing.
-    """
+    """Compare exact geometry or shared anchors with sub-tick line agreement."""
     left, right = consumed.get("line"), candidate.get("line")
     if not left or not right:
         return False
-    if (abs(float(left['slope']) - float(right['slope'])) <= 1e-12
-            and abs(float(left['intercept']) - float(right['intercept'])) <= 1e-10):
+    if (abs(float(left["slope"]) - float(right["slope"])) <= 1e-12
+            and abs(float(left["intercept"]) - float(right["intercept"])) <= 1e-12):
         return True
-    old_tests, new_tests = consumed.get('tests', []), candidate.get('tests', [])
-    old_anchors = {int(t['pivot_index']) for t in old_tests if t.get('pivot_index') is not None}
-    new_anchors = {int(t['pivot_index']) for t in new_tests if t.get('pivot_index') is not None}
-    shared = old_anchors & new_anchors
-    if len(shared) < 2:
+    old, new = consumed.get("tests", []), candidate.get("tests", [])
+    left_indices = {int(t["pivot_index"]) for t in old if t.get("pivot_index") is not None}
+    right_indices = {int(t["pivot_index"]) for t in new if t.get("pivot_index") is not None}
+    if len(left_indices & right_indices) < 2:
         return False
-    # Shared pressure evidence plus sub-tick prices identifies numerical refits.
-    # ATR touch tolerance must never merge two materially different boundaries.
-    probes = old_anchors | new_anchors
-    probes.update(int(t['known_index']) for t in old_tests + new_tests
-                  if t.get('known_index') is not None)
-    if consumed.get('consumed_index') is not None:
-        probes.add(int(consumed['consumed_index']))
+    probes = left_indices | right_indices
+    probes.update(int(t["known_index"]) for t in old + new if t.get("known_index") is not None)
+    if consumed.get("consumed_index") is not None:
+        probes.add(int(consumed["consumed_index"]))
     return all(abs(_at(left, i) - _at(right, i)) < .5 * tick_size for i in probes)
 
 
-def _frozen_boundary_identity(line, reference_index):
-    """Identify geometry using slope and a date-anchored price, not window offset."""
-    return f"{float(line['slope']):.12g}:{_at(line, reference_index):.12g}"
-
-
-def _boundary_was_rejected(candidate, rejected_boundaries, tick_size):
-    """A failed line rejects that boundary, not its entire ATR price zone."""
-    return any(_same_neckline_boundary_phase(rejected, candidate, tick_size)
-               for rejected in rejected_boundaries)
-
-
-def _first_frozen_boundary_crossing(close_values, atr_values, line, start_index,
-                                    end_index, tick_size, cache=None):
-    """Audit a line independently of selection; append-only scans reuse history."""
-    start_index = max(1, int(start_index))
-    end_index = min(int(end_index), len(close_values) - 1, len(atr_values) - 1)
-    rules = MAIN_RULES.get('breakout', {})
-    multiple = float(rules.get('close_buffer_previous_atr_multiple', 1.0))
-    ticks = float(rules.get('minimum_buffer_ticks', 2)) * tick_size
-    key = (float(line['slope']), float(line['intercept']), start_index,
-           float(tick_size), multiple, ticks)
-    memo = cache.get(key) if cache is not None else None
-    if memo is not None and memo['scanned_to'] >= end_index:
-        first = memo['first']
-        return dict(first) if first is not None and first['index'] <= end_index else None
-    if memo is None:
-        memo = {'scanned_to': start_index - 1, 'first': None}
-        if cache is not None:
-            cache[key] = memo
-        frozen = start_index - 1
-        if 0 < frozen <= end_index:
-            known_atr = float(atr_values[frozen - 1])
-            buffer = max(ticks, multiple * known_atr)
-            if np.isfinite(known_atr) and float(close_values[frozen]) > _at(line, frozen) + buffer:
-                memo['first'] = {'index': frozen, 'close': float(close_values[frozen]),
-                                 'frozen_neckline': _at(line, frozen),
-                                 'required_close': _at(line, frozen) + buffer,
-                                 'atr14_previous': known_atr, 'tolerance': buffer,
-                                 'already_above_at_freeze': True}
-    if memo['first'] is not None:
-        return dict(memo['first']) if memo['first']['index'] <= end_index else None
-    begin = max(start_index, memo['scanned_to'] + 1)
-    if begin > end_index:
-        return None
-    indexes = np.arange(begin, end_index + 1)
-    known_atr = np.asarray(atr_values[begin - 1:end_index], dtype=float)
-    prices = np.asarray(close_values[begin:end_index + 1], dtype=float)
-    levels = line['slope'] * indexes + line['intercept']
-    buffers = np.maximum(ticks, multiple * known_atr)
-    matches = np.flatnonzero(np.isfinite(known_atr) & (known_atr > 0)
-                             & (prices > levels + buffers))
-    memo['scanned_to'] = end_index
-    if len(matches):
-        j = int(matches[0])
-        memo['first'] = {'index': int(indexes[j]), 'close': float(prices[j]),
-                         'frozen_neckline': float(levels[j]),
-                         'required_close': float(levels[j] + buffers[j]),
-                         'atr14_previous': float(known_atr[j]),
-                         'tolerance': float(buffers[j]), 'already_above_at_freeze': False}
-        return dict(memo['first'])
-    return None
-
-
-def _failed_premature_neckline_phase(phases, close_values, index):
-    """Return a pre-maturity breakout phase after price closes back below it."""
-    for phase in phases:
-        if phase.get("reason") != "breakout_before_minimum_structure_duration":
-            continue
-        consumed_index = phase.get("consumed_index")
-        line = phase.get("line")
-        if consumed_index is None or line is None or int(consumed_index) >= index:
-            continue
-        if float(close_values[index]) < _at(line, index):
-            return phase
-    return None
+def _boundary_was_rejected(candidate, rejected, tick_size):
+    return any(_same_neckline_boundary_phase(item, candidate, tick_size) for item in rejected)
 
 
 def _neckline_candidate_reversal_atr_multiple():
@@ -293,6 +265,25 @@ def _neckline_formation_coverage(high_values, atr_values, line, start, end, tick
     return {"passed": excess <= 1e-10, "start_index": start, "end_index": end,
             "maximum_excess": float(excess), "worst_index": worst,
             "reason": "formation_covered" if excess <= 1e-10 else "formation_high_crosses_neckline"}
+
+
+def _internal_rebound_coverage(high_values, atr_values, line, segments, tick_size, cache=None,
+                              tolerances=None):
+    """Check each complete structure leg against its frozen line and causal ATR buffer."""
+    atr_values = np.asarray(atr_values, dtype=float)
+    if tolerances is None:
+        rules = MAIN_RULES.get("neckline_tests", {})
+        minimum_ticks = int(rules.get("minimum_tolerance_ticks", 2))
+        tolerance_atr = float(rules.get("tolerance_atr", 0.5))
+        tolerances = np.maximum(minimum_ticks * float(tick_size),
+                                np.where(np.isfinite(atr_values), tolerance_atr * atr_values, 0.0))
+    reports = []
+    for start, end in segments:
+        report = _neckline_formation_coverage(
+            high_values, atr_values, line, start, end, tick_size,
+            cache=cache, tolerances=tolerances)
+        reports.append(report)
+    return {"passed": all(report["passed"] for report in reports), "segments": reports}
 
 
 def _qualify_neckline_slope(line, start_index, end_index):
@@ -637,7 +628,7 @@ def _independent_neckline_tests(pivots, first_trough, last_anchor, atr_values, d
                                 lower_index=None, upper_index=None, minimum_level=None,
                                 maximum_level=None, bars=None,
                                 return_candidates=False, diagnostics=None,
-                                trusted_readonly_cache=False):
+                                trusted_readonly_cache=False, search_window_start=None):
     """Select a causal pressure boundary by independent tests and interval coverage.
 
     Candidate lines are anchored by pairs of confirmed touches, then collect
@@ -682,7 +673,16 @@ def _independent_neckline_tests(pivots, first_trough, last_anchor, atr_values, d
             del items[128:]
 
     date_values = dates.values
-    lookback = pd.Timestamp(date_values[first_trough.index]) - pd.DateOffset(years=NECKLINE_LOOKBACK_YEARS)
+    if search_window_start is not None:
+        lookback = pd.Timestamp(date_values[search_window_start])
+    else:
+        weekly = timeframe in {"1w", "weekly", "week"}
+        window_key = "1w" if weekly else "1d"
+        default_years = 10 if weekly else 5
+        search_years = int(MAIN_RULES.get("timeframes", {}).get(window_key, {}).get(
+            "structure_window_calendar_years", default_years))
+        observation_cutoff = pd.Timestamp(date_values[-1]) - pd.DateOffset(years=search_years)
+        lookback = pd.Timestamp(max(date_values[0], observation_cutoff.to_datetime64()))
     lookback_value = lookback.to_datetime64()
     candidate_scale = _neckline_candidate_scale()
     candidate_pool_cache = bars.attrs.get("neckline_pressure_candidate_pool") if bars is not None else None
@@ -1051,7 +1051,7 @@ def _independent_neckline_tests(pivots, first_trough, last_anchor, atr_values, d
                          "coverage_start": start, "coverage_end": coverage_end,
                          "span": span, "signature": signature}
             current = lines.get(signature)
-            if current is None or candidate["score"] < current["score"]:
+            if current is None or _neckline_candidate_order(candidate) < _neckline_candidate_order(current):
                 lines[signature] = candidate
     if pair_memo is not None:
         pair_memo.pop(pool_key, None)
@@ -1065,7 +1065,7 @@ def _independent_neckline_tests(pivots, first_trough, last_anchor, atr_values, d
         }
     if not lines:
         return []
-    ranked = sorted(lines.values(), key=lambda item: item["score"])
+    ranked = sorted(lines.values(), key=_neckline_candidate_order)
 
     def format_candidate(chosen, rank):
         selected = chosen["grouped"]
@@ -1104,7 +1104,7 @@ def _independent_neckline_tests(pivots, first_trough, last_anchor, atr_values, d
                 "selection_rank": rank,
                 "selection_score": [float(value) if isinstance(value, (int, float, np.number)) else value
                                     for value in chosen["score"]],
-                "selection_reason": "most_independent_tests_then_longest_span_then_lowest_residual_then_latest_test",
+                "selection_reason": _neckline_selection_reason(),
                 "independent_test_count": len(selected),
                 "test_span_bars": chosen["span"],
                 "coverage_start_index": chosen["coverage_start"],
@@ -1316,8 +1316,8 @@ def _structure_candidates(pivots, timeframe, atr_values=None, tick_size=0.01,
                    for pivot in inner_lows):
                 continue
             middle = max(between_highs, key=lambda pivot: pivot.price)
-            known_atr = (atr_values[middle.confirmed_at]
-                         if atr_values is not None and middle.confirmed_at < len(atr_values) else np.nan)
+            known_atr = (atr_values[middle.index]
+                         if atr_values is not None and middle.index < len(atr_values) else np.nan)
             rim_threshold = min(float(known_atr) if np.isfinite(known_atr) else 0.0,
                                 max(float(first.price), float(second.price)) * 0.05)
             if float(middle.price) - max(float(first.price), float(second.price)) >= rim_threshold:
@@ -1470,9 +1470,14 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     minimum_neckline = None
     if w_middle_highs:
         middle = max(w_middle_highs, key=lambda pivot: pivot.price)
-        middle_atr = atr_values[middle.confirmed_at] if middle.confirmed_at < len(atr_values) else np.nan
+        # Price tolerance describes the volatility at the rim price itself.
+        # Using the later pivot-confirmation ATR can shrink it by half during
+        # a slow reversal and reject a valid, independently tested neckline.
+        middle_atr = atr_values[middle.index] if middle.index < len(atr_values) else np.nan
         middle_tolerance = max(float(MAIN_RULES.get("neckline_tests", {}).get("minimum_tolerance_ticks", 2)) * tick_size,
-                               float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
+                               float(MAIN_RULES.get("neckline_tests", {}).get(
+                                   "w_bottom_rim_association_tolerance_atr",
+                                   MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5)))
                                * float(middle_atr) if np.isfinite(middle_atr) else 0.0)
         # A resistance retest must reach the intervening W rim; tolerance
         # applies to independent touch clustering, not to lowering the
@@ -1520,22 +1525,34 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         if len(samples) > 128:
             del samples[128:]
 
+    experiment = current_recognition_experiment()
+    anchor_span_evidence = None
+    if experiment is not None and experiment.require_minimum_anchor_span:
+        anchor_span_evidence = _minimum_anchor_span_evidence(family, sequence, dates, timeframe)
+        if anchor_span_evidence["applies"] and not anchor_span_evidence["passed"]:
+            known_index = max(int(pivot.confirmed_at) for pivot in sequence)
+            record_neckline_rejection("structure_anchor_span_too_short", {
+                **anchor_span_evidence,
+                "candidate_family": family,
+                "known_date": _date_text(dates, known_index, date_strings)
+                if 0 <= known_index < len(dates) else None,
+            })
+            frame.attrs.setdefault("minimum_anchor_span_rejections", []).append(
+                dict(anchor_span_evidence, known_index=known_index))
+            return None
+
+    from .structure_boundary import pressure_search_start, formation_start_index, has_new_tests_after_failure
+    search_start = pressure_search_start(dates, timeframe)
     neckline_candidates = _independent_neckline_tests(
         pivots, first_trough, last_anchor, atr_values, dates, tick_size, timeframe,
-        # Allow one prior-year touch to anchor the level, but require the
-        # second independent touch to occur after this bottom begins.
-        lower_index=(int(np.searchsorted(
-            dates.values,
-            (pd.Timestamp(dates[first_trough.index]) - pd.DateOffset(years=NECKLINE_LOOKBACK_YEARS)).to_datetime64(),
-            side="left")) if family == "w_bottom" else first_trough.index),
+        search_window_start=(search_start if family in {"w_bottom", "inverse_head_shoulders"} else None),
+        lower_index=(search_start if family in {"w_bottom", "inverse_head_shoulders"} else first_trough.index),
         # Pressure tests after the final structure trough can finish freezing
         # the boundary, provided they are known before the breakout event.
         upper_index=(len(frame) - 1 if family in {"w_bottom", "inverse_head_shoulders"}
                      else last_anchor.index),
         minimum_level=minimum_neckline,
-        maximum_level=(float(max(pivot.price for pivot in w_middle_highs)) *
-                       (1.0 + float(MAIN_RULES.get("neckline_tests", {}).get(
-                           "w_bottom_rim_association_ceiling_relative", 0.2)))
+        maximum_level=(float(max(pivot.price for pivot in w_middle_highs)) + middle_tolerance
                        if w_middle_highs else None),
         bars=frame, return_candidates=True,
         diagnostics=neckline_diagnostics if collect_diagnostics else None,
@@ -1642,6 +1659,18 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 })
                 continue
             if family == "w_bottom":
+                rim_line = _at(candidate_line, middle.index)
+                if abs(rim_line - float(middle.price)) > middle_tolerance:
+                    record_neckline_rejection("w_neckline_not_matched_to_intervening_rim", {
+                        "candidate_id": candidate["tests"][0]["pair_id"],
+                        "test_dates": [test["pivot_date"] for test in candidate["tests"]],
+                        "rim_date": middle.date,
+                        "rim_price": float(middle.price),
+                        "line_at_rim": float(rim_line),
+                        "tolerance": float(middle_tolerance),
+                        "known_date": max(test["known_date"] for test in candidate["tests"]),
+                    })
+                    continue
                 intact = True
                 for pivot in w_middle_highs:
                     tolerance = _pivot_tolerance(pivot, atr_values, tick_size)
@@ -1723,10 +1752,47 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                              max((pivot.confirmed_at for pivot in geometry_pivots), default=0))
     if structure_known_at >= len(frame):
         return None
+    require_internal_rebound = bool(
+        experiment is not None and experiment.require_internal_rebound_coverage)
+    rebound_tolerances = frame.attrs.get("neckline_coverage_tolerances")
+    if require_internal_rebound and rebound_tolerances is None:
+        rules = MAIN_RULES.get("neckline_tests", {})
+        minimum_ticks = int(rules.get("minimum_tolerance_ticks", 2))
+        tolerance_atr = float(rules.get("tolerance_atr", 0.5))
+        rebound_tolerances = np.maximum(minimum_ticks * tick_size,
+                                        np.where(np.isfinite(atr_values),
+                                                 tolerance_atr * atr_values, 0.0))
+        frame.attrs["neckline_coverage_tolerances"] = rebound_tolerances
+    prior_context = frame.attrs.get("prior_price_context") or {}
+    if family == "w_bottom":
+        reference = middle
+        base_price = (float(low_pivots[0].price) + float(low_pivots[-1].price)) / 2.0
+        base_kind = "mean_of_two_lows"
+    else:
+        reference = min(low_pivots, key=lambda pivot: (pivot.price, pivot.index))
+        base_price = float(reference.price)
+        base_kind = "lowest_structure_point"
+    maximum_height = float(MAIN_RULES["neckline_relative_height"]["maximum_ratio"])
+    if not np.isfinite(base_price) or base_price <= 0:
+        return None
+    height_reference = {"reference_date": date_strings[reference.index], "base_price": base_price,
+                        "base_kind": base_kind, "maximum_ratio": maximum_height}
     covered_candidates = []
     for candidate in neckline_candidates:
+        neckline_price = float(_at(candidate["line"], reference.index))
+        height = (neckline_price - base_price) / base_price
+        passed = bool(np.isfinite(height) and 0.0 < height <= maximum_height + 1e-12)
+        neckline_relative_height = dict(height_reference, neckline_price=neckline_price,
+                                        relative_height=height, passed=passed)
+        if not passed:
+            record_neckline_rejection("neckline_relative_height_out_of_range", {
+                "candidate_id": candidate["tests"][0]["pair_id"],
+                "neckline_relative_height": neckline_relative_height,
+                "known_date": date_strings[max(structure_known_at, candidate["frozen_index"])],
+            })
+            continue
         formation_end = max(structure_known_at, candidate["frozen_index"])
-        formation_start = min(geometry_start, candidate["tests"][0]["coverage_start_index"])
+        formation_start = formation_start_index(geometry_start, candidate["tests"])
         coverage = _neckline_formation_coverage(high_values, atr_values, candidate["line"],
             formation_start, formation_end, tick_size, cache=frame.attrs.get("neckline_coverage_cache"),
             tolerances=frame.attrs.get("neckline_coverage_tolerances"))
@@ -1737,7 +1803,29 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 "known_date": date_strings[formation_end],
             })
             continue
-        covered_candidates.append(dict(candidate, formation_coverage=coverage))
+        candidate_evidence = dict(candidate, formation_coverage=coverage,
+                                  neckline_relative_height=neckline_relative_height)
+        if require_internal_rebound and family in {"w_bottom", "inverse_head_shoulders"}:
+            structural_lows = sorted(low_pivots, key=lambda pivot: pivot.index)
+            if family == "inverse_head_shoulders":
+                rebound_segments = [(structural_lows[0].index, structural_lows[1].index),
+                                    (structural_lows[1].index, structural_lows[-1].index)]
+            else:
+                rebound_segments = [(structural_lows[0].index, structural_lows[-1].index)]
+            rebound_coverage = _internal_rebound_coverage(
+                high_values, atr_values, candidate["line"], rebound_segments, tick_size,
+                cache=frame.attrs.get("neckline_coverage_cache"),
+                tolerances=rebound_tolerances)
+            if not rebound_coverage["passed"]:
+                record_neckline_rejection("internal_rebound_not_covered", {
+                    "candidate_id": candidate["tests"][0]["pair_id"],
+                    "internal_rebound_coverage": rebound_coverage,
+                    "known_date": date_strings[max(structure_known_at,
+                                                   int(candidate["frozen_index"]))],
+                })
+                continue
+            candidate_evidence["internal_rebound_coverage"] = rebound_coverage
+        covered_candidates.append(candidate_evidence)
     neckline_candidates = covered_candidates
     if not neckline_candidates:
         return None
@@ -1754,8 +1842,9 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     def support_boundary(index):
         return _at(lower_boundary, index) if family == "triangle_bottom" else support_lower
 
-    # Rank one boundary for the primary event; other candidates only consume
-    # their first crossing so an unselected phase cannot reappear later.
+    # Each close ranks only boundaries known at that time. A failed breakout
+    # retires that pressure segment; a separately supported later segment may
+    # still complete the same larger base.
     weak_crossings = []
     breakout = None
     early_breakouts = []
@@ -1765,23 +1854,22 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     chosen_candidate = None
     pending_breakout = None
     historical_only = False
-    early_breakout_invalidation = None
     for index in range(structure_known_at, len(frame)):
         if close[index] < support_boundary(index):
             break
         if pending_breakout is not None:
             prior_candidate = pending_breakout["candidate"]
-            prior_support = float(pending_breakout["item"]["frozen_neckline"])
-            if close[index] < prior_support:
+            prior_line = prior_candidate["line"]
+            if close[index] < _at(prior_line, index):
                 invalidation = {
-                    "index": int(index), "price": prior_support,
-                    "line": dict(prior_candidate['line']),
-                    "tests": prior_candidate['tests'], "consumed_index": int(index),
+                    "index": int(index), "price": float(_at(prior_line, index)),
                     "tolerance": max(2.0 * tick_size,
                                      float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
                                      * float(atr_values[index]) if np.isfinite(atr_values[index]) else 0.0),
                     "reason": "breakout_reentered_below_frozen_neckline",
                     "candidate_id": pending_breakout["item"]["candidate_id"],
+                    "line": dict(prior_candidate["line"]), "tests": prior_candidate["tests"],
+                    "consumed_index": int(index),
                 }
                 rejected_boundaries.append(invalidation)
                 neckline_history.append({
@@ -1796,11 +1884,9 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 pending_breakout = None
                 chosen_candidate = None
                 continue
-            # Keep the primary pending lifecycle unchanged. Sidechannel
-            # candidates are only considered when no primary is pending.
+            # The confirmed line remains in force until it fails. A later
+            # alternative cannot rewrite this already-issued event.
             continue
-        # A failed premature crossing consumes only its frozen boundary.
-        # Keep searching this geometry for independently supported new lines.
         available = [candidate for candidate in neckline_candidates
                      if candidate["frozen_index"] < index
                      and _neckline_decline_check(family, candidate["line"],
@@ -1808,14 +1894,17 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         available = [candidate for candidate in available if not any(
             (phase.get("consumed_index") is None
              or int(phase["consumed_index"]) < index)
-            and phase.get("selected", True)
             and _same_neckline_boundary_phase(phase, candidate, tick_size)
             for phase in consumed_phases)]
-        available = [candidate for candidate in available
-                     if not _boundary_was_rejected(candidate, rejected_boundaries, tick_size)]
+        available = [candidate for candidate in available if not _boundary_was_rejected(candidate, rejected_boundaries, tick_size)]
+        invalidated = [entry for entry in rejected_boundaries if entry.get("reason") == "breakout_reentered_below_frozen_neckline"]
+        if invalidated:
+            failure_index = max(int(entry["index"]) for entry in invalidated)
+            available = [candidate for candidate in available
+                         if has_new_tests_after_failure(candidate["tests"], failure_index, index)]
         if not available:
             continue
-        chosen_candidate = min(available, key=lambda candidate: candidate["score"])
+        chosen_candidate = min(available, key=_neckline_candidate_order)
         selected_tests = chosen_candidate["tests"]
         neckline = dict(chosen_candidate["line"])
         # A complete shape is a watch condition, not a buy signal. Require a
@@ -1823,19 +1912,6 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         # boundary are known; discovering an old structure while price is
         # already through the buffered trigger must not create a retroactive entry.
         if index <= structure_known_at or index <= chosen_candidate["frozen_index"]:
-            continue
-        first_cross = _first_frozen_boundary_crossing(
-            close, atr_values, neckline,
-            max(structure_known_at, chosen_candidate['frozen_index']) + 1,
-            index, tick_size, frame.attrs.setdefault('frozen_boundary_crossing_cache', {}))
-        if first_cross is not None and first_cross['index'] < index:
-            phase = dict(first_cross, line=dict(neckline), tests=selected_tests,
-                         consumed_index=first_cross['index'],
-                         candidate_id=selected_tests[0]['pair_id'],
-                         reason='historical_first_crossing_before_selection')
-            if not any(_same_neckline_boundary_phase(existing, phase, tick_size)
-                       for existing in consumed_phases):
-                consumed_phases.append(phase)
             continue
         previous_level = _at(neckline, index - 1)
         previous_atr_for_buffer = atr_values[index - 2] if index > 1 else np.nan
@@ -1865,6 +1941,13 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 "candidate_id": selected_tests[0]["pair_id"],
             })
         if close[index] > required_close:
+            from .structure_boundary import FrozenBoundary, first_buffered_crossing
+            boundary = FrozenBoundary("audit", float(neckline["slope"]), float(neckline["intercept"]))
+            first = first_buffered_crossing(close, atr_values, boundary,
+                max(structure_known_at, chosen_candidate["frozen_index"]) + 1,
+                index, tick_size, frame.attrs.setdefault("joint_first_crossing_cache", {}))
+            if first != index:
+                continue
             item = {
                 "date": _date_text(dates, index, date_strings), "index": int(index),
                 "close": float(close[index]), "frozen_neckline": float(level),
@@ -1886,13 +1969,13 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                     consumed_phases.append(phase)
                 rejected_boundaries.append({
                     "index": int(index), "price": float(level),
-                    "line": dict(chosen_candidate['line']),
-                    "tests": chosen_candidate['tests'], "consumed_index": int(index),
                     "tolerance": max(2.0 * tick_size,
                                      float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
                                      * float(previous_atr)),
                     "reason": "breakout_before_minimum_structure_duration",
                     "candidate_id": item["candidate_id"],
+                    "line": dict(chosen_candidate["line"]), "tests": chosen_candidate["tests"],
+                    "consumed_index": int(index),
                 })
                 neckline_history.append({"candidate_id": item["candidate_id"],
                                          "breakout_date": item["date"], "state": "too_early"})
@@ -1912,13 +1995,16 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                             if candidate["frozen_index"] < len(frame) - 1
                             and _neckline_decline_check(family, candidate["line"],
                                 candidate["tests"][0]["coverage_start_index"], len(frame)-1)["passed"]
-                            and not any(phase.get("selected", True)
-                                        and _same_neckline_boundary_phase(phase, candidate, tick_size)
+                            and not any(_same_neckline_boundary_phase(phase, candidate, tick_size)
                                         and (phase.get("consumed_index") is None
                                              or int(phase["consumed_index"]) < len(frame) - 1)
                                         for phase in consumed_phases)
-                            and not _boundary_was_rejected(
-                                candidate, rejected_boundaries, tick_size)]
+                            and not _boundary_was_rejected(candidate, rejected_boundaries, tick_size)]
+        invalidated = [entry for entry in rejected_boundaries if entry.get("reason") == "breakout_reentered_below_frozen_neckline"]
+        if invalidated:
+            failure_index = max(int(entry["index"]) for entry in invalidated)
+            final_candidates = [candidate for candidate in final_candidates
+                                if has_new_tests_after_failure(candidate["tests"], failure_index, len(frame) - 1)]
         if not final_candidates:
             retired = [entry for entry in neckline_history
                        if entry.get("state") == "invalidated" and entry.get("candidate")]
@@ -1929,22 +2015,13 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             chosen_candidate = retired[-1]["candidate"]
             historical_only = True
         else:
-            chosen_candidate = min(final_candidates, key=lambda candidate: candidate["score"])
+            chosen_candidate = min(final_candidates, key=_neckline_candidate_order)
     if pending_breakout is not None:
         chosen_candidate = pending_breakout["candidate"]
         breakout = pending_breakout["item"]
         neckline_history.append({"candidate_id": breakout["candidate_id"],
                                  "breakout_date": breakout["date"], "state": "confirmed"})
     selected_tests = chosen_candidate["tests"]
-    selected_candidate_id = selected_tests[0]["pair_id"]
-    selected_weak_crossings = [item for item in weak_crossings
-                               if item.get("candidate_id") == selected_candidate_id]
-    selected_early_breakouts = [item for item in early_breakouts
-                                 if item.get("candidate_id") == selected_candidate_id]
-    selected_retired_segments = [item for item in neckline_history
-                                 if item.get("candidate_id") == selected_candidate_id]
-    selected_consumed_phases = [item for item in consumed_phases
-                                if item.get("candidate_id") == selected_candidate_id]
     neckline = dict(chosen_candidate["line"])
     neckline_level = _at(neckline, last_anchor.index)
     frozen_date_value = max(
@@ -1958,26 +2035,13 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     if breakout is None and pd.Timestamp(dates[-1]) < maturity_date:
         return None
 
-    selected_first_cross = _first_frozen_boundary_crossing(
-        close, atr_values, neckline, max(structure_known_at, chosen_candidate['frozen_index']) + 1,
-        len(frame) - 1, tick_size, frame.attrs.setdefault('frozen_boundary_crossing_cache', {}))
-    if (breakout is None and selected_first_cross is not None
-            and pd.Timestamp(dates[selected_first_cross['index']]) < maturity_date):
-        early_breakout_invalidation = {
-            'date': date_strings[selected_first_cross['index']],
-            'index': selected_first_cross['index'],
-            'level': selected_first_cross['frozen_neckline'],
-            'reason': 'breakout_before_minimum_structure_duration'}
-
     structure_invalidation = None
-    neckline_invalidation = early_breakout_invalidation
+    neckline_invalidation = None
     target_reached = None
     target_values = []
     structure_low = min(support_values)
     sequence_known_at = max(pivot.confirmed_at for pivot in sequence)
-    invalidation_end = breakout["index"] if breakout is not None else (
-        int(early_breakout_invalidation["index"]) if early_breakout_invalidation is not None
-        else len(frame) - 1)
+    invalidation_end = breakout["index"] if breakout is not None else len(frame) - 1
     first_structure_break = next((index for index in range(sequence_known_at, invalidation_end + 1)
                                   if close[index] < support_boundary(index)), None)
     if first_structure_break is not None:
@@ -1991,10 +2055,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             # The first close beyond the buffered boundary was outside the
             # book's effective triangle window; later price cannot re-label it.
             return None
-    terminal_dates = [event["date"] for event in
-                      (structure_invalidation, neckline_invalidation) if event]
-    quality_date = (min(terminal_dates) if terminal_dates else
-                    (breakout["date"] if breakout else date_strings[-1]))
+    quality_date = ((structure_invalidation or {}).get("date")
+                    or (breakout["date"] if breakout else date_strings[-1]))
     if historical_only:
         quality_date = min(entry["breakout_date"] for entry in neckline_history
                            if entry.get("candidate") and entry.get("state") == "invalidated")
@@ -2008,7 +2070,8 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                     "history_end": quality_date, "range_low": None, "range_high": None,
                     "position_ratio": None, "prepattern_high": None, "prepattern_drawdown": None}
     if len(finite_low) and len(finite_high):
-        range_low, range_high = float(finite_low.min()), float(finite_high.max())
+        range_low = min(float(finite_low.min()), prior_context.get("low", np.inf))
+        range_high = max(float(finite_high.max()), prior_context.get("high", -np.inf))
         ratio = ((structure_low - range_low) / (range_high - range_low)
                  if range_high > range_low else np.inf)
         low_rules = MAIN_RULES.get("low_position", {})
@@ -2017,7 +2080,10 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         prepattern = quality_history[(quality_history.date >= cutoff)
                                      & (quality_history.date < pd.Timestamp(dates[first_trough.index]))]
         prior_high = pd.to_numeric(prepattern.high, errors="coerce").dropna()
-        pre_high = float(prior_high.max()) if len(prior_high) else None
+        pre_high = max(float(prior_high.max()) if len(prior_high) else -np.inf,
+                       prior_context.get("two_year_high", {}).get(date_strings[first_trough.index], -np.inf))
+        if not np.isfinite(pre_high):
+            pre_high = None
         drawdown = (pre_high - structure_low) / pre_high if pre_high and pre_high > 0 else None
         low_position.update({"range_low": range_low, "range_high": range_high,
                              "position_ratio": float(ratio), "position_pass": bool(
@@ -2042,12 +2108,10 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         if first_target > 0 and second_target > 0:
             target_values = [first_target, second_target]
     if breakout is not None:
-        post_breakout_support_level = float(_at(neckline, breakout["index"]))
         for index in range(breakout["index"] + 1, len(frame)):
-            if close[index] < post_breakout_support_level:
+            if close[index] < _at(neckline, index):
                 neckline_invalidation = {"date": _date_text(dates, index, date_strings), "index": int(index),
-                                         "level": post_breakout_support_level,
-                                         "reason": "close_below_post_breakout_support"}
+                                         "level": float(_at(neckline, index))}
                 break
             if target_values and float(frame.high.iloc[index]) >= target_values[0]:
                 target_reached = {"date": _date_text(dates, index, date_strings), "index": int(index),
@@ -2064,16 +2128,11 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             volume = float(ratio)
             volume_date = breakout["date"]
 
-    end_dates = [event["date"] for event in
-                 (structure_invalidation, neckline_invalidation, target_reached) if event]
-    structure_end_date = (min(end_dates) if end_dates else
-                          (breakout["date"] if breakout else date_strings[-1]))
+    structure_end_date = ((structure_invalidation or neckline_invalidation or target_reached or {}).get("date")
+                          or (breakout["date"] if breakout else date_strings[-1]))
     signal_eligible = bool(breakout is not None and terminal is None)
     observed_index = len(frame) - 1
-    post_breakout_support_level = (float(_at(neckline, breakout["index"]))
-                                   if breakout is not None else None)
-    neckline_at_observed = (post_breakout_support_level if post_breakout_support_level is not None
-                            else float(_at(neckline, observed_index)))
+    neckline_at_observed = float(_at(neckline, observed_index))
     observed_atr = atr_values[observed_index] if observed_index < len(atr_values) else np.nan
     stop_rules = MAIN_RULES.get("neckline_tests", {})
     plan_stop_buffer = max(float(stop_rules.get("minimum_tolerance_ticks", 2)) * tick_size,
@@ -2098,7 +2157,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
     rejected_counts_as_of, rejected_samples_as_of = rejection_summary(decision_index)
     ranked_as_of_decision = sorted(
         [candidate for candidate in neckline_candidates
-         if candidate["frozen_index"] < decision_index], key=lambda candidate: candidate["score"])
+         if candidate["frozen_index"] < decision_index], key=_neckline_candidate_order)
 
     def candidate_rank_reason(candidate, selected):
         if candidate["tests"][0]["pair_id"] == selected["tests"][0]["pair_id"]:
@@ -2119,6 +2178,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         "rank": position,
         "selected": candidate["tests"][0]["pair_id"] == selected_tests[0]["pair_id"],
         "line": dict(candidate["line"]),
+        "neckline_relative_height": candidate["neckline_relative_height"],
         "independent_test_count": len(candidate["tests"]),
         "test_span_bars": candidate["tests"][0]["test_span_bars"],
         "normalized_residual": candidate["tests"][0]["selection_score"][2],
@@ -2144,15 +2204,11 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         "consumed_boundary_phase_rule": str(MAIN_RULES.get(
             "neckline_tests", {}).get("consumed_boundary_phase_rule",
                                       "same_structure_equivalent_frozen_neckline_v1")),
-        "breakout_candidate_rule": str(MAIN_RULES.get(
-            "breakout_candidate_rule", "candidate_own_frozen_neckline_v1")),
-        "first_boundary_crossing": _first_frozen_boundary_crossing(
-            close, atr_values, neckline, max(structure_known_at, chosen_candidate['frozen_index']) + 1,
-            len(frame) - 1, tick_size, frame.attrs.setdefault('frozen_boundary_crossing_cache', {})),
-        "selected_candidate_id": selected_candidate_id,
+        "selected_candidate_id": selected_tests[0]["pair_id"],
         "selected_rank": next((item["rank"] for item in candidate_summaries
                                if item["selected"]), None),
         "selected_line": dict(neckline),
+        "neckline_relative_height": chosen_candidate["neckline_relative_height"],
         "effective_start_date": selected_tests[0]["coverage_start_date"],
         "freeze_date": frozen_date,
         "line_frozen_at": _date_text(dates, chosen_candidate["frozen_index"], date_strings),
@@ -2174,27 +2230,26 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         "rejection_counts": rejected_counts_as_of,
         "rejected_candidates": rejected_samples_as_of,
         "older_pressure_tests": older_pressure_tests,
-        "retired_segments": selected_retired_segments,
-        "early_breakouts": selected_early_breakouts,
+        "retired_segments": neckline_history,
+        "early_breakouts": early_breakouts,
         "consumed_boundary_phases": [{
             "candidate_id": item.get("candidate_id"),
             "consumed_index": int(item["consumed_index"]),
             "consumed_date": date_strings[int(item["consumed_index"])],
             "reason": item.get("reason"), "line": dict(item["line"]),
-            "tests": item.get("tests", []),
-            "phase_tolerance": float(item.get("phase_tolerance", 0.0)),
-            "selected": bool(item.get("selected", True)),
-        } for item in selected_consumed_phases],
+        } for item in consumed_phases],
     }
+    if "internal_rebound_coverage" in chosen_candidate:
+        selection_evidence["internal_rebound_coverage"] = chosen_candidate["internal_rebound_coverage"]
+    if anchor_span_evidence is not None and anchor_span_evidence["applies"]:
+        selection_evidence["minimum_anchor_span"] = anchor_span_evidence
     identity_dates = [pivot.date for pivot in sequence] + [
         _date_text(dates, item["pivot_index"], date_strings) for item in selected_tests
     ]
-    boundary_identity = _frozen_boundary_identity(neckline, first_trough.index)
     identity = "|".join([code, kind, timeframe, MAIN_PATTERN_TYPES[family], pivot_scale,
-                         ":".join(identity_dates), boundary_identity])
+                         ":".join(identity_dates)])
     pattern_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
     key_points = {"pivot_scale": pivot_scale, "scale": scale_name,
-                  "frozen_boundary_identity": boundary_identity,
                   "support_lower": float(support_lower), "support_upper": float(support_upper),
                   "first_trough_index": int(first_trough.index),
                   "first_trough_date": _date_text(dates, first_trough.index, date_strings),
@@ -2211,21 +2266,20 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
             "role": "main", "family": family, "scale": scale_name, "pivot_scale": pivot_scale,
             "signal_eligible": signal_eligible,
             "eligibility_reason": "price_breakout_confirmed" if signal_eligible else (
-                "breakout_before_minimum_structure_duration" if early_breakout_invalidation else
-                ("terminal_state" if terminal else "awaiting_fresh_neckline_breakout")),
+                "terminal_state" if terminal else "awaiting_fresh_neckline_breakout"),
             "support_lower": float(support_lower), "support_upper": float(support_upper),
             "neckline": neckline, "frozen_at": frozen_date,
             "frozen_at_index": int(frozen_at), "first_trough_date": _date_text(dates, first_trough.index, date_strings),
             "latest_anchor_date": _date_text(dates, last_anchor.index, date_strings),
             "maturity_date": str(maturity_date.date()), "structure_end_date": structure_end_date,
             "minimum_duration_months": minimum_duration_months,
+            **({"minimum_anchor_span": anchor_span_evidence}
+               if anchor_span_evidence is not None and anchor_span_evidence["applies"] else {}),
             "signal_is_volume_independent": True,
             "low_position": low_position,
             "terminal_state": terminal,
             "observed_date": _date_text(dates, observed_index, date_strings),
             "neckline_at_observed": neckline_at_observed,
-            "post_breakout_support_level": post_breakout_support_level,
-            "post_breakout_support_date": breakout["date"] if breakout else None,
             "plan_stop_level": float(plan_stop_level),
             "neckline_rule_version": selection_evidence["rule_version"],
             "neckline_effective_start": selection_evidence["effective_start_date"],
@@ -2236,7 +2290,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         {"code": "neckline_tests", "value": selected_tests},
         {"code": "neckline_selection", "value": selection_evidence},
         {"code": "neckline_breakout", "value": breakout},
-        {"code": "weak_crossings", "value": selected_weak_crossings},
+        {"code": "weak_crossings", "value": weak_crossings},
         {"code": "support_tests", "value": support_tests},
         {"code": "volume_support", "value": {
             "required": bool(MAIN_RULES.get("volume_required", False)),
@@ -2276,11 +2330,11 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         confirmed_at=breakout["index"] if breakout else None, key_points=key_points,
         neckline=neckline, invalidation=float(plan_stop_level), targets=target_values, evidence=evidence,
         volume_ratio=volume, volume_verified=False,
-        rule_version=str(MAIN_RULES.get("main_pattern_rule_version", "caisen-v24-main-bottom-v1")),
+        rule_version=str(MAIN_RULES.get("main_pattern_rule_version", "caisen-v22-main-bottom-v1")),
         data_version=bars.attrs.get("provenance", {}).get("data_version", "unknown"),
         last_observed_date=date_strings[-1],
         confirmation_date=breakout["date"] if breakout else None,
-        source_rule_version=str(MAIN_RULES.get("source_rule_version", "caisen-main-bottoms-v11")),
+        source_rule_version=str(MAIN_RULES.get("source_rule_version", "caisen-main-bottoms-v2")),
     )
     patterns = [] if historical_only else [pattern]
     for retired in neckline_history:
@@ -2291,14 +2345,12 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         old_breakout = retired["breakout"]
         old_invalidation = retired["invalidation"]
         old_line = dict(old_candidate["line"])
-        old_post_breakout_support = float(old_breakout["frozen_neckline"])
         old_structure_frozen_index = max(int(old_candidate["frozen_index"]), int(structure_known_at))
         old_identity_dates = [pivot.date for pivot in sequence] + [
             _date_text(dates, item["pivot_index"], date_strings) for item in old_tests
         ]
         old_identity = "|".join([code, kind, timeframe, MAIN_PATTERN_TYPES[family], pivot_scale,
                                   ":".join(old_identity_dates)])
-        old_identity += '|' + _frozen_boundary_identity(old_line, first_trough.index)
         old_id = hashlib.sha1(old_identity.encode("utf-8")).hexdigest()[:16]
         snapshot = deepcopy(pattern)
         snapshot.pattern_id = f"{code}:{old_id}"
@@ -2307,8 +2359,6 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         snapshot.confirmed_at = int(old_breakout["index"])
         snapshot.confirmation_date = old_breakout["date"]
         snapshot.key_points["neckline_test_indices"] = [item["pivot_index"] for item in old_tests]
-        snapshot.key_points['frozen_boundary_identity'] = _frozen_boundary_identity(
-            old_line, first_trough.index)
         if family == "triangle_bottom":
             old_height = max(0.0, _at(old_line, first_trough.index) - _at(lower_boundary, first_trough.index))
         elif family == "inverse_head_shoulders":
@@ -2330,9 +2380,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                     "signal_eligible": False,
                     "eligibility_reason": "terminal_state",
                     "terminal_state": "invalidated",
-                    "neckline_at_observed": old_post_breakout_support,
-                    "post_breakout_support_level": old_post_breakout_support,
-                    "post_breakout_support_date": old_breakout["date"],
+                    "neckline_at_observed": float(_at(old_line, observed_index)),
                     "neckline_effective_start": old_tests[0]["coverage_start_date"],
                     "neckline_independent_test_count": len(old_tests),
                     "neckline_selection_score": old_tests[0]["selection_score"],
@@ -2343,7 +2391,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 historical_candidates = sorted(
                     [candidate for candidate in neckline_candidates
                      if candidate["frozen_index"] < int(old_breakout["index"])],
-                    key=lambda candidate: candidate["score"])
+                    key=_neckline_candidate_order)
                 historical_summaries = [{
                     "candidate_id": candidate["tests"][0]["pair_id"],
                     "rank": position,
@@ -2362,6 +2410,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 value.update({
                     "selected_candidate_id": old_tests[0]["pair_id"],
                     "selected_line": old_line,
+                    "neckline_relative_height": old_candidate["neckline_relative_height"],
                     "effective_start_date": old_tests[0]["coverage_start_date"],
                     "freeze_date": _date_text(dates, old_structure_frozen_index, date_strings),
                     "line_frozen_at": _date_text(dates, old_candidate["frozen_index"], date_strings),
@@ -2372,10 +2421,6 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                     "decline_check": _neckline_decline_check(family, old_line,
                         old_tests[0]["coverage_start_index"], int(old_breakout["index"])),
                     "diagnostics_as_of": old_breakout["date"],
-                    "first_boundary_crossing": _first_frozen_boundary_crossing(
-                        close, atr_values, old_line, old_structure_frozen_index + 1,
-                        int(old_breakout['index']), tick_size,
-                        frame.attrs.setdefault('frozen_boundary_crossing_cache', {})),
                     "rejection_counts": rejection_summary(int(old_breakout["index"]))[0],
                     "rejected_candidates": rejection_summary(int(old_breakout["index"]))[1],
                     "independent_tests": old_tests,
@@ -2383,11 +2428,9 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                                            if entry["selected"]), None),
                     "candidates": historical_summaries,
                     "retired_segments": [entry for entry in neckline_history
-                                         if entry.get("candidate_id") == old_tests[0]["pair_id"]
-                                         and entry.get("breakout_date", "") <= old_breakout["date"]],
+                                         if entry.get("breakout_date", "") <= old_breakout["date"]],
                     "early_breakouts": [entry for entry in early_breakouts
-                                         if entry.get("candidate_id") == old_tests[0]["pair_id"]
-                                         and entry.get("date", "") <= old_breakout["date"]],
+                                         if entry.get("date", "") <= old_breakout["date"]],
                     "coverage": {"passed": True,
                                  "start_date": old_tests[0]["coverage_start_date"],
                                  "end_date": old_tests[0]["coverage_end_date"],
@@ -2395,10 +2438,6 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 })
             elif item["code"] == "neckline_breakout":
                 item["value"] = old_breakout
-            elif item["code"] == "weak_crossings":
-                item["value"] = [crossing for crossing in weak_crossings
-                                  if crossing.get("candidate_id") == old_tests[0]["pair_id"]
-                                  and crossing.get("date", "") <= old_breakout["date"]]
             elif item["code"] == "neckline_invalidation":
                 item["value"] = {"date": retired["invalidation_date"],
                                  "index": int(old_invalidation["index"]),
@@ -2483,7 +2522,10 @@ def detect_main_bottoms(bars: pd.DataFrame, code="", kind="stock", timeframe="1d
     events = list(unique.values())
     if events:
         rank = {"2atr_5pct": 0, "3atr_8pct": 1, "5atr_12pct": 2}
-        active = [event for event in events if event.state in {"forming", "confirmed", "target_reached"}]
+        # A completed target is historical evidence, not an active parent or
+        # a candidate that should outrank a currently forming structure.
+        active = [event for event in events
+                  if derive_lifecycle_state(event) in {"forming", "confirmed"}]
         pool = active or events
         internal_parents = {}
         for child in pool:
@@ -2494,7 +2536,8 @@ def detect_main_bottoms(bars: pd.DataFrame, code="", kind="stock", timeframe="1d
             action_date = pd.Timestamp(child.confirmation_date or child.last_observed_date)
             parents = []
             for parent in pool:
-                if parent.pattern_type != "inverse_head_shoulders" or parent.state not in {"forming", "confirmed"}:
+                if (parent.pattern_type != "inverse_head_shoulders"
+                        or derive_lifecycle_state(parent) not in {"forming", "confirmed"}):
                     continue
                 parent_start = pd.Timestamp(parent.key_points.get("pivot_1_date", parent.formed_at))
                 parent_end = pd.Timestamp(parent.key_points.get("pivot_3_date", parent.last_observed_date))
@@ -2537,7 +2580,7 @@ def detect_main_bottoms(bars: pd.DataFrame, code="", kind="stock", timeframe="1d
                                    if event.pattern_type == "inverse_head_shoulders" else "")
             left_shoulder_date = (event.key_points.get("pivot_1_date", "")
                                   if event.pattern_type == "inverse_head_shoulders" else "")
-            return (event.state in {"confirmed", "target_reached"}, event_date,
+            return (event.state == "confirmed", event_date,
                     event.pattern_type == "w_bottom",
                     scale_rank if event.pattern_type == "inverse_head_shoulders" else -1,
                     right_shoulder_date, left_shoulder_date,
@@ -2562,6 +2605,78 @@ def detect_main_bottoms(bars: pd.DataFrame, code="", kind="stock", timeframe="1d
                 "reason": ("nested_in_known_main_inverse_head_shoulders" if parent is not None else
                            "latest_confirmation_then_pattern_family_then_coarsest_ihs_scale_then_structure_duration_then_pressure_evidence"),
             }})
+
+        def eligible_pattern_ids_at(as_of):
+            """Rebuild the live hierarchy at an event date, without future terminal states."""
+            as_of_text = str(pd.Timestamp(as_of).date())
+            live = []
+            for candidate in events:
+                detail = {item["code"]: item["value"] for item in candidate.evidence}
+                structure = detail.get("main_structure", {})
+                selection = detail.get("neckline_selection", {})
+                known_dates = [value for value in (selection.get("structure_known_at"),
+                                                    selection.get("line_frozen_at"),
+                                                    selection.get("freeze_date")) if value]
+                ready_at = max(known_dates) if known_dates else candidate.formed_at
+                if ready_at > as_of_text or candidate.formed_at > as_of_text:
+                    continue
+                terminal = structure.get("terminal_state")
+                terminal_date = structure.get("structure_end_date")
+                if terminal in TERMINAL_PATTERN_STATES and terminal_date and terminal_date <= as_of_text:
+                    continue
+                if derive_lifecycle_state(candidate) in TERMINAL_PATTERN_STATES:
+                    state_date = structure.get("structure_end_date")
+                    if not state_date or state_date <= as_of_text:
+                        continue
+                live.append(candidate)
+            nested = set()
+            for child in live:
+                child_points = [pd.Timestamp(value) for key, value in child.key_points.items()
+                                if key.startswith("pivot_") and key.endswith("_date") and value]
+                if not child_points:
+                    continue
+                child_start = pd.Timestamp(child.key_points.get("pivot_1_date", child.formed_at))
+                child_end = pd.Timestamp(child.key_points.get("pivot_3_date", max(child_points)))
+                child_scale = rank.get(child.key_points.get("pivot_scale"), -1)
+                for parent in live:
+                    if parent.pattern_type != "inverse_head_shoulders" or parent.pattern_id == child.pattern_id:
+                        continue
+                    same_head_right = (
+                        parent.key_points.get("pivot_2_date") == child.key_points.get("pivot_2_date")
+                        and parent.key_points.get("pivot_3_date") == child.key_points.get("pivot_3_date"))
+                    parent_start = pd.Timestamp(parent.key_points.get("pivot_1_date", parent.formed_at))
+                    parent_end = pd.Timestamp(parent.key_points.get("pivot_3_date", parent.last_observed_date))
+                    parent_scale = rank.get(parent.key_points.get("pivot_scale"), -1)
+                    parent_detail = {item["code"]: item["value"] for item in parent.evidence}
+                    known_at = parent_detail.get("neckline_selection", {}).get("structure_known_at", parent.formed_at)
+                    strictly_inside = (parent_start <= child_start and child_end <= parent_end
+                                       and (parent_start < child_start or child_end < parent_end))
+                    if (not same_head_right and strictly_inside and parent_scale >= child_scale
+                            and known_at <= as_of_text):
+                        nested.add(child.pattern_id)
+                        break
+            return {item.pattern_id for item in live if item.pattern_id not in nested}
+
+        confirmation_dates = sorted({event.confirmation_date for event in events
+                                     if event.confirmation_date})
+        entry_eligible_at = {date: eligible_pattern_ids_at(date) for date in confirmation_dates}
+        for event in events:
+            if not event.confirmation_date:
+                continue
+            structure = next(item["value"] for item in event.evidence if item["code"] == "main_structure")
+            selected_ids = entry_eligible_at.get(event.confirmation_date, set())
+            structure["entry_eligible_at_confirmation"] = event.pattern_id in selected_ids
+            structure["selection_at_confirmation"] = {
+                "date": event.confirmation_date,
+                "eligible": event.pattern_id in selected_ids,
+                "eligible_instance_pattern_ids": sorted(selected_ids),
+                "rule": "as_of_ready_parent_hierarchy_v1",
+            }
+    batch_discovery_date = str(pd.Timestamp(full_history.date.iloc[-1]).date())
+    from .structure_boundary import attach_joint_lifecycle
+    for event in events:
+        attach_joint_lifecycle(event, discovered_at=batch_discovery_date,
+                               discovery_kind="batch_as_of")
     return sorted(events, key=lambda event: (event.formed_at, event.pattern_type, event.pattern_id))
 
 
@@ -2604,7 +2719,9 @@ def link_main_bottom_children(main_events: Iterable[Pattern], existing_patterns:
         evidence = {item["code"]: item["value"] for item in event.evidence}
         structure = evidence.get("main_structure", {})
         selection = evidence.get("main_selection", {})
-        if selection.get("selected"):
+        if (selection.get("selected")
+                and derive_lifecycle_state(event) not in TERMINAL_PATTERN_STATES
+                and structure.get("terminal_state") not in TERMINAL_PATTERN_STATES):
             parents.append((event, structure))
     for child in all_events:
         if child.direction != "bullish" or any(item["code"] == "main_structure" for item in child.evidence):
@@ -2635,6 +2752,7 @@ def link_main_bottom_children(main_events: Iterable[Pattern], existing_patterns:
             "suppressed": True, "reason": "nested_in_main_bottom", "parent_id": parent.pattern_id,
             "first_trough_date": structure["first_trough_date"],
             "structure_end_date": structure.get("structure_end_date"),
+            "suppressed_at": str(actionable_date.date()),
         }})
         child_ids = [item["value"] for item in parent.evidence if item["code"] == "main_children"]
         if child_ids:
@@ -2645,4 +2763,7 @@ def link_main_bottom_children(main_events: Iterable[Pattern], existing_patterns:
                           "anchor_start_date": str(child_start.date()), "anchor_end_date": str(child_end.date())})
         parent.evidence = [item for item in parent.evidence if item["code"] != "main_children"]
         parent.evidence.append({"code": "main_children", "value": child_ids})
+    for event in all_events:
+        if event.pattern_type == "bull_flag":
+            attach_joint_lifecycle(event)
     return all_events

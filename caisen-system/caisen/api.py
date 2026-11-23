@@ -20,7 +20,7 @@ import pandas as pd
 
 from .market import (InstrumentFile, aggregate_weekly, default_china_calendar,
                      discover_instruments, load_daily_bars, TICK_RULE_VERSION)
-from .patterns import BOOK_PATTERNS, PATTERN_LABELS, current_pattern_snapshot, detect_patterns
+from .patterns import BOOK_PATTERNS, current_pattern_snapshot, detect_patterns
 from .daily_incremental import (recognize_daily_history, recognize_weekly_history,
                                 ENGINE_VERSION as DAILY_ENGINE_VERSION,
                                 SOURCE_RULE_VERSION as DAILY_SOURCE_RULE_VERSION)
@@ -31,9 +31,10 @@ from .fixed_backtest import (STRATEGY_VERSION as FIXED_STRATEGY_VERSION,
                              _signal_pattern_payloads)
 from .plans import BUY_CANDIDATE_PATTERN_TYPES, build_trade_plan
 from .structure_boundary import JOINT_LIFECYCLE_SCHEMA_VERSION
-from .store import (connect, create_scan_run, get_pattern, get_scan_run, interrupt_active_scan_runs,
-                    import_legacy_scan_jobs, list_scan_runs, query_scan_results, save_pattern, save_patterns,
+from .store import (connect, create_scan_run, get_scan_run, interrupt_active_scan_runs,
+                    import_legacy_scan_jobs, list_scan_runs, query_scan_results, rank_saved_scan_results,
                     save_scan_result, scan_result_count, update_scan_run)
+from .scan_summary import scan_summary
 from . import RULE_VERSION, __version__
 from .data_refresh import refresh_one
 
@@ -53,7 +54,8 @@ def _scan_version_metadata():
             "tick_rule_version": TICK_RULE_VERSION,
             "strategy_version": FIXED_STRATEGY_VERSION,
             "target_method": FIXED_TARGET_METHOD,
-            "display_derivation_version": DISPLAY_DERIVATION_VERSION}
+            "display_derivation_version": DISPLAY_DERIVATION_VERSION,
+            "scan_storage_version": 1}
 
 
 def _same_day_signal_ids(recognition, observed_date):
@@ -81,14 +83,6 @@ def _gate_detail_plan_to_primary_signal(plan, pattern, timeframe, latest_daily_d
         plan["reason_codes"] = list(dict.fromkeys(
             (plan.get("reason_codes") or []) + ["not_backtest_primary_event"]))
     return plan
-
-
-def _scan_instrument_versions(bars, data_version):
-    quality = getattr(bars, "attrs", {}).get("quality", {}) if bars is not None else {}
-    return {"data_version": data_version or "unknown",
-            "tick_size": quality.get("tick_size"),
-            "tick_size_source": quality.get("tick_size_source", "unknown"),
-            "tick_rule_version": quality.get("tick_rule_version", TICK_RULE_VERSION)}
 
 
 @asynccontextmanager
@@ -168,11 +162,11 @@ def _quality_status(bars):
     return "usable" if verified else "usable_with_warnings"
 
 
-def _mini_bars(bars, size=48):
+def _mini_bars(bars, size=24):
     if bars is None or bars.empty:
         return []
-    return [{"date":str(row.date.date()),"open":float(row.open),"high":float(row.high),
-             "low":float(row.low),"close":float(row.close),"volume":float(row.volume)}
+    return [{"open":float(row.open),"high":float(row.high),
+             "low":float(row.low),"close":float(row.close)}
             for row in bars.tail(size).itertuples()]
 
 def _main_bottom_chart_offset(bars, timeframe):
@@ -302,26 +296,19 @@ def _analyze_scan_instrument(instrument, params, root=None):
     """Analyze one instrument without writing shared scan state or SQLite."""
     root = ROOT if root is None else root
     kind,code=instrument.kind,instrument.code
-    version_metadata = _scan_version_metadata()
-    instrument_versions = {"data_version": "unknown", "tick_size": None,
-                          "tick_size_source": "unknown", "tick_rule_version": TICK_RULE_VERSION}
+    failure_rank = {"action_priority":5,"confirmed_timeframes":0,"reward_risk":0,
+                    "risk_pct":1,"confirmation_ordinal":0}
+    no_data = {"code":code,"kind":kind,"name":code,"category":"unclassified",
+               "action":"INSUFFICIENT_DATA"}
     try:
         daily_result=load_daily_bars(instrument,root=root)
         daily_background=_history_through(daily_result,params.get("date_to")).bars
-        instrument_versions = _scan_instrument_versions(daily_background, daily_result.data_version)
-        daily_result,analysis_window=_slice_scan_window(daily_result,params)
+        daily_result,_=_slice_scan_window(daily_result,params)
         daily=daily_result.bars
         if daily.empty:
-            return ({"code":code,"kind":kind,"name":code,"category":"unclassified",
-                     "action":"INSUFFICIENT_DATA","state":"no_rows_in_date_range",
-                     "reason_codes":["no_market_data_in_selected_date_range"],
-                     "analysis_window":analysis_window,
-                     "versions":version_metadata,"instrument_versions":instrument_versions,
-                     "strategy_version":FIXED_STRATEGY_VERSION,"target_method":FIXED_TARGET_METHOD,
-                     "display_derivation_version":DISPLAY_DERIVATION_VERSION,
-                     "pattern_migration":migration_status(),
-                     "rank":{"action_priority":5,"confirmed_timeframes":0,"reward_risk":0,"risk_pct":1,
-                             "confirmation_ordinal":0,"tie_break":{"kind":kind,"code":code}}}, [])
+            summary = scan_summary({**no_data,"state":"no_rows_in_date_range",
+                                    "reason_codes":["no_market_data_in_selected_date_range"]})
+            return {**summary,"rank":failure_rank}, False
         requested=params.get("timeframes",["1d","1w"])
         weekly_result = (aggregate_weekly(replace(daily_result, bars=daily_background),
                                           calendar=default_china_calendar())
@@ -386,76 +373,31 @@ def _analyze_scan_instrument(instrument, params, root=None):
             watch_patterns_by_timeframe=patterns_by_tf)
         all_patterns=[p for plist in patterns_by_tf.values() for p in plist]
         pattern_rows=[]
-        main_events=[]
-        pending_patterns=[]
         for p in all_patterns:
             structure=next((item.get("value") for item in p.evidence
                             if item.get("code")=="main_structure" and isinstance(item.get("value"),dict)),None)
             is_main=bool(structure and structure.get("role")=="main")
-            label=PATTERN_LABELS.get(p.pattern_type,p.pattern_type)
-            if is_main:
-                label="主结构 · "+label
-            state_label=("，已成型，等待颈线有效突破" if p.state=="forming" and is_main else
-                         "，未确认" if p.state=="forming" else
-                         "，价格确认" if p.state=="confirmed" else
-                         "，已失效" if p.state=="invalidated" else
-                         "，早期突破已消耗，实例终止" if p.state=="expired" else
-                         "，目标已达" if p.state=="target_reached" else
-                         "，箱体后续边界已确认（历史）" if p.state=="followthrough_confirmed" else "，已确认")
-            payload=p.to_dict()
-            payload["display_label"]=label+state_label+("，结构存在歧义" if "ambiguous_structure" in p.flags else "")
-            pending_patterns.append(payload)
-            summary={"pattern_id":p.pattern_id,"pattern_type":p.pattern_type,"direction":p.direction,
-                     "timeframe":p.timeframe,"state":p.state,"display_label":payload["display_label"],
+            summary={"pattern_id":p.pattern_id,"pattern_type":p.pattern_type,
+                     "timeframe":p.timeframe,"state":p.state,
                      "formed_at":p.formed_at,"confirmation_date":p.confirmation_date,
-                     "volume_verified":p.volume_verified,"parent_id":p.parent_id,
-                     "is_main_structure":is_main,
+                     "parent_id":p.parent_id,"is_main_structure":is_main,
                      "selected_main":bool(is_main and next((item.get("value",{}).get("selected")
                                                             for item in p.evidence if item.get("code")=="main_selection"),False)),
-                     "main_scale":structure.get("scale") if is_main else None,
                      "execution_suppressed":any(item.get("code")=="execution_suppression"
                                                  and isinstance(item.get("value"),dict)
                                                  and item["value"].get("suppressed") is True for item in p.evidence)}
             pattern_rows.append(summary)
-            if is_main:
-                main_events.append(payload)
-        selected_mains=[event for event in main_events if next(
-            (item.get("value",{}).get("selected") for item in event.get("evidence",[]) if item.get("code")=="main_selection"),False)]
-        selected_main_ids={event["pattern_id"] for event in selected_mains}
-        main_children=[summary for summary in pattern_rows if summary.get("parent_id") in selected_main_ids]
-        ended_patterns=[summary for summary in pattern_rows if summary.get("state") in
-                        ("expired","invalidated","target_reached","followthrough_confirmed")]
-        row={**decision,"patterns":pattern_rows,"main_structure_events":main_events,
-             "selected_main_structures":selected_mains,"main_children":main_children,
-             "ended_patterns":ended_patterns,"category":category,
-             "strategy_version":FIXED_STRATEGY_VERSION,"target_method":FIXED_TARGET_METHOD,
-             "display_derivation_version":DISPLAY_DERIVATION_VERSION,
-             "strategy_events":[_compact_strategy_event(event,tf) for tf in requested
-                                 for event in recognition_by_tf.get(tf,{}).get("signals",[])
-                                 if ((not params.get("date_from") or event.get("signal_date","") >= params["date_from"])
-                                     and (not params.get("date_to") or event.get("signal_date","") <= params["date_to"]))],
+        row={**decision,"patterns":pattern_rows,"category":category,
              "name":str(daily.name.iloc[-1]) if "name" in daily and len(daily) else code,
              "latest_date":str(daily.date.iloc[-1].date()) if len(daily) else None,
              "latest_close":float(daily.close.iloc[-1]) if len(daily) else None,
-             "analysis_window":analysis_window,"data_version":daily_result.data_version,
-             "data_warnings":daily_result.warnings,
-             "data_versions":{"1d":daily_result.data_version,
-                              "1w":weekly_result.data_version if weekly_result is not None else None},
-             "versions":version_metadata,"instrument_versions":instrument_versions,
-             "quality_status":daily_result.quality_status,"mini_bars":_mini_bars(daily),
-             "pattern_migration":migration_status()}
-        json.dumps(row,ensure_ascii=False,allow_nan=False)
-        return row,pending_patterns
+             "mini_bars":_mini_bars(daily)}
+        summary = scan_summary(row)
+        return {**summary,"rank":decision["rank"]}, bool(daily_result.warnings)
     except Exception as exc:
-        return ({"code":code,"kind":kind,"name":code,"category":"unclassified",
-                 "action":"INSUFFICIENT_DATA","state":"data_error",
-                 "reason_codes":["file_analysis_failed"],"error":str(exc),
-                 "versions":version_metadata,"instrument_versions":instrument_versions,
-                 "strategy_version":FIXED_STRATEGY_VERSION,"target_method":FIXED_TARGET_METHOD,
-                 "display_derivation_version":DISPLAY_DERIVATION_VERSION,
-                 "pattern_migration":migration_status(),
-                 "rank":{"action_priority":5,"confirmed_timeframes":0,"reward_risk":0,"risk_pct":1,
-                         "confirmation_ordinal":0,"tie_break":{"kind":kind,"code":code}}}, [])
+        summary = scan_summary({**no_data,"state":"data_error","error":str(exc),
+                                "reason_codes":["file_analysis_failed"]})
+        return {**summary,"rank":failure_rank}, False
 
 
 def _refresh_worker(job_id, params):
@@ -574,7 +516,7 @@ def analysis(code: str, kind: str = "stock", timeframe: str = "1d", request: Req
     bars=bars_by_tf[timeframe]
     results=[]
     for pattern in patterns:
-        payload=pattern.to_dict(); save_pattern(payload)
+        payload=pattern.to_dict()
         payload["chart_offset"]=chart_offsets.get(pattern.pattern_id,0)
         payload["display_label"]=_pattern_display_label(pattern)
         if pattern.pattern_type in BUY_CANDIDATE_PATTERN_TYPES and pattern.direction == "bullish" and pattern.state == "confirmed" and "ambiguous_structure" not in pattern.flags:
@@ -639,8 +581,8 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
         if params.get("limit") is not None:
             instruments=instruments[:params["limit"]]
         records=[None]*len(instruments)
-        pending_patterns=[]
         completed=0
+        warning_count=0
         max_workers=max(1,min(10,len(instruments)))
         executor=executor_factory(max_workers=max_workers)
         stop_event=threading.Event()
@@ -678,16 +620,15 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
                         if future.cancelled():
                             interrupted=True
                             continue
-                        row,patterns=future.result()
-                        records[index]=row
+                        row,has_warnings=future.result()
+                        warning_count+=has_warnings is True
+                        summary=scan_summary(row)
+                        records[index]={**summary,"rank":row.get("rank",{}),"_source_ordinal":index}
+                        row=summary
                         if persist_history:
                             save_scan_result(job_id,index,row)
-                        pending_patterns.extend(patterns)
                         completed+=1
                         _scan_progress(job_id,completed-1,len(instruments),persist_history)
-                        if len(pending_patterns)>=500:
-                            save_patterns(pending_patterns)
-                            pending_patterns=[]
                         if interrupted or stop_event.is_set():
                             interrupted=True
                             continue
@@ -703,9 +644,6 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
                             interrupted=True
                     if stop_event.is_set():
                         interrupted=True
-                if pending_patterns:
-                    save_patterns(pending_patterns)
-                    pending_patterns=[]
                 if interrupted:
                     partial_records=[row for row in records if row is not None]
                     progress=completed/max(len(instruments),1)
@@ -724,12 +662,9 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
         finally:
             with _scan_executors_lock:
                 _active_scan_executors.pop(executor,None)
-        if pending_patterns:
-            save_patterns(pending_patterns)
         records=rank_scan_results(records)
         if persist_history:
-            for ordinal,row in enumerate(records):
-                save_scan_result(job_id,ordinal,row)
+            rank_saved_scan_results(job_id, [row["_source_ordinal"] for row in records])
         failed_count=sum(row.get("state")=="data_error" for row in records)
         run_status=("failed" if records and failed_count==len(records) else
                     ("partial_failed" if failed_count else "completed"))
@@ -742,7 +677,7 @@ def _scan_worker(job_id, params, root=None, executor_factory=None, analysis_fn=N
                                     "stock_count":sum(item.kind=="stock" for item in instruments),
                                     "etf_count":sum(item.kind=="etf" for item in instruments),"source":"local_csv",
                                     "requested_window":{"from":params.get("date_from"),"to":params.get("date_to")},
-                                    "warning_count":sum(bool(row.get("data_warnings")) for row in records),
+                                    "warning_count":warning_count,
                                     "failed_count":failed_count},
                                     "limitations":["当前本地存续标的分析，不代表完整市场历史成分", "量能/企业行动信息未验证；候选仅供观察", "无交易日历时周线只作预览，数据不足不参与信号"]}
         if not persist_history:
@@ -873,9 +808,7 @@ def get_job(job_id: str):
 
 @app.get("/api/v1/patterns/{pattern_id}")
 def pattern_detail(pattern_id: str):
-    pattern=get_pattern(pattern_id)
-    if pattern is None: raise HTTPException(404,"pattern not found")
-    return pattern
+    raise HTTPException(410, "历史形态证据不再保存；请打开标的详情，使用最新行情重新分析。")
 
 
 def _daily_backtest_worker(job_id, params):

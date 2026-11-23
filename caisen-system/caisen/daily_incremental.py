@@ -23,7 +23,7 @@ from .main_bottoms import (
 from .patterns import PATTERN_LABELS, _line, _at
 from .schemas import Pattern, Pivot
 
-ENGINE_VERSION = "caisen-joint-pattern-session-v9-flag-confirmation-history"
+ENGINE_VERSION = "caisen-joint-pattern-session-v10-premature-boundary-retirement"
 BOUNDARY_FIRST_ENGINE_VERSION = ENGINE_VERSION
 SOURCE_RULE_VERSION = str(MAIN_RULES.get("source_rule_version", "unknown"))
 from .research_config import recognition_context_snapshot
@@ -295,6 +295,65 @@ class DailyRecognitionSession:
         return any(_same_neckline_boundary_phase(previous, phase, self.tick_size)
                    for previous in self.consumed_neckline_phases.get(
                        self._candidate_geometry_key(candidate), ()))
+
+    def _record_premature_boundary(self, candidate, pattern, index, level, buffer, previous_atr):
+        details = {item["code"]: item["value"] for item in pattern.evidence}
+        selection = details["neckline_selection"]
+        line = dict(pattern.neckline)
+        tests = details.get("neckline_tests", [])
+        date = self.date_strings[index]
+        early = {"date": date, "index": index, "close": self.close_values[index],
+                 "frozen_neckline": level, "required_close": level + buffer,
+                 "atr14_previous": previous_atr, "tolerance": buffer,
+                 "candidate_id": selection.get("selected_candidate_id"),
+                 "line": line, "tests": tests}
+        phase = {"line": line, "tests": tests, "consumed_index": index,
+                 "candidate_id": early["candidate_id"],
+                 "reason": "breakout_before_minimum_structure_duration"}
+        new_phase = not self._boundary_is_consumed(candidate, phase)
+        self._remember_consumed_boundary(candidate, phase)
+        existing = selection.setdefault("early_breakouts", [])
+        if not any(item.get("date") == date and item.get("candidate_id") == early["candidate_id"]
+                   for item in existing):
+            existing.append(early)
+        details["main_structure"].update(early_breakout_consumed=True, terminal_state="expired",
+                                         structure_end_date=date, signal_eligible=False,
+                                         eligibility_reason="terminal_state")
+        pattern.state = "expired"
+        pattern.last_observed_date = self.date_strings[-1]
+        return new_phase
+
+    def _audit_proposed_boundary(self, candidate, pattern):
+        """Check this line's own history, including dates when another line ranked first."""
+        if pattern is None or pattern.state != "forming" or not pattern.neckline:
+            return False
+        from .structure_boundary import FrozenBoundary, first_buffered_crossing
+        details = {item["code"]: item["value"] for item in pattern.evidence}
+        selection = details.get("neckline_selection") or {}
+        frozen = self._index_for_date(selection.get("line_frozen_at"))
+        structure_known = self._index_for_date(selection.get("structure_known_at"))
+        maturity = self._candidate_maturity_date(candidate)
+        if frozen is None or structure_known is None or not maturity:
+            return False
+        end = bisect_left(self.date_strings, maturity) - 1
+        ready = max(frozen, structure_known)
+        if end < ready:
+            return False
+        if len(self.close_values) != len(self.bars):
+            self.close_values = [float(bar["close"]) for bar in self.bars]
+        rules = MAIN_RULES["breakout"]
+        multiple = float(rules.get("close_buffer_previous_atr_multiple", 1.0))
+        ticks = float(rules.get("minimum_buffer_ticks", 2))
+        boundary = FrozenBoundary("audit", pattern.neckline["slope"], pattern.neckline["intercept"])
+        first = first_buffered_crossing(
+            self.close_values, self.atr_values, boundary, ready + 1, end, self.tick_size,
+            self.boundary_crossing_cache, buffer_multiple=multiple, minimum_ticks=ticks)
+        if first is None:
+            return False
+        previous_atr = self.atr_values[first - 1]
+        return self._record_premature_boundary(candidate, pattern, first, boundary.value_at(first),
+                                               max(ticks * self.tick_size, multiple * previous_atr),
+                                               previous_atr)
 
     def _prepare_boundary_pairs(self):
         """Build reusable neckline pair gates before refreshing shape candidates."""
@@ -1478,13 +1537,24 @@ class DailyRecognitionSession:
             family, seq, scale = candidate["family"], candidate["sequence"], candidate["scale"]
             evaluated_geometries.add(geometry)
             self.performance["candidate_evaluations"] += 1
-            patterns = _make_main_pattern(frame, self.code, self.kind, self.timeframe, family, seq,
-                                          all_neckline_pivots, atr_values, self.tick_size,
-                                          scale, "5y", background_bars=frame,
-                                          collect_diagnostics=False,
-                                          consumed_boundary_phases=self.consumed_neckline_phases.get(
-                                              self._candidate_geometry_key(candidate), ()))
-            patterns = patterns if isinstance(patterns, list) else [patterns]
+            patterns = []
+            retried_boundary = False
+            while True:
+                batch = _make_main_pattern(
+                    frame, self.code, self.kind, self.timeframe, family, seq,
+                    all_neckline_pivots, atr_values, self.tick_size, scale, "5y",
+                    background_bars=frame, collect_diagnostics=False,
+                    consumed_boundary_phases=self.consumed_neckline_phases.get(
+                        self._candidate_geometry_key(candidate), ()))
+                batch = batch if isinstance(batch, list) else [batch]
+                rerank = False
+                for proposed in batch:
+                    rerank = self._audit_proposed_boundary(candidate, proposed) or rerank
+                patterns.extend(batch)
+                # Exclude each newly consumed line and try another qualified boundary.
+                if not rerank or any(p and p.state in {"forming", "confirmed"} for p in batch):
+                    break
+                retried_boundary = True
             for pattern in patterns:
                 if pattern is None:
                     continue
@@ -1541,9 +1611,13 @@ class DailyRecognitionSession:
                     self._remember_consumed_boundary(candidate, self._pattern_boundary_phase(
                         pattern, pairing_index, "pairing_day_cross_consumed"))
                     self.retired_patterns[lifecycle["instance_id"]] = deepcopy(pattern)
-            replacement = next((p for p in patterns if p is not None
+            replacement = next((p for p in batch if p is not None
                                 and p.state not in {"invalidated", "target_reached", "expired"}),
-                               next((p for p in patterns if p is not None), None))
+                               next((p for p in batch if p is not None), None))
+            if retried_boundary and replacement is not None and replacement.state in {
+                    "invalidated", "target_reached", "expired"}:
+                self._retire_main_pattern(replacement)
+                replacement = None
             candidate["pattern"] = self._keep_frozen_boundary(candidate.get("pattern"), replacement)
             for pattern in patterns:
                 if pattern is None:
@@ -1698,34 +1772,10 @@ class DailyRecognitionSession:
                     if not 0.5 <= position <= 0.75:
                         continue
                 if current_date < (self._candidate_maturity_date(candidate) or "9999-12-31"):
-                    early = {"date": current_date, "index": int(i),
-                             "close": float(self.bars[i]["close"]),
-                             "frozen_neckline": float(_at(line, i)),
-                             "required_close": float(required),
-                             "atr14_previous": float(previous_atr),
-                             "tolerance": float(required - _at(line, i)),
-                             "candidate_id": selection.get("selected_candidate_id"),
-                             "line": dict(line), "tests": detail.get("neckline_tests", [])}
-                    consumed = dict(phase, consumed_index=int(i),
-                                    phase_tolerance=_neckline_test_tolerance_at(
-                                        i, self.atr_values, self.tick_size),
-                                    candidate_id=early["candidate_id"],
-                                    reason="breakout_before_minimum_structure_duration")
-                    self._remember_consumed_boundary(candidate, consumed)
-                    existing = selection.setdefault("early_breakouts", [])
-                    if not any(item.get("date") == current_date
-                               and item.get("candidate_id") == early["candidate_id"]
-                               for item in existing):
-                        existing.append(early)
-                    structure.update({"early_breakout_consumed": True,
-                                      "terminal_state": "expired",
-                                      "structure_end_date": current_date,
-                                      "signal_eligible": False,
-                                      "eligibility_reason": "terminal_state"})
-                    pattern.state = "expired"
-                    pattern.last_observed_date = current_date
-                    lifecycle = self._attach_session_lifecycle(pattern)
-                    self.retired_patterns[lifecycle["instance_id"]] = deepcopy(pattern)
+                    self._record_premature_boundary(candidate, pattern, i, _at(line, i),
+                                                    required - _at(line, i), previous_atr)
+                    self._retire_main_pattern(pattern)
+                    candidate.update(pattern=None, needs_initial_eval=True)
                     continue
                 snapshot = deepcopy(pattern)
                 snapshot.state = "confirmed"

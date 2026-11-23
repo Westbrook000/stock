@@ -229,7 +229,7 @@ def test_weekly_recognition_uses_same_engine_and_twelve_month_maturity():
     result = recognize_weekly_history(weekly_bars, "WEEKLY", "stock", tick_size=0.01)
     assert result["performance"]["timeframe"] == "1w"
     assert result["performance"]["engine_version"] == \
-        "caisen-joint-pattern-session-v9-flag-confirmation-history"
+        "caisen-joint-pattern-session-v10-premature-boundary-retirement"
     assert all(pattern.timeframe == "1w" for pattern in result["patterns"])
 
 
@@ -264,7 +264,7 @@ def test_boundary_first_dispatch_is_explicit_and_reports_pair_reuse():
                                      performance=performance)
 
     assert signals == []
-    assert performance["engine_version"] == "caisen-joint-pattern-session-v9-flag-confirmation-history"
+    assert performance["engine_version"] == "caisen-joint-pattern-session-v10-premature-boundary-retirement"
     assert performance["effective_recognizer"] == performance["engine_version"]
     assert performance["bars_appended"] == len(bars)
     assert performance["prefix_frame_builds"] <= len(bars)
@@ -972,3 +972,96 @@ def test_boundary_first_prefix_events_do_not_change_after_appending_future_bars(
                        for signal in extended if signal["signal_date"] <= cutoff]
 
     assert extended_events == prefix_events
+
+
+def test_159699_retires_each_neckline_that_broke_before_maturity():
+    source = Path(__file__).parents[2] / "data" / "etfs" / "159699.csv"
+    bars = pd.read_csv(source, parse_dates=["date"])
+    bars = bars[bars.date <= "2026-11-19"].reset_index(drop=True)
+    result = recognize_daily_history(bars, "159699", "etf", tick_size=0.001)
+    same_lows = [
+        pattern for pattern in result["patterns"]
+        if pattern.pattern_type == "w_bottom"
+        and [pattern.key_points.get(f"pivot_{n}_date") for n in (1, 2)]
+        == ["2024-01-22", "2024-04-19"]
+    ]
+    failed = next(pattern for pattern in same_lows
+                  if np.isclose(pattern.neckline["intercept"], 0.94588))
+    assert failed.state == "expired"
+    assert failed.confirmation_date is None
+    history = {item["code"]: item["value"] for item in failed.evidence}["joint_lifecycle"]
+    early = [event for event in history["events"] if event["kind"] == "rejected_too_early"]
+    assert [event["occurred_at"] for event in early] == ["2024-05-10"]
+    assert not any(event["kind"] == "confirmed" for event in history["events"])
+    prefix = recognize_daily_history(bars[bars.date <= "2024-07-22"], "159699", "etf", tick_size=0.001)
+    original = next(pattern for pattern in prefix["patterns"] if pattern.pattern_id == failed.pattern_id)
+    original_history = next(item["value"] for item in original.evidence if item["code"] == "joint_lifecycle")
+    assert original.state == "expired"
+    assert original_history["events"] == history["events"]
+    assert not any(np.isclose(pattern.neckline["intercept"], 0.94588)
+                   and pattern.state == "forming" for pattern in same_lows)
+    assert len(same_lows) == 2
+    assert all(pattern.state == "expired" for pattern in same_lows)
+    assert all(signal["pattern_id"] != failed.pattern_id
+               for event in result["signals"] for signal in event["patterns"])
+
+
+def test_premature_boundary_reselection_can_confirm_a_distinct_line(monkeypatch):
+    import caisen.daily_incremental as incremental
+    from caisen.schemas import Pattern, Pivot
+
+    session = DailyRecognitionSession("PAIR", "stock", tick_size=0.01)
+    for date in pd.date_range("2024-01-01", "2024-07-01"):
+        close = 11.0 if date == pd.Timestamp("2024-06-10") else 9.8
+        session.bars.append({"date": date, "open": close, "high": close + 0.1,
+                             "low": close - 0.1, "close": close, "volume": 1000})
+    session.date_strings = [str(bar["date"].date()) for bar in session.bars]
+    session.close_values = [bar["close"] for bar in session.bars]
+    session.atr_values = [0.2] * len(session.bars)
+    dates = session.date_strings
+    sequence = [Pivot(0, dates[0], 9.0, "low", 2, dates[2], "2ATR|5%"),
+                Pivot(90, dates[90], 9.1, "low", 92, dates[92], "2ATR|5%")]
+    candidate = {"family": "w_bottom", "scale": "2atr_5pct", "sequence": sequence,
+                 "pattern": None, "needs_initial_eval": True}
+    session.active["same-lows"] = candidate
+    monkeypatch.setattr(session, "_has_pressure_test_pair", lambda _: True)
+    monkeypatch.setattr(incremental, "_neckline_formation_coverage", lambda *a, **k: {"passed": True})
+
+    def proposal(name, level):
+        line = {"slope": 0.0, "intercept": level}
+        return Pattern(name, "PAIR", "stock", "1d", "w_bottom", "bullish", "forming",
+                       dates[0], None, last_observed_date=dates[-1],
+                       key_points={"pivot_1_date": dates[0], "pivot_1": 9.0, "pivot_1_kind": "low",
+                                   "pivot_2_date": dates[90], "pivot_2": 9.1, "pivot_2_kind": "low"},
+                       neckline=line, evidence=[
+                           {"code": "main_structure", "value": {"role": "main", "support_lower": 9.0,
+                               "eligibility_reason": "awaiting_fresh_neckline_breakout"}},
+                           {"code": "neckline_selection", "value": {"selected_line": line,
+                               "effective_start_date": dates[30], "line_frozen_at": dates[93],
+                               "structure_known_at": dates[92], "selected_candidate_id": name}},
+                           {"code": "neckline_breakout", "value": None}])
+
+    def select(*args, consumed_boundary_phases, **kwargs):
+        return proposal("backup", 11.3) if consumed_boundary_phases else proposal("early", 10.0)
+
+    monkeypatch.setattr(incremental, "_make_main_pattern", select)
+    assert session._evaluate() == []
+    expired, = session.retired_patterns.values()
+    assert expired.state == "expired"
+    assert candidate["pattern"].pattern_id == "backup"
+    assert candidate["pattern"].state == "forming"
+
+    # Only the alternate line's own fresh breakout can confirm it.
+    session.bars.append({"date": pd.Timestamp("2024-07-02"), "open": 11.5, "high": 11.7,
+                         "low": 11.4, "close": 11.6, "volume": 1000})
+    session.date_strings.append("2024-07-02")
+    session.close_values.append(11.6)
+    session.atr_values.append(0.2)
+    signal, = session._check_cached_breakout()
+    assert signal["pattern_ids"] == ["backup"]
+    active_lifecycle = next(e["value"] for e in signal["pattern"]["evidence"]
+                            if e["code"] == "joint_lifecycle")
+    expired_lifecycle = next(e["value"] for e in expired.evidence if e["code"] == "joint_lifecycle")
+    assert active_lifecycle["structure_key"] == expired_lifecycle["structure_key"]
+    assert active_lifecycle["boundary_version_id"] != expired_lifecycle["boundary_version_id"]
+    assert expired_lifecycle["state_at"] == "expired"

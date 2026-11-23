@@ -125,6 +125,13 @@ assert(expiredGeometry.last>expiredGeometry.end&&expiredGeometry.last<250);
 assert(!expiredGeometry.boundaries.some(item=>item.name.startsWith('备选压力线')||item.name.startsWith('失效压力段')),
  'joint lifecycle charts keep alternative and retired lines out of the main view');
 
+const rejectedOnly=structuredClone(expiredConflict);
+const rejectedLifecycle=rejectedOnly.evidence.find(item=>item.code==='joint_lifecycle').value;
+rejectedLifecycle.events=rejectedLifecycle.events.filter(event=>event.kind!=='expired');
+const rejectedGeometry=patternGeometry({_bars:bars,_chart_offset:20},rejectedOnly);
+assert.equal(rejectedGeometry.boundaries.at(-1).points.at(-1).index,190,
+ 'the expired neckline stops at its own premature breakout');
+
 // 600715's historical triangle stores full-series indices. The API's
 // recent-five-year offset must not shift its frozen upper edge.
 const fullHistory=Array.from({length:7037},(_,i)=>({

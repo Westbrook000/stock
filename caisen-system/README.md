@@ -35,10 +35,24 @@
 - `POST /api/v1/scans`：`{"timeframes":["1d","1w"]}`，完整本地库存扫描，形态筛选只在结果页进行。
 - `GET /api/v1/jobs/{job_id}`：读取当前任务进度。
 - `POST /api/v1/data/refresh`：`{"scope":"all"}` 或 `{"code":"000001","kind":"stock"}`。
-- `GET /api/v1/patterns/{pattern_id}`：机器形态记录。
+- `GET /api/v1/scans/{scan_id}/results`：分页读取当时保存的列表；形态和周期须匹配同一条代表形态。
+- `GET /api/v1/patterns/{pattern_id}`：已停用（410）。通过标的详情重新分析最新本地行情。
 - `POST /api/v1/backtests`：提交固定样本日线回测，返回任务ID；GET同路径查询历史任务，GET `/api/v1/backtests/{id}` 查询进度，GET `/api/v1/backtests/{id}/report` 查看报告。旧固定回测POST返回410，旧报告继续可读。
 
 状态库默认 `caisen-system/state/caisen.sqlite3`，可用 `CAISEN_DB` 指定。行情目录为仓库的 `data/stocks`、`data/etfs`。分析结果继续保留数据版本标识。
+
+## 扫描历史存储
+
+扫描历史只存任务和列表摘要。每个标的最多保留一条日线和一条周线代表形态，以及最近 24 根迷你 K 线的绘图坐标。打开详情时重新计算形态和图表，扫描与详情都不写入完整形态历史。回测报告仍走原有存储。
+
+迁移旧库前，确认没有任务写入并停止服务。以下命令只读打开旧库，目标必须是一个新路径。
+
+```sh
+.venv/bin/python caisen-system/scripts/migrate_scan_summaries.py \
+  caisen-system/state/caisen.sqlite3 caisen-system/state/caisen-compact-candidate.sqlite3
+```
+
+核对每个任务的行数和校验摘要。成功后保留旧库作为备份，再将通过完整性检查的候选库切换为工作库并重启服务。迁移失败时，原库可继续使用。备份仍占用原有磁盘空间。
 
 ## 验证
 

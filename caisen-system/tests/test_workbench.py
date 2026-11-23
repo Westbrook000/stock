@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 from concurrent.futures import ThreadPoolExecutor
+import base64
 from fastapi import HTTPException
 
 from caisen.market import InstrumentFile, MarketDataResult
@@ -57,7 +58,6 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
     monkeypatch.setattr(api, "recognize_weekly_history", lambda *args, **kwargs: {
         "patterns": [], "signals": [], "performance": {}})
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
     api._scan_worker("fixture-job", {"timeframes":["1d","1w"]}, executor_factory=ThreadPoolExecutor)
     result = api._jobs["fixture-job"]
@@ -67,7 +67,7 @@ def test_scan_worker_merges_one_row_per_symbol_sorts_buy_first_and_keeps_failure
     assert len(result["results"]) == 3
     assert [row["code"] for row in result["results"]] == ["000001", "000002", "000003"]
     assert result["results"][0]["action"] == "CONSIDER_BUY"
-    assert len(result["results"][0]["mini_bars"]) == 3
+    assert len(base64.b64decode(result["results"][0]["mini_candles_u8"])) == 3 * 4
     assert result["results"][-1]["action"] == "INSUFFICIENT_DATA"
     assert result["inventory"]["failed_count"] == 1
     assert result["inventory"]["inventory_at"]
@@ -86,7 +86,6 @@ def test_scan_worker_applies_kind_and_limit_before_loading(monkeypatch):
     monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
     api._scan_worker("prefilter-job", {"kinds": ["etf"], "limit": 1, "timeframes": ["1d"]}, executor_factory=ThreadPoolExecutor)
 
@@ -130,7 +129,6 @@ def test_scan_date_cutoff_precedes_weekly_aggregation_but_keeps_earlier_backgrou
     monkeypatch.setattr(api, "recognize_daily_history", recognize_daily)
     monkeypatch.setattr(api, "recognize_weekly_history", recognize_weekly)
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
     api._scan_worker("window-job", {"timeframes": ["1d", "1w"], "date_from": "2026-10-15", "date_to": "2026-10-15"}, executor_factory=ThreadPoolExecutor)
 
@@ -138,23 +136,20 @@ def test_scan_date_cutoff_precedes_weekly_aggregation_but_keeps_earlier_backgrou
     assert weekly_dates == [["2026-10-14", "2026-10-15"]]
     assert detected_dates == ["2026-10-14", "2026-10-15", "2026-10-15"]
     assert row["latest_date"] == "2026-10-15"
-    assert row["analysis_window"] == {"requested_from":"2026-10-15", "requested_to":"2026-10-15",
-                                       "from":"2026-10-15", "to":"2026-10-15",
-                                       "latest_available":"2026-10-16", "historical":True}
+    assert "analysis_window" not in row
 
 
 def test_scan_date_window_with_no_rows_keeps_insufficient_data_row(monkeypatch):
     result = MarketDataResult(InstrumentFile("000001", "stock", "one.csv"), bars=make_bars())
     monkeypatch.setattr(api, "discover_instruments", lambda root: [result.instrument])
     monkeypatch.setattr(api, "load_daily_bars", lambda instrument, root: result)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
     api._scan_worker("empty-window-job", {"timeframes": ["1d"], "date_from": "2027-01-01"}, executor_factory=ThreadPoolExecutor)
 
     row = api._jobs["empty-window-job"]["results"][0]
     assert row["action"] == "INSUFFICIENT_DATA"
     assert row["reason_codes"] == ["no_market_data_in_selected_date_range"]
-    assert row["analysis_window"]["from"] is None
+    assert row.get("latest_date") is None
 
 
 def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(monkeypatch):
@@ -177,7 +172,6 @@ def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("scan must not call the legacy recognizer")))
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
     decision_inputs = []
     def synthesize(code, kind, patterns_by_tf, *args, **kwargs):
         decision_inputs.append(patterns_by_tf)
@@ -190,7 +184,7 @@ def test_scan_pattern_display_prefilter_does_not_narrow_scan_or_decision_inputs(
 
     assert {pattern["pattern_type"] for pattern in api._jobs["shape-job"]["results"][0]["patterns"]} == {"w_bottom"}
     assert {pattern.pattern_type for pattern in decision_inputs[0]["1d"]} == {"w_bottom"}
-    assert api._jobs["shape-job"]["results"][0]["pattern_migration"]["families"]["m_top"]["status"] == "unsupported"
+    assert "pattern_migration" not in api._jobs["shape-job"]["results"][0]
 
 
 def test_backtest_page_has_one_fixed_daily_research_entry():
@@ -222,8 +216,8 @@ def test_modified_workbench_assets_use_current_cache_version():
     from pathlib import Path
     html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
     assert "/static/pattern-chart.js?v=20261120-anchor-offset" in html
-    assert "/static/app.js?v=20261122-relative-neckline-height" in html
-    assert "/static/app.css?v=20261120-watch-window" in html
+    assert "/static/app.js?v=20261123-premature-boundary" in html
+    assert "/static/app.css?v=20261122-history-results" in html
     for asset in ("refresh_report.js", "scan-filters.js", "http-client.js"):
         assert f"/static/{asset}?v=20261029v7" in html
     assert "/static/fixed-backtest-report.js?v=20261029v8-measured-target" in html
@@ -293,7 +287,7 @@ def test_scan_results_filter_after_completion_without_resubmitting_the_scan():
     assert "没有标的符合当前筛选" in js
     assert "pattern_type:$('scanPattern')" not in js
     assert "/static/scan-filters.js" in html
-    assert "/static/scan-results.js?v=20261117-v1" in html
+    assert "/static/scan-results.js?v=20261122-summary-store" in html
     filtering = js.split("function applyScanFilters", 1)[1].split("function renderScan", 1)[0]
     assert "loadScanResultPage" in filtering
 
@@ -550,9 +544,10 @@ def test_history_ui_separates_new_scan_and_reads_saved_results_with_kind_and_ran
     http = open(f"{root}/http-client.js", encoding="utf-8").read()
     assert 'data-scan-view="newScan"' in html and 'data-scan-view="scanHistory"' in html
     assert 'id="historyKind"' in html and 'value="rank" selected' in html
-    assert "/api/v1/scans/${encodeURIComponent(historyRunId)}/results" in js
-    assert "历史区间" in js and "打开详情将加载最新行情" in js
-    assert "旧任务参数未记录" in js and "失败数未记录" in js and "规则版本未记录" in js
+    assert "/api/v1/scans/${encodeURIComponent(runId)}/results?${query}" in js
+    assert "列表显示任务当时保存的结果；打开详情会加载最新行情。" in js
+    assert "params._legacy_import" in js and "historyCard" in js
+    assert "openTicker(button.dataset.historyCode,button.dataset.kind,button.dataset.timeframe)" in js
     assert "fetchJson('/api/v1/health')" in js and ".json()" not in js
     assert "JSON.parse(body)" in http and "response.status" in http
 
@@ -660,7 +655,6 @@ def test_scan_worker_uses_at_most_ten_workers_and_persists_ranked_progress(monke
     monkeypatch.setattr(api, "aggregate_weekly", lambda result, **kwargs: MarketDataResult(result.instrument, quality_status="insufficient"))
     monkeypatch.setattr(api, "detect_patterns", lambda *args, **kwargs: [])
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
     monkeypatch.setattr(api, "synthesize_decision", lambda code, kind, *args, **kwargs: {
         "code": code, "kind": kind, "action": "CONSIDER_BUY" if code == "000009" else "WAIT",
         "patterns": [], "rank": {"action_priority": 0 if code == "000009" else 1,

@@ -119,7 +119,7 @@ def test_joint_recognition_uses_new_cache_engine_versions():
     from caisen.daily_incremental import ENGINE_VERSION, BOUNDARY_FIRST_ENGINE_VERSION
     assert ENGINE_VERSION != 'caisen-daily-continuous-v5'
     assert BOUNDARY_FIRST_ENGINE_VERSION != 'caisen-daily-boundary-first-v3'
-    assert ENGINE_VERSION == 'caisen-joint-pattern-session-v9-flag-confirmation-history'
+    assert ENGINE_VERSION == 'caisen-joint-pattern-session-v10-premature-boundary-retirement'
 
 
 def test_line_already_broken_at_freeze_cannot_be_rearmed():

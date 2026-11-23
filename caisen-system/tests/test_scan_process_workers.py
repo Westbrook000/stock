@@ -113,7 +113,6 @@ def test_scan_submits_only_a_bounded_window_and_still_processes_every_instrument
     analyzed_lock = threading.Lock()
     pools = []
     monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
-    monkeypatch.setattr(api, "save_patterns", lambda rows: None)
 
     def analyze(instrument, params, root):
         start_ten_workers.wait(timeout=3)
@@ -163,7 +162,7 @@ def test_running_scan_shutdown_saves_finished_rows_and_marks_run_interrupted(tmp
     params = {"kinds": ["stock"], "timeframes": ["1d"]}
     create_scan_run("shutdown-scan", params, total=30)
     saved_patterns = []
-    monkeypatch.setattr(api, "save_patterns", lambda patterns: saved_patterns.extend(patterns))
+    monkeypatch.setattr(api, "save_patterns", lambda patterns: saved_patterns.extend(patterns), raising=False)
     worker = threading.Thread(target=api._scan_worker,
                               args=("shutdown-scan", params),
                               kwargs={"root": str(root), "analysis_fn": _slow_scan_analysis})
@@ -194,7 +193,7 @@ def test_running_scan_shutdown_saves_finished_rows_and_marks_run_interrupted(tmp
     assert len(codes) == len(set(codes))
     assert "results" not in api._jobs["shutdown-scan"]
     assert api._jobs["shutdown-scan"]["result_count"] == len(rows)
-    assert saved_patterns
+    assert saved_patterns == []
     assert api._jobs["shutdown-scan"]["status"] == "interrupted"
     deadline = time.monotonic() + 3
     while active_children() and time.monotonic() < deadline:
@@ -206,7 +205,6 @@ def test_interrupted_scan_keeps_sparse_completion_ordinals_without_duplicates(mo
     instruments = [InstrumentFile("%06d" % index, "stock", "%d.csv" % index) for index in range(30)]
     executor_box = []
     monkeypatch.setattr(api, "discover_instruments", lambda root: instruments)
-    monkeypatch.setattr(api, "save_patterns", lambda rows: None)
 
     class ControlledExecutor:
         def __init__(self, max_workers):

@@ -4,6 +4,8 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
+from .scan_summary import scan_summary
+
 
 class LifecycleEventConflict(ValueError):
     """An append-only lifecycle event key already has a different payload."""
@@ -402,24 +404,33 @@ def update_scan_run(run_id, **fields):
 
 
 def save_scan_result(run_id, ordinal, result):
-    payload = dict(result)
-    patterns = payload.get("patterns") or []
     with connect() as db:
-        _save_scan_result(db, run_id, ordinal, payload, patterns)
+        _save_scan_result(db, run_id, ordinal, result)
 
 
-def _save_scan_result(db, run_id, ordinal, payload, patterns=None):
-    patterns = payload.get("patterns") or [] if patterns is None else patterns
+def _save_scan_result(db, run_id, ordinal, row):
+    row = scan_summary(row)
+    patterns = row.get("patterns") or []
+    payload = {k:v for k,v in row.items()
+               if k not in {"patterns", "code", "kind", "name", "category", "action"}}
     db.execute(
         """INSERT OR REPLACE INTO scan_results
            (run_id,ordinal,code,kind,name,category,action,patterns_json,payload_json)
            VALUES(?,?,?,?,?,?,?,?,?)""",
-        (run_id, int(ordinal), str(payload.get("code", "")), str(payload.get("kind", "")),
-         str(payload.get("name") or payload.get("code") or ""),
-         str(payload.get("category", "unclassified")), str(payload.get("action", "INSUFFICIENT_DATA")),
+        (run_id, int(ordinal), str(row.get("code", "")), str(row.get("kind", "")),
+         str(row.get("name") or row.get("code") or ""),
+         str(row.get("category", "unclassified")), str(row.get("action", "INSUFFICIENT_DATA")),
          json.dumps(patterns, ensure_ascii=False, allow_nan=False),
          json.dumps(payload, ensure_ascii=False, allow_nan=False)),
     )
+
+
+def rank_saved_scan_results(run_id, ordinals):
+    """Permute persisted rows without encoding or replacing result payloads."""
+    with connect() as db:
+        db.execute("UPDATE scan_results SET ordinal=-ordinal-1 WHERE run_id=?", (run_id,))
+        db.executemany("UPDATE scan_results SET ordinal=? WHERE run_id=? AND ordinal=?",
+                       ((rank, run_id, -original-1) for rank, original in enumerate(ordinals)))
 
 
 def _is_legacy_scan_job(payload):
@@ -647,7 +658,13 @@ def query_scan_results(run_id, search=None, category=None, action=None, kind=Non
     with connect() as db:
         total = db.execute(f"SELECT COUNT(*) FROM scan_results WHERE {where}", params).fetchone()[0]
         rows = db.execute(
-            f"SELECT payload_json FROM scan_results WHERE {where} ORDER BY {column} {sort_order.upper()},ordinal ASC LIMIT ? OFFSET ?",
+            f"SELECT payload_json,patterns_json,code,kind,name,category,action FROM scan_results WHERE {where} ORDER BY {column} {sort_order.upper()},ordinal ASC LIMIT ? OFFSET ?",
             (*params, int(limit), int(offset)),
         ).fetchall()
-    return [json.loads(row[0]) for row in rows], total
+    results = []
+    for row in rows:
+        payload = json.loads(row[0])
+        payload.update({key:row[key] for key in ("code","kind","name","category","action")})
+        payload["patterns"] = json.loads(row["patterns_json"])
+        results.append(payload)
+    return results, total

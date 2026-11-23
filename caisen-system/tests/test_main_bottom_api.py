@@ -68,7 +68,6 @@ def test_scan_uses_full_prefixes_for_main_path_without_legacy_fallback(monkeypat
     monkeypatch.setattr(api, "recognize_daily_history", recognize_daily)
     monkeypatch.setattr(api, "recognize_weekly_history", recognize_weekly)
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_patterns", lambda payloads: None)
 
     api._scan_worker("main-bottom-fixture", {
         "timeframes": ["1d", "1w"], "date_from": "2014-01-01", "date_to": "2026-10-28",
@@ -82,25 +81,13 @@ def test_scan_uses_full_prefixes_for_main_path_without_legacy_fallback(monkeypat
     assert seen["daily_session"] == (daily_window.date.min(), daily_window.date.max(), len(daily_window))
     assert seen["weekly_session"] == (weekly_window.date.min(), weekly_window.date.max(), len(weekly_window))
     row = result["results"][0]
-    assert row["versions"]["engine_version"] == api.DAILY_ENGINE_VERSION
-    assert row["versions"]["source_rule_version"] == api.DAILY_SOURCE_RULE_VERSION
-    assert row["versions"]["lifecycle_schema_version"] == api.LIFECYCLE_SCHEMA_VERSION
-    assert row["versions"]["tick_rule_version"] == api.TICK_RULE_VERSION
-    assert row["versions"]["strategy_version"] == api.FIXED_STRATEGY_VERSION
-    assert row["versions"]["target_method"] == api.FIXED_TARGET_METHOD
-    assert row["versions"]["display_derivation_version"] == api.DISPLAY_DERIVATION_VERSION
-    assert row["strategy_version"] == api.FIXED_STRATEGY_VERSION
-    assert row["target_method"] == api.FIXED_TARGET_METHOD
-    assert row["display_derivation_version"] == api.DISPLAY_DERIVATION_VERSION
-    assert row["instrument_versions"] == {
-        "data_version": "unknown", "tick_size": 0.01,
-        "tick_size_source": "unknown", "tick_rule_version": api.TICK_RULE_VERSION,
-    }
-    assert [event["pattern_id"] for event in row["main_structure_events"]] == ["main", "main-ended"]
-    assert [event["pattern_id"] for event in row["selected_main_structures"]] == ["main"]
-    assert row["main_children"] == []
-    assert [event["pattern_id"] for event in row["ended_patterns"]] == ["main-ended"]
-    assert row["pattern_migration"]["families"]["bull_flag"]["status"] == "supported"
+    assert result["versions"]["engine_version"] == api.DAILY_ENGINE_VERSION
+    assert result["versions"]["source_rule_version"] == api.DAILY_SOURCE_RULE_VERSION
+    assert result["versions"]["lifecycle_schema_version"] == api.LIFECYCLE_SCHEMA_VERSION
+    assert "versions" not in row
+    assert [pattern["pattern_type"] for pattern in row["patterns"]] == [main.pattern_type]
+    assert row["patterns"][0]["formed_at"] == main.formed_at
+    assert not ({"main_structure_events", "selected_main_structures", "ended_patterns"} & row.keys())
 
 
 def test_main_bottom_chart_offset_uses_calendar_cutoff():
@@ -236,12 +223,7 @@ def test_scan_exposes_and_uses_exact_same_day_emitted_signal_ids(monkeypatch):
     row, _ = api._analyze_scan_instrument(instrument, {"timeframes": ["1d"]}, root="/tmp")
 
     assert seen["allowed_pattern_ids_by_timeframe"] == {"1d": ["primary"]}
-    assert row["strategy_events"] == [{
-        "timeframe":"1d","signal_date":event_date,"entry_date":None,
-        "primary_pattern_id":"primary","pattern_ids":["primary","secondary-flag"]}]
-    assert "patterns" not in row["strategy_events"][0]
-    assert row["strategy_version"] == api.FIXED_STRATEGY_VERSION
-    assert row["target_method"] == api.FIXED_TARGET_METHOD
+    assert "strategy_events" not in row
 
 
 def test_detail_plan_suppresses_same_day_secondary_bull_flag():
@@ -257,7 +239,8 @@ def test_detail_plan_suppresses_same_day_secondary_bull_flag():
     assert result["reason_codes"] == ["not_backtest_primary_event"]
 
 
-def test_analysis_maps_window_indices_to_full_chart(monkeypatch):
+def test_analysis_maps_window_indices_to_full_chart(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAISEN_DB", str(tmp_path / "state.sqlite3"))
     instrument = InstrumentFile("000001", "stock", "one.csv")
     daily = _bars(pd.bdate_range("2010-01-04", "2026-10-28"))
     weekly = _bars(pd.date_range("2010-01-08", "2026-10-23", freq="W-FRI"))
@@ -286,7 +269,6 @@ def test_analysis_maps_window_indices_to_full_chart(monkeypatch):
     monkeypatch.setattr(api, "recognize_daily_history", recognize_daily)
     monkeypatch.setattr(api, "recognize_weekly_history", recognize_weekly)
     monkeypatch.setattr(api, "current_pattern_snapshot", lambda patterns: patterns)
-    monkeypatch.setattr(api, "save_pattern", lambda pattern: None)
 
     result = api.analysis("000001", "stock", "1d")
 
@@ -300,6 +282,10 @@ def test_analysis_maps_window_indices_to_full_chart(monkeypatch):
     assert result["decision"]["patterns"][0]["chart_offset"] == daily_offset
     assert result["_chart_offset"] == daily_offset
     assert result["_bars"][daily_offset]["date"] == str(daily.date.iloc[daily_offset].date())
+    assert api.analysis("000001", "stock", "1d")["patterns"] == result["patterns"]
+    with api.connect() as db:
+        for table in ("patterns", "pattern_snapshots", "pattern_lifecycle_events"):
+            assert db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
 
 
 def test_snapshot_keeps_all_main_events_of_one_existing_family():

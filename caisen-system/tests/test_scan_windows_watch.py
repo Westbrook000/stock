@@ -160,9 +160,9 @@ def test_scan_and_detail_report_same_current_watch(monkeypatch):
     monkeypatch.setattr(api, "recognize_daily_history", lambda *a, **kw: {
         "patterns":[forming()], "signals":[],
         "latest_bar":{"date":"2025-01-03","index":0,"previous_atr":1.}})
-    monkeypatch.setattr(api, "save_pattern", lambda *a, **kw: None)
     scan, _ = api._analyze_scan_instrument(instrument, {"timeframes":["1d"]})
     detail = api.analysis("test")["decision"]
     assert scan["action"] == detail["action"] == "WATCH"
-    assert scan["watch"] == detail["watch"]
-    assert not scan["strategy_events"]
+    assert scan["watch"] == [{key: value for key, value in detail["watch"][0].items()
+                              if key in {"timeframe", "pattern_type", "observed_date", "boundary", "distance_atr"}}]
+    assert "strategy_events" not in scan

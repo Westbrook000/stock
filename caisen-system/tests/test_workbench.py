@@ -216,7 +216,8 @@ def test_modified_workbench_assets_use_current_cache_version():
     from pathlib import Path
     html = (Path(__file__).parents[1] / "caisen" / "static" / "index.html").read_text(encoding="utf-8")
     assert "/static/pattern-chart.js?v=20261120-anchor-offset" in html
-    assert "/static/app.js?v=20261123-premature-boundary" in html
+    assert "/static/app.js?v=20261123-ui" in html
+    assert "/static/workspace.css?v=20261123-ui" in html
     assert "/static/app.css?v=20261122-history-results" in html
     for asset in ("refresh_report.js", "scan-filters.js", "http-client.js"):
         assert f"/static/{asset}?v=20261029v7" in html

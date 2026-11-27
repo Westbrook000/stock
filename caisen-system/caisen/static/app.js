@@ -4,9 +4,40 @@ const actions={CONSIDER_BUY:'可考虑买入',WATCH:'重点关注',WAIT:'等待'
 const reasonNames={forming_near_frozen_boundary:'收盘在冻结边界下方 3 ATR 内，等待有效突破',pattern_not_buy_candidate:'该形态不属于四种买入候选',timeframe_direction_conflict:'日线与周线确认方向冲突，请分别复核',ambiguous_structure:'多个候选形态共用结构点，暂不生成买卖计划',pattern_waiting_for_breakout:'形态已成型，等待颈线或结构边界收盘突破',bull_flag_target_locked:'旗形边界已突破，但前高尚未收盘突破，测幅目标未解锁',missing_confirmation_date:'缺少首次确认日期，不能生成入场候选',confirmation_bars_unavailable:'缺少确认日行情，不能生成入场候选',confirmation_context_unavailable:'缺少最新周期日期，不能判断是否首次确认',historical_confirmation:'该形态不是本周期首次确认，仅展示历史测幅目标',missing_measured_target:'形态没有有效的冻结测幅目标',measured_target_not_above_reference_entry:'参考收盘价已不低于测幅目标',main_structure_not_selected_primary:'该形态不是当日选出的主形态',no_confirmed_actionable_pattern:'当前没有通过确认的买入候选',no_current_pattern:'当前周期没有识别到有效形态',confirmed_bearish_structure_sell_warning_if_held:'已确认顶部或空头结构；如有持仓，请复核退出计划',bullish_structure_exists_without_new_entry:'存在多头结构，但当前没有新的入场信号',pattern_not_confirmed_bullish:'形态尚未确认为多头结构',volume_data_unverified:'成交量单位或企业行动未核验，形态仅作研究观察',invalid_structural_stop:'无法建立有效止损',no_verified_target:'没有可用于计划的目标位',insufficient_cash_or_liquidity:'现金或流动性不足以形成有效委托',buy_gates_not_met:'买入条件未全部满足'};
 const $=id=>document.getElementById(id);let lastAnalysis=null;let scanRows=[];let visibleScanRows=[];let scanShown=0;let scanTimer=null;let scanPolling=false;let scanRunId='';let scanPage=0;let scanTotal=0;let scanInventory={};let scanLoading=false;let detailChart=null;let chartBarCount=0;let chartWindowBars=120;let selectedPattern=null;let chartCenter=null;
 
-document.querySelectorAll('nav button').forEach(button=>button.onclick=()=>{document.querySelectorAll('nav button,.panel').forEach(item=>item.classList.remove('active'));button.classList.add('active');$(button.dataset.panel).classList.add('active')});
-Object.entries(names).forEach(([key,value])=>{const option=document.createElement('option');option.value=key;option.textContent=value;$('scanShapeFilter').append(option);const prefilter=document.createElement('option');prefilter.value=key;prefilter.textContent=value;$('scanPatternTypes').append(prefilter);const historical=document.createElement('label'),checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.value=key;historical.append(checkbox,value);$('historyPatterns').append(historical)});
-fetchJson('/api/v1/health').then(result=>$('health').textContent=`${result.status} · ${result.rule_version} · 无下单`).catch(()=>$('health').textContent='服务未连接');
+const navigation = document.querySelectorAll('nav [data-panel]');
+navigation.forEach(button => button.onclick = () => {
+  navigation.forEach(item => {
+    item.classList.toggle('active', item === button);
+    if (item === button) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.panel').forEach(panel => panel.classList.toggle('active', panel.id === button.dataset.panel));
+  $('pageName').textContent = button.textContent;
+  if (button.dataset.panel === 'detail' && detailChart) detailChart.resize();
+  window.scrollTo(0, 0);
+});
+$('workspaceDate').textContent = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric', month: 'long', day: 'numeric', weekday: 'short', timeZone: 'Asia/Shanghai'
+}).format(new Date());
+function checkedValues(id) {
+  return Array.from($(id).querySelectorAll('input:checked'), input => input.value);
+}
+for (const group of ['scanShapeFilter', 'scanPatternTypes', 'historyPatterns']) {
+  for (const [key, name] of Object.entries(names)) {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = key;
+    label.append(input, name);
+    $(group).append(label);
+  }
+}
+fetchJson('/api/v1/health').then(result => {
+  const online = result.status === 'ok';
+  $('health').textContent = online ? '服务在线' : result.status;
+  $('health').parentElement.dataset.online = String(online);
+  $('health').title = result.rule_version || '';
+}).catch(() => $('health').textContent = '服务未连接');
 
 function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
 async function fetchJson(url,options){return window.CaisenHttpClient.fetchJson(url,options)}
@@ -57,11 +88,11 @@ function watchMarkup(watch){
 function scanCard(row){const plan=row.selected_plan;const watch=row.action==='WATCH'?row.watch?.[0]:null;const activePatterns=(row.patterns||[]).filter(pattern=>!isTerminalPattern(pattern));const label=CaisenScanResults.historyPatterns(row).map(pattern=>`${pattern.timeframe==='1w'?'周线':'日线'} · ${stateLabel(pattern)}`).join(' / ')||'暂无当前形态';const warnings=[...(row.data_warnings||[]),...(plan?.data_warnings||[])];const quality=warnings.some(dataWarningLabel)?'有行情提示':'行情可用';const price=`${fmt(row.latest_close)} · ${row.latest_date||''}`;const current=Boolean(plan?.measured_target_status)||plan?.strategy_version==='daily_four_patterns_measured_target_v2';const target=current?(plan.measured_target_status==='pending_prior_high'?'前高收盘突破后解锁':plan.measured_target_price==null?'—':fmt(plan.measured_target_price)):`历史目标 ${plan?.targets?.[0]==null?'—':fmt(plan.targets[0])}`;const historicalNote=row.analysis_window?.historical?`<span class="historical-scan-note">历史区间截至 ${escapeHtml(row.analysis_window.to||row.latest_date||'未知')}；打开详情将加载最新行情</span>`:'';return `<article class="scan-row" data-code="${escapeHtml(row.code)}" data-kind="${escapeHtml(row.kind)}" tabindex="0" role="link" data-timeframe="${escapeHtml(plan?.timeframe||watch?.timeframe||activePatterns[0]?.timeframe||scanSettings.timeframes?.[0]||'1d')}" aria-label="查看${escapeHtml(row.name||row.code)}详情"><div class="scan-main"><div class="scan-title"><b>${escapeHtml(row.name||row.code)}</b><span class="muted">${escapeHtml(row.code)} · ${row.kind==='etf'?'ETF':'股票'}</span></div><span class="action-pill action-${escapeHtml(row.action||'WAIT')}">${escapeHtml(actionLabel(row.action))}</span><span class="pattern-label">${escapeHtml(label)}</span>${historicalNote}${watchMarkup(watch)}<span class="muted">${escapeHtml(reasonLabel(row.error||row.reason_codes?.[0]||row.explanation||''))}</span>${dataWarningsMarkup(warnings)}</div><div class="scan-chart">${miniCandles(row.mini_bars||CaisenScanResults.decodeMiniCandles(row.mini_candles_u8))}<span class="muted">${escapeHtml(price)}</span></div><div class="scan-metrics">${plan?`<b>风险参考 ${fmt((plan.planned_risk_pct||0)*100)}%</b><b>${target}</b><b>${plan.reward_risk==null?'—':`${fmt(plan.reward_risk)}R`}</b>`:`<b>${activePatterns.length} 个当前结构</b>${row.patterns?.length>activePatterns.length?`<span class="muted">另有 ${row.patterns.length-activePatterns.length} 个结束结构</span>`:''}<span class="muted">${escapeHtml(quality)}</span>`}<button class="detail-link">查看详情 →</button></div></article>`}
 function renderMore(){if(scanPage*50>=scanTotal)return;loadScanResultPage(scanPage+1,true)}
 function openTicker(code,kind,timeframe='1d'){$('code').value=code;$('kind').value=kind;$('tf').value=timeframe;document.querySelector('[data-panel=detail]').click();analyze()}
-async function loadScanResultPage(page,append=false){if(!scanRunId||scanLoading)return;scanLoading=true;const action=$('scanActionFilter').value,patternTypes=[...$('scanShapeFilter').selectedOptions].map(option=>option.value);$('scanFilterSummary').textContent=append?'正在读取下一页…':'正在读取扫描结果…';const query=CaisenScanResults.buildQuery({page,action,patternTypes});try{const data=await fetchJson(`/api/v1/scans/${encodeURIComponent(scanRunId)}/results?${query}`);scanPage=page;scanTotal=data.total;const pageRows=data.items||[];scanRows=append?scanRows.concat(pageRows):pageRows;visibleScanRows=scanRows.slice();$('results').innerHTML=scanRows.map(scanCard).join('')||'<div class="scan-empty">没有标的符合当前筛选。可重置筛选查看完整扫描结果。</div>';const count=scanInventory.result_count??scanInventory.scanned??scanTotal;$('scanFilterSummary').textContent=`筛选后 ${scanTotal} / ${count} 个标的 · 已显示 ${scanRows.length}`;$('buyOnlyBtn').setAttribute('aria-pressed',String(action==='CONSIDER_BUY'));$('buyOnlyBtn').classList.toggle('selected',action==='CONSIDER_BUY');const more=$('loadMore');if(more)more.remove();if(scanRows.length<scanTotal)$('results').insertAdjacentHTML('beforeend',`<button id="loadMore" class="load-more">再显示 50 个（剩余 ${scanTotal-scanRows.length}）</button>`);$('loadMore')?.addEventListener('click',renderMore);document.querySelectorAll('.scan-row:not([data-bound])').forEach(row=>{row.dataset.bound='1';const open=()=>openTicker(row.dataset.code,row.dataset.kind,row.dataset.timeframe);row.addEventListener('click',open);row.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();open()}})})}catch(error){$('scanFilterSummary').textContent='扫描结果加载失败：'+error.message;$('results').innerHTML=`<div class="error-box">无法读取扫描结果：${escapeHtml(error.message)}</div>`}finally{scanLoading=false}}
+async function loadScanResultPage(page,append=false){if(!scanRunId||scanLoading)return;scanLoading=true;const action=$('scanActionFilter').value,patternTypes=checkedValues('scanShapeFilter');$('scanFilterSummary').textContent=append?'正在读取下一页…':'正在读取扫描结果…';const query=CaisenScanResults.buildQuery({page,action,patternTypes});try{const data=await fetchJson(`/api/v1/scans/${encodeURIComponent(scanRunId)}/results?${query}`);scanPage=page;scanTotal=data.total;const pageRows=data.items||[];scanRows=append?scanRows.concat(pageRows):pageRows;visibleScanRows=scanRows.slice();$('results').innerHTML=scanRows.map(scanCard).join('')||'<div class="scan-empty">没有标的符合当前筛选。可重置筛选查看完整扫描结果。</div>';const count=scanInventory.result_count??scanInventory.scanned??scanTotal;$('scanFilterSummary').textContent=`筛选后 ${scanTotal} / ${count} 个标的 · 已显示 ${scanRows.length}`;$('buyOnlyBtn').setAttribute('aria-pressed',String(action==='CONSIDER_BUY'));$('buyOnlyBtn').classList.toggle('selected',action==='CONSIDER_BUY');const more=$('loadMore');if(more)more.remove();if(scanRows.length<scanTotal)$('results').insertAdjacentHTML('beforeend',`<button id="loadMore" class="load-more">再显示 50 个（剩余 ${scanTotal-scanRows.length}）</button>`);$('loadMore')?.addEventListener('click',renderMore);document.querySelectorAll('.scan-row:not([data-bound])').forEach(row=>{row.dataset.bound='1';const open=()=>openTicker(row.dataset.code,row.dataset.kind,row.dataset.timeframe);row.addEventListener('click',open);row.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();open()}})})}catch(error){$('scanFilterSummary').textContent='扫描结果加载失败：'+error.message;$('results').innerHTML=`<div class="error-box">无法读取扫描结果：${escapeHtml(error.message)}</div>`}finally{scanLoading=false}}
 function applyScanFilters(){const action=$('scanActionFilter').value;$('buyOnlyBtn').setAttribute('aria-pressed',String(action==='CONSIDER_BUY'));$('buyOnlyBtn').classList.toggle('selected',action==='CONSIDER_BUY');scanRows=[];scanPage=0;$('results').innerHTML='';return loadScanResultPage(1,false)}
-function renderScan(jobId,job){scanRunId=jobId;scanInventory=job||{};scanRows=[];scanPage=0;scanTotal=0;$('scanResultFilters').hidden=false;$('scanActionFilter').value='';[...$('scanShapeFilter').options].forEach(option=>option.selected=false);(scanSettings.pattern_types||[]).forEach(type=>{const option=[...$('scanShapeFilter').options].find(item=>item.value===type);if(option)option.selected=true});const window=job?.inventory?.requested_window||{};const range=`${window.from||'最早可用'} 至 ${window.to||'最新可用'}`;$('scanSummary').innerHTML=`<div class="scan-summary"><b>扫描完成</b> · 请求区间 ${escapeHtml(range)} · ${job?.scanned??0} 个标的 · 股票 ${job?.inventory?.stock_count??'—'} · ETF ${job?.inventory?.etf_count??'—'} · 买入优先排序。结果将分页读取。</div>`;return applyScanFilters()}
+function renderScan(jobId,job){scanRunId=jobId;scanInventory=job||{};scanRows=[];scanPage=0;scanTotal=0;$('scanResultFilters').hidden=false;$('scanActionFilter').value='';$('scanShapeFilter').querySelectorAll('input').forEach(input=>input.checked=scanSettings.pattern_types.includes(input.value));const window=job?.inventory?.requested_window||{};const range=`${window.from||'最早可用'} 至 ${window.to||'最新可用'}`;$('scanSummary').innerHTML=`<div class="scan-summary"><b>扫描完成</b> · 请求区间 ${escapeHtml(range)} · ${job?.scanned??0} 个标的 · 股票 ${job?.inventory?.stock_count??'—'} · ETF ${job?.inventory?.etf_count??'—'} · 买入优先排序。结果将分页读取。</div>`;return applyScanFilters()}
 
-function decisionMarkup(decision){if(!decision)return '';const reasons=(decision.reason_codes||[]).map(reasonLabel).map(escapeHtml).join('；')||'首个有效等幅目标';const plan=decision.selected_plan;const target=plan?.measured_target_status==='pending_prior_high'?'测幅目标待突破前高解锁':plan?.measured_target_price==null?'测幅目标 —':`首目标 ${fmt(plan.measured_target_price)}`;return `<section class="decision-box decision-${escapeHtml(decision.action)}"><div class="decision-heading"><span class="action-pill action-${escapeHtml(decision.action)}">${escapeHtml(actionLabel(decision.action))}</span><b>${escapeHtml(decision.explanation||'')}</b></div><div>日线/周线确认数：${decision.rank?.confirmed_timeframes??0} · 方向冲突：${decision.timeframe_conflict?'是':'否'} · 排序依据：${plan?`${target}，${plan.reward_risk==null?'—':`${fmt(plan.reward_risk)}R`}，风险 ${fmt((plan.planned_risk_pct||0)*100)}%`:'没有通过确认的计划'}</div><div>原因：${reasons}</div>${decision.action==='WATCH'?'<div>'+watchMarkup(decision.watch?.[0])+'</div>':''}${planMarkup(plan)}</section>`}
+function decisionMarkup(decision){if(!decision)return '';const reasons=(decision.reason_codes||[]).map(reasonLabel).map(escapeHtml).join('；')||'首个有效等幅目标';const plan=decision.selected_plan;const target=plan?.measured_target_status==='pending_prior_high'?'测幅目标待突破前高解锁':plan?.measured_target_price==null?'测幅目标 —':`首目标 ${fmt(plan.measured_target_price)}`;return `<section class="decision-box decision-${escapeHtml(decision.action)}"><div class="decision-heading"><span class="action-pill action-${escapeHtml(decision.action)}">${escapeHtml(actionLabel(decision.action))}</span><b>${escapeHtml(decision.action==='CONSIDER_BUY' && plan?.strategy_version==='daily_four_patterns_measured_target_v2' ? '结构已确认突破。下一交易日开盘尝试介入，按实际成交价止损 8%，止盈参考本次形态的测幅目标。' : decision.explanation||'')}</b></div><div>日线/周线确认数：${decision.rank?.confirmed_timeframes??0} · 方向冲突：${decision.timeframe_conflict?'是':'否'} · 排序依据：${plan?`${target}，${plan.reward_risk==null?'—':`${fmt(plan.reward_risk)}R`}，风险 ${fmt((plan.planned_risk_pct||0)*100)}%`:'没有通过确认的计划'}</div><div>原因：${reasons}</div>${decision.action==='WATCH'?'<div>'+watchMarkup(decision.watch?.[0])+'</div>':''}${planMarkup(plan)}</section>`}
 function chartVisibleCount(value, timeframe, total){
   if(value==='all')return total;
   if(value==='custom')return Math.min(total,chartWindowBars);
@@ -193,18 +224,57 @@ function renderDetailChart(data,visibleCount){
 }
 let scanSettings={};
 async function pollScan(jobId){if(scanPolling)return;scanPolling=true;try{const current=await fetchJson('/api/v1/jobs/'+encodeURIComponent(jobId));const labels={completed:'完成',partial_failed:'部分失败',failed:'失败',interrupted:'已中断',running:'扫描中',queued:'排队中'};const progress=Math.round((current.progress||0)*100);$('scanStatus').textContent=`${labels[current.status]||'扫描中'} · ${progress}% · ${current.scanned||0}/${current.total||0}`;if(['completed','partial_failed','interrupted','failed'].includes(current.status)){if(scanTimer)clearTimeout(scanTimer);scanTimer=null;$('scanBtn').disabled=false;if(current.status==='failed'){$('results').innerHTML=`<div class="error-box">扫描失败：${escapeHtml(current.error||'未知错误')}</div>`;return}if(current.status==='interrupted'&&!(current.result_count||0)){$('results').innerHTML='<div class="error-box">扫描已中断，没有可显示的已保存结果。</div>';return}if(current.status==='partial_failed')$('scanStatus').textContent+=' · 部分标的分析失败';if(current.status==='interrupted')$('scanStatus').textContent+=' · 展示已保存的部分结果';$('scanStatus').textContent+=' · 正在加载结果页';await renderScan(jobId,current);$('scanStatus').textContent=`${labels[current.status]} · ${current.scanned||0}/${current.total||0} · 结果已分页加载`;return}}catch(error){$('scanStatus').textContent='读取扫描进度失败，2 秒后重试：'+error.message}finally{scanPolling=false}scanTimer=setTimeout(()=>{scanTimer=null;pollScan(jobId)},2000)}
-async function startScan(){if(scanTimer)clearTimeout(scanTimer);scanTimer=null;scanRunId='';scanPolling=false;const kinds=[$('scanStock').checked?'stock':null,$('scanEtf').checked?'etf':null].filter(Boolean);const dateFrom=$('scanDateFrom').value,dateTo=$('scanDateTo').value,limit=$('scanLimit').value.trim();if(!kinds.length){$('scanStatus').textContent='请至少选择股票或 ETF。';return}if(dateFrom&&dateTo&&dateFrom>dateTo){$('scanStatus').textContent='起始日期不能晚于截止日期。';return}scanSettings={kinds,pattern_types:[...$('scanPatternTypes').selectedOptions].map(option=>option.value)};$('scanBtn').disabled=true;scanRows=[];visibleScanRows=[];scanShown=0;$('results').innerHTML='';$('scanResultFilters').hidden=true;$('scanSummary').textContent='';$('scanFilterSummary').textContent='';$('scanStatus').textContent='正在提交扫描…';const params={timeframes:[...$('scanTimeframes').selectedOptions].map(option=>option.value),kinds};scanSettings.timeframes=params.timeframes;if(limit)params.limit=Number(limit);if(dateFrom)params.date_from=dateFrom;if(dateTo)params.date_to=dateTo;try{const job=await fetchJson('/api/v1/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)});$('scanStatus').textContent=`扫描任务已启动：${job.job_id}。正在逐个检查所选本地行情…`;pollScan(job.job_id)}catch(error){$('scanBtn').disabled=false;$('scanStatus').textContent='扫描无法启动：'+error.message}}
+async function startScan(){if(scanTimer)clearTimeout(scanTimer);scanTimer=null;scanRunId='';scanPolling=false;const kinds=[$('scanStock').checked?'stock':null,$('scanEtf').checked?'etf':null].filter(Boolean);const dateFrom=$('scanDateFrom').value,dateTo=$('scanDateTo').value,limit=$('scanLimit').value.trim();if(!checkedValues('scanTimeframes').length){$('scanStatus').textContent='请至少选择一个分析周期。';return}if(!kinds.length){$('scanStatus').textContent='请至少选择股票或 ETF。';return}if(dateFrom&&dateTo&&dateFrom>dateTo){$('scanStatus').textContent='起始日期不能晚于截止日期。';return}scanSettings={kinds,pattern_types:checkedValues('scanPatternTypes')};$('scanBtn').disabled=true;scanRows=[];visibleScanRows=[];scanShown=0;$('results').innerHTML='';$('scanResultFilters').hidden=true;$('scanSummary').textContent='';$('scanFilterSummary').textContent='';$('scanStatus').textContent='正在提交扫描…';const params={timeframes:checkedValues('scanTimeframes'),kinds};scanSettings.timeframes=params.timeframes;if(limit)params.limit=Number(limit);if(dateFrom)params.date_from=dateFrom;if(dateTo)params.date_to=dateTo;try{const job=await fetchJson('/api/v1/scans',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(params)});$('scanStatus').textContent=`扫描任务已启动：${job.job_id}。正在逐个检查所选本地行情…`;pollScan(job.job_id)}catch(error){$('scanBtn').disabled=false;$('scanStatus').textContent='扫描无法启动：'+error.message}}
 
 $('analyzeBtn').onclick=analyze;$('scanBtn').onclick=startScan;$('chartRange').onchange=()=>applyChartRange($('chartRange').value);document.querySelectorAll('[data-chart-action]').forEach(button=>button.onclick=()=>{const action=button.dataset.chartAction;if(action==='in'||action==='out')zoomChart(action);else if(action==='all'){$('chartRange').value='all';applyChartRange('all')}else{chartCenter=null;$('chartRange').value=lastAnalysis?.timeframe==='1w'?'60':'120';applyChartRange($('chartRange').value)}});window.addEventListener('resize',()=>detailChart?.resize());
-$('scanActionFilter').onchange=applyScanFilters;$('scanShapeFilter').onchange=applyScanFilters;$('buyOnlyBtn').onclick=()=>{$('scanActionFilter').value=$('scanActionFilter').value==='CONSIDER_BUY'?'':'CONSIDER_BUY';applyScanFilters()};$('resetScanFilters').onclick=()=>{$('scanActionFilter').value='';[...$('scanShapeFilter').options].forEach(option=>option.selected=false);applyScanFilters()};
+$('scanActionFilter').onchange=applyScanFilters;$('scanShapeFilter').onchange=applyScanFilters;$('buyOnlyBtn').onclick=()=>{$('scanActionFilter').value=$('scanActionFilter').value==='CONSIDER_BUY'?'':'CONSIDER_BUY';applyScanFilters()};$('resetScanFilters').onclick=()=>{$('scanActionFilter').value='';$('scanShapeFilter').querySelectorAll('input').forEach(input=>input.checked=false);applyScanFilters()};
 $('historyPage').textContent='';let historyPage=1,historyRunId='',historyRuns=[],historyRequest=0;
 const historyStatuses={completed:'完成',partial_failed:'部分失败',failed:'全部失败',interrupted:'已中断',running:'扫描中',queued:'排队中'};
+let overviewRequest = 0;
+async function showRunOverview(run) {
+  const request = ++overviewRequest;
+  const inventory = run?.inventory || {};
+  $('coverageNumber').textContent = run ? Number(run.scanned).toLocaleString('zh-CN') : '—';
+  const splitKnown = Number.isInteger(inventory.stock_count) && Number.isInteger(inventory.etf_count);
+  $('coverageNote').textContent = splitKnown
+    ? `股票 ${inventory.stock_count.toLocaleString('zh-CN')} · ETF ${inventory.etf_count.toLocaleString('zh-CN')}`
+    : run ? historyStatuses[run.status] || run.status : '暂无任务数据';
+  const size = inventory.stock_count + inventory.etf_count;
+  $('coverageMix').hidden = !splitKnown || !size;
+  if (splitKnown && size) $('coverageMix').firstElementChild.style.width = (100 * inventory.stock_count / size) + '%';
+  const cards = document.querySelectorAll('[data-signal]');
+  await Promise.all(Array.from(cards, async card => {
+    const number = card.querySelector('strong');
+    number.textContent = '—';
+    card.disabled = true;
+    card.title = '';
+    if (!run) return;
+    try {
+      const result = await fetchJson(`/api/v1/scans/${encodeURIComponent(run.run_id)}/results?action=${card.dataset.signal}&page=1`);
+      if (request !== overviewRequest) return;
+      number.textContent = Number(result.total).toLocaleString('zh-CN');
+      card.disabled = false;
+    } catch (error) {
+      if (request === overviewRequest) card.title = '统计读取失败：' + error.message;
+    }
+  }));
+}
+function selectHistoryRun() {
+  const run = historyRuns.find(item => item.run_id === $('historyRun').value);
+  showRunOverview(run);
+  return loadHistoryResults(1);
+}
+document.querySelectorAll('[data-signal]').forEach(card => card.onclick = () => {
+  $('historyFilters').reset();
+  $('historyAction').value = card.dataset.signal;
+  // The existing reset handler queries after native reset and uses the selected action.
+});
 async function loadHistoryRuns(){
   try{
     const data=await fetchJson('/api/v1/scans?page=1'),select=$('historyRun'),previous=select.value;
     historyRuns=data.items||[];
     select.innerHTML='';
-    if(!data.items?.length){select.innerHTML='<option value="">尚无历史扫描任务</option>';historyRunId='';$('historySummary').textContent='完成或部分失败的扫描会保存在这里。';$('historyResults').innerHTML='';return}
+    if(!data.items?.length){select.innerHTML='<option value="">尚无历史扫描任务</option>';historyRunId='';++historyRequest;showRunOverview(null);$('historyPage').textContent='';$('historyPrev').disabled=$('historyNext').disabled=true;$('historySummary').textContent='完成或部分失败的扫描会保存在这里。';$('historyResults').innerHTML='';return}
     data.items.forEach(run=>{
       const option=document.createElement('option'),params=run.params||{};
       option.value=run.run_id;
@@ -213,7 +283,7 @@ async function loadHistoryRuns(){
       select.append(option);
     });
     select.value=data.items.some(run=>run.run_id===previous)?previous:data.items[0].run_id;
-    historyRunId=select.value;await loadHistoryResults(1);
+    historyRunId=select.value;await selectHistoryRun();
   }catch(error){$('historySummary').textContent=`无法读取历史扫描：${error.message}`}
 }
 async function loadHistoryResults(page=1){
@@ -221,6 +291,7 @@ async function loadHistoryResults(page=1){
   const query=new URLSearchParams({page:String(page),sort:$('historySort').value,order:$('historyOrder').value});
   const q=$('historySearch').value.trim(),kind=$('historyKind').value,category=$('historyCategory').value.trim(),action=$('historyAction').value;
   const patterns=[...$('historyPatterns').querySelectorAll('input:checked')].map(item=>item.value);
+  document.querySelectorAll('[data-signal]').forEach(card => card.setAttribute('aria-pressed', String(card.dataset.signal === action)));
   const period=$('historyTimeframes').value;
   $('historyPatternCount').textContent=patterns.length?` · 已选 ${patterns.length}`:'';
   if(q)query.set('q',q);if(kind)query.set('kind',kind);if(category)query.set('category',category);if(action)query.set('action',action);
@@ -248,13 +319,16 @@ function historyCard(row, defaultTimeframe){
     return `<li><span class="history-period">${period}</span><strong>${escapeHtml(names[p.pattern_type]||legacyNames[p.pattern_type]||p.pattern_type||'形态')}</strong><span class="muted">${escapeHtml(event)}</span></li>`;
   }).join('');
   const cutoff=row.analysis_window?.to||row.latest_date;
+  const name = String(row.name || '').trim();
+  const hasName = name && !(/^\d+$/.test(name) && name.padStart(6, '0') === row.code);
   const failure=row.error?`<span class="muted">${escapeHtml(row.error)}</span>`:'';
   const watch=row.action==='WATCH'?row.watch?.[0]:null;
   const timeframe=row.selected_plan?.timeframe||watch?.timeframe||row.patterns?.[0]?.timeframe||defaultTimeframe||'1d';
   return `<article class="history-result-row">
-    <div class="history-identity"><strong>${escapeHtml(row.name||row.code)}</strong><span class="muted">${row.name&&String(row.name)!==String(row.code)?escapeHtml(row.code)+' · ':''}${row.kind==='etf'?'ETF':'股票'}</span></div>
+    <div class="history-identity"><strong>${escapeHtml(hasName ? name : row.code)}</strong><span class="muted">${hasName?escapeHtml(row.code)+' · ':''}${row.kind==='etf'?'ETF':'股票'}</span></div>
     <div><span class="action-pill action-${escapeHtml(row.action||'WAIT')}">${escapeHtml(actionLabel(row.action))}</span>${watch&&Number.isFinite(watch.distance_atr)?`<span class="muted">距颈线 ${fmt(watch.distance_atr)} ATR</span>`:''}${failure}</div>
     ${shapes?`<ul class="history-shapes">${shapes}</ul>`:'<span class="muted">无当前形态</span>'}
+    <div class="history-spark">${miniCandles(row.mini_bars || CaisenScanResults.decodeMiniCandles(row.mini_candles_u8))}</div>
     <div class="history-price"><strong>${row.latest_close==null?'—':fmt(row.latest_close)}</strong>${cutoff?`<span class="muted">截至 ${escapeHtml(cutoff)}</span>`:''}</div>
     <button type="button" class="secondary" data-history-code="${escapeHtml(row.code)}" data-kind="${escapeHtml(row.kind)}" data-timeframe="${escapeHtml(timeframe)}" aria-label="查看 ${escapeHtml(row.code)} 的最新详情">查看详情 →</button>
   </article>`;
@@ -263,7 +337,7 @@ $('historyResults').addEventListener('click',event=>{
   const button=event.target.closest('[data-history-code]');
   if(button)openTicker(button.dataset.historyCode,button.dataset.kind,button.dataset.timeframe);
 });
-document.querySelectorAll('[data-scan-view]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-scan-view],.scan-view').forEach(item=>item.classList.remove('active'));button.classList.add('active');$(button.dataset.scanView).classList.add('active');if(button.dataset.scanView==='scanHistory')loadHistoryRuns()});$('loadHistoryBtn').onclick=loadHistoryRuns;$('historyRun').onchange=()=>loadHistoryResults(1);$('historyFilters').onsubmit=event=>{event.preventDefault();loadHistoryResults(1)};$('historyFilters').onreset=()=>setTimeout(()=>loadHistoryResults(1),0);$('historyPrev').onclick=()=>loadHistoryResults(historyPage-1);$('historyNext').onclick=()=>loadHistoryResults(historyPage+1);
+document.querySelectorAll('[data-scan-view]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-scan-view],.scan-view').forEach(item=>item.classList.remove('active'));document.querySelectorAll('[data-scan-view]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));button.classList.add('active');$(button.dataset.scanView).classList.add('active');if(button.dataset.scanView==='scanHistory')loadHistoryRuns()});$('loadHistoryBtn').onclick=loadHistoryRuns;$('historyRun').onchange=selectHistoryRun;$('historyFilters').onsubmit=event=>{event.preventDefault();loadHistoryResults(1)};$('historyFilters').onreset=()=>setTimeout(()=>loadHistoryResults(1),0);$('historyPrev').onclick=()=>loadHistoryResults(historyPage-1);$('historyNext').onclick=()=>loadHistoryResults(historyPage+1);
 $('refreshOneBtn').onclick=()=>startRefresh({code:$('code').value.trim(),kind:$('kind').value},$('chartNote'),true);
 $('refreshAllBtn').onclick=()=>{if(confirm('逐个更新本地全部股票和 ETF 行情？上游可能限流；失败标的会保留旧文件。'))startRefresh({scope:'all'},$('scanStatus'),false)};
 function refreshNodes(meta){return {status:$(meta.one?'chartNote':'scanStatus'),report:$(meta.one?'refreshOneReport':'refreshAllReport')}}
@@ -302,7 +376,7 @@ async function loadDailyBacktestHistory(){
     const data=await fetchJson('/api/v1/backtests?page=1'),items=data.items||[];
     $('dailyBacktestHistory').innerHTML=items.length?items.map(job=>{
       const status={queued:'排队中',running:'运行中',completed:'完成',partial_failed:'部分失败',failed:'失败',interrupted:'已中断'}[job.status]||job.status;
-      return `<article class="history-result-row"><b>${escapeHtml(job.created_at||job.job_id)}</b><span>${escapeHtml(status)} · ${Math.round((job.progress||0)*100)}% · ${job.completed??0}/${job.total??0}</span><span class="muted">${escapeHtml(job.universe?.id||job.params?.universe_id||'daily_800_stock_200_etf_v1')} · ${job.params?.workers??'—'} worker · ${escapeHtml(job.params?.recognizer||'识别器待记录')} · 交易 ${job.summary?.trade_count??'—'} · ${escapeHtml(job.strategy_version||job.params?.strategy||'策略版本待记录')} · ${escapeHtml(job.engine_version||'引擎版本待记录')}</span>${job.report_url?`<a href="${escapeHtml(job.report_url)}" target="_blank" rel="noopener">打开已保存报告</a>`:''}${job.error?`<div class="error-box">${escapeHtml(job.error)}</div>`:''}</article>`
+      return `<article class="backtest-history-row"><b>${escapeHtml(job.created_at||job.job_id)}</b><span>${escapeHtml(status)} · ${Math.round((job.progress||0)*100)}% · ${job.completed??0}/${job.total??0}</span><span class="muted">${escapeHtml(job.universe?.id||job.params?.universe_id||'daily_800_stock_200_etf_v1')} · ${job.params?.workers??'—'} worker · ${escapeHtml(job.params?.recognizer||'识别器待记录')} · 交易 ${job.summary?.trade_count??'—'} · ${escapeHtml(job.strategy_version||job.params?.strategy||'策略版本待记录')} · ${escapeHtml(job.engine_version||'引擎版本待记录')}</span>${job.report_url?`<a href="${escapeHtml(job.report_url)}" target="_blank" rel="noopener">打开已保存报告</a>`:''}${job.error?`<div class="error-box">${escapeHtml(job.error)}</div>`:''}</article>`
     }).join(''):'<p class="muted">尚无日线回测任务。</p>';
   }catch(error){$('dailyBacktestHistory').innerHTML=`<div class="error-box">无法读取历史回测：${escapeHtml(error.message)}</div>`}
 }
@@ -374,3 +448,5 @@ async function showPattern(id, scroll=true){
 }
 $('detailRows').addEventListener('click',event=>{const button=event.target.closest('[data-show-pattern]');if(button)showPattern(button.dataset.showPattern)});
 $('dailyBacktestBtn').onclick=startDailyBacktest;$('dailyBacktestHistoryRefresh').onclick=loadDailyBacktestHistory;document.querySelector('[data-panel=\"daily-backtest\"]').addEventListener('click',()=>loadDailyBacktestHistory());
+
+loadHistoryRuns();

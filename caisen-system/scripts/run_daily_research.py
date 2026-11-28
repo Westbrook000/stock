@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
+
+for _env in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ[_env] = "1"
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -84,7 +88,8 @@ def main():
                                  progress_callback=progress, root=REPO.parent,
                                  signal_cache_dir=args.signal_cache_dir,
                                  recognizer=args.recognizer,
-                                 require_signal_cache=args.require_signal_cache)
+                                 require_signal_cache=args.require_signal_cache,
+                                 fallback_workers="auto")
     print(json.dumps({"status": payload["status"], "summary": payload["summary"],
                       "artifacts": payload["artifacts"], "timings": payload["timings"],
                       "effective_configuration": {

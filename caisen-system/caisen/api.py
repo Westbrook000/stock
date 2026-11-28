@@ -326,10 +326,13 @@ def _analyze_scan_instrument(instrument, params, root=None):
         prices={tf:float(frame.close.iloc[-1]) for tf,frame in bars_by_tf.items() if not frame.empty}
         main_patterns_by_tf={}
         recognition_by_tf={}
+        pattern_bars_by_tf={}
         for tf in requested:
             if tf == "1d" and not daily_background.empty:
+                window_bars = _recognition_window(daily_background, "1d")
+                pattern_bars_by_tf[tf] = window_bars
                 daily_recognition = recognize_daily_history(
-                    _recognition_window(daily_background, "1d"), code, kind,
+                    window_bars, code, kind,
                     tick_size=daily_background.attrs.get("quality", {}).get(
                         "tick_size", 0.001 if kind == "etf" else 0.01))
                 recognition_by_tf[tf] = daily_recognition
@@ -340,8 +343,10 @@ def _analyze_scan_instrument(instrument, params, root=None):
                                            if (not start or (pattern.confirmation_date or pattern.formed_at) >= start)
                                            and (not end or (pattern.confirmation_date or pattern.formed_at) <= end)]
             elif tf == "1w" and not weekly_background.empty:
+                window_bars = _recognition_window(weekly_background, "1w")
+                pattern_bars_by_tf[tf] = window_bars
                 weekly_recognition = recognize_weekly_history(
-                    _recognition_window(weekly_background, "1w"), code, kind,
+                    window_bars, code, kind,
                     tick_size=daily_background.attrs.get("quality", {}).get(
                         "tick_size", 0.001 if kind == "etf" else 0.01))
                 recognition_by_tf[tf] = weekly_recognition
@@ -352,6 +357,7 @@ def _analyze_scan_instrument(instrument, params, root=None):
                                            if (not start or (pattern.confirmation_date or pattern.formed_at) >= start)
                                            and (not end or (pattern.confirmation_date or pattern.formed_at) <= end)]
             else:
+                pattern_bars_by_tf[tf] = bars_by_tf.get(tf, pd.DataFrame())
                 main_patterns_by_tf[tf] = []
                 recognition_by_tf[tf] = {"patterns": [], "signals": []}
         patterns_by_tf={tf:current_pattern_snapshot(_supported_main_patterns(main_patterns_by_tf[tf]))
@@ -366,7 +372,7 @@ def _analyze_scan_instrument(instrument, params, root=None):
         decision=synthesize_decision(code,kind,decision_patterns_by_tf,
             {tf:prices[tf] for tf in requested if tf in prices},
             {tf:quality_by_tf[tf] for tf in requested},
-            bars_by_timeframe={tf:bars_by_tf[tf].tail(500 if tf=="1d" else 520) for tf in requested},
+            bars_by_timeframe={tf:pattern_bars_by_tf[tf] for tf in requested},
             warnings_by_timeframe={tf:warnings_by_tf[tf] for tf in requested},
             allowed_pattern_ids_by_timeframe=allowed_pattern_ids_by_tf,
             watch_by_timeframe={tf:recognition.get("latest_bar") for tf,recognition in recognition_by_tf.items()},
@@ -837,7 +843,9 @@ def _daily_backtest_worker(job_id, params):
             output_dir=output_dir,date_to=params["date_to"],trade_start=params["trade_start"],
             workers=params["workers"],
             progress_callback=on_progress,recognizer=params["recognizer"],
-            execution_mode=params["execution_mode"],worker_source_override=params["worker_source"])
+            execution_mode=params["execution_mode"],
+            signal_cache_dir=PROJECT_ROOT/"state"/"signal_cache",
+            worker_source_override=params["worker_source"])
         for field in ("strategy_version","recognizer_version","engine_version","source_rule_version","versions"):
             if result.get(field) != params.get(field):
                 raise RuntimeError("effective backtest configuration changed before execution: %s" % field)
@@ -896,12 +904,23 @@ def _daily_job_or_404(job_id):
 def start_daily_backtest(params: dict):
     if params:
         raise HTTPException(400,"daily backtest configuration is fixed")
+    import sys
     from .daily_research import resolve_daily_research_config
+    daily_research_mod = sys.modules.get(__package__ + ".daily_research")
     try:
         effective = resolve_daily_research_config(execution_mode="spawn")
     except Exception as error:
         raise HTTPException(503,"cannot resolve current daily research configuration: %s: %s" %
                             (type(error).__name__, error)) from error
+    if (effective.get("workers") == 1
+            and effective.get("worker_source") in ("default_no_benchmark", "default_ineligible_benchmark")
+            and effective.get("execution_mode") == "spawn"):
+        fallback_fn = getattr(daily_research_mod, "default_multiprocess_workers", None)
+        failed_fn = getattr(daily_research_mod, "_benchmark_explicitly_failed", None)
+        if callable(fallback_fn) and not (callable(failed_fn) and failed_fn()):
+            fb_workers = fallback_fn()
+            if fb_workers > 1:
+                effective = {**effective, "workers": fb_workers, "worker_source": "default_multiprocess_fallback"}
     job_id=uuid.uuid4().hex
     output_dir=PROJECT_ROOT/"state"/"daily_backtests"/job_id
     normalized={"universe_id":"daily_800_stock_200_etf_v1",

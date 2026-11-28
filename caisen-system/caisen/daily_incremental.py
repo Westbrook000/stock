@@ -13,7 +13,7 @@ import pandas as pd
 
 from .main_bottoms import (
     MAIN_RULES, PIVOT_SCALES, _make_main_pattern, _qualify_neckline_slope,
-    detect_main_bottoms,
+    detect_main_bottoms, _subtract_calendar_years_str,
     _structure_candidates, _PotentialNecklinePairCache,
     _neckline_decline_check, _neckline_formation_coverage,
     _neckline_candidate_reversal_atr_multiple, _neckline_candidate_scale,
@@ -64,14 +64,17 @@ class DailyRecognitionSession:
         self.progress_started_at = time.perf_counter()
         self.last_progress_at = 0.0
         self.bars: List[dict] = []
+        self.bar_dates: List[pd.Timestamp] = []
         self.date_strings: List[str] = []
         self._date_index_cache = {}
         self._date_index_cache_length = 0
         self._pressure_window_cache_key = None
         self._pressure_window_cache = []
+        self.open_values: List[float] = []
         self.high_values: List[float] = []
         self.low_values: List[float] = []
         self.close_values: List[float] = []
+        self.volume_values: List[float] = []
         self.atr_values: List[float] = []
         self.scale_states = {name: self._new_zigzag() for name, _, _ in PIVOT_SCALES}
         self.scale_pivots = {name: [] for name, _, _ in PIVOT_SCALES}
@@ -97,6 +100,8 @@ class DailyRecognitionSession:
         self.flag_candidates = {}
         self.flag_formations = {}
         self.flag_instances = {}
+        self._flag_floor_checked = {}
+        self._flag_geometry_cache = {}
         self.last_signal_date = None
         self.performance = {"bars_appended": 0, "atr_updates": 0,
                             "pivot_updates": 0, "candidate_refreshes": 0,
@@ -106,21 +111,54 @@ class DailyRecognitionSession:
         self._prefix_frame_cache = None
         self._prefix_frame_cache_length = -1
 
+    def _ensure_bar_views(self):
+        """Synchronize columnar bar caches when callers populate `self.bars` directly."""
+        bar_count = len(self.bars)
+        if len(self.date_strings) != bar_count:
+            self.date_strings = [str(pd.Timestamp(bar["date"]).date()) for bar in self.bars]
+        if len(self.high_values) != bar_count:
+            self.high_values = [float(bar["high"]) if "high" in bar else np.nan for bar in self.bars]
+        if len(self.low_values) != bar_count:
+            self.low_values = [float(bar["low"]) if "low" in bar else np.nan for bar in self.bars]
+        if len(self.close_values) != bar_count:
+            self.close_values = [float(bar["close"]) if "close" in bar else np.nan for bar in self.bars]
+
+    def _cached_float_array(self, attr_name: str, values: List[float]) -> np.ndarray:
+        """Return a cached float64 ndarray for `values`, rebuilt only when its length grows."""
+        cached = getattr(self, attr_name, None)
+        if cached is not None and len(cached) == len(values):
+            return cached
+        arr = np.asarray(values, dtype=float)
+        setattr(self, attr_name, arr)
+        return arr
+
     def _frame_for_current_prefix(self):
         """Build one reusable frame and immutable numeric views for this prefix."""
         if (self._prefix_frame_cache is not None
                 and self._prefix_frame_cache_length == len(self.bars)):
             return self._prefix_frame_cache
-        frame = pd.DataFrame(self.bars)
-        date_index = pd.DatetimeIndex(frame.date)
-        frame.attrs["provenance"] = deepcopy(self.provenance)
+        if (len(self.bar_dates) == len(self.bars) and len(self.open_values) == len(self.bars)
+                and len(self.volume_values) == len(self.bars)):
+            frame = pd.DataFrame({
+                "date": self.bar_dates,
+                "open": self.open_values,
+                "high": self.high_values,
+                "low": self.low_values,
+                "close": self.close_values,
+                "volume": self.volume_values,
+            })
+            date_index = pd.DatetimeIndex(self.bar_dates)
+        else:
+            frame = pd.DataFrame(self.bars)
+            date_index = pd.DatetimeIndex(frame.date)
+        frame.attrs["provenance"] = self.provenance
         frame.attrs["date_strings"] = self.date_strings
         if self.prior_price_context is not None:
             frame.attrs["prior_price_context"] = self.prior_price_context
         frame.attrs["neckline_date_index"] = date_index
-        frame.attrs["neckline_high_values"] = np.asarray(self.high_values, dtype=float)
-        frame.attrs["neckline_low_values"] = np.asarray(self.low_values, dtype=float)
-        frame.attrs["neckline_close_values"] = np.asarray(self.close_values, dtype=float)
+        frame.attrs["neckline_high_values"] = self._cached_float_array("_high_arr_cache", self.high_values)
+        frame.attrs["neckline_low_values"] = self._cached_float_array("_low_arr_cache", self.low_values)
+        frame.attrs["neckline_close_values"] = self._cached_float_array("_close_arr_cache", self.close_values)
         self._prefix_frame_cache = frame
         self._prefix_frame_cache_length = len(self.bars)
         self.performance["prefix_frame_builds"] += 1
@@ -138,6 +176,7 @@ class DailyRecognitionSession:
         """Reuse the sorted, observation-anchored pressure window per appended bar."""
         if not self.bars or not self.pressure["pivots"]:
             return []
+        self._ensure_bar_views()
         bar_index = len(self.bars) - 1
         cache_key = (bar_index, self._pressure_pivot_revision, self.timeframe)
         if cache_key == self._pressure_window_cache_key:
@@ -145,8 +184,8 @@ class DailyRecognitionSession:
             return self._pressure_window_cache
         years = int(MAIN_RULES.get("timeframes", {}).get(self.timeframe, {}).get(
             "structure_window_calendar_years", 5 if self.timeframe == "1d" else 10))
-        cutoff = pd.Timestamp(self.bars[-1]["date"]) - pd.DateOffset(years=years)
-        search_start = bisect_left(self.date_strings, str(cutoff.date()))
+        cutoff_str = _subtract_calendar_years_str(self.date_strings[-1], years)
+        search_start = bisect_left(self.date_strings, cutoff_str)
         window = [pivot for pivot in self.pressure["pivots"] if pivot.index >= search_start]
         if any(window[index - 1].index > window[index].index for index in range(1, len(window))):
             window.sort(key=lambda pivot: pivot.index)
@@ -168,7 +207,7 @@ class DailyRecognitionSession:
             key = f"neckline_{name}_values"
             if key not in frame.attrs:
                 frame.attrs[key] = pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
-        frame.attrs["neckline_atr_values"] = np.asarray(self.atr_values, dtype=float)
+        frame.attrs["neckline_atr_values"] = self._cached_float_array("_atr_arr_cache", self.atr_values)
         date_index = frame.attrs.get("neckline_date_index")
         if date_index is None or len(date_index) != len(frame):
             date_index = pd.DatetimeIndex(frame.date)
@@ -359,6 +398,7 @@ class DailyRecognitionSession:
         """Build reusable neckline pair gates before refreshing shape candidates."""
         if self.neckline_potential_pair_cache is None or len(self.bars) < 2:
             return
+        self._ensure_bar_views()
         by_location = {}
         for pivots in self.scale_pivots.values():
             for pivot in pivots:
@@ -378,19 +418,20 @@ class DailyRecognitionSession:
                     pressure.index, pressure.date, pressure.price, pressure.kind,
                     pressure.confirmed_at, pressure.confirmed_date,
                     main.scale + "|" + candidate_scale))
-        highs = np.asarray([float(item["high"]) for item in self.bars], dtype=float)
+        highs = self._cached_float_array("_high_arr_cache", self.high_values)
+        atr_arr = self._cached_float_array("_atr_arr_cache", self.atr_values)
         minimum_ticks = float(MAIN_RULES.get("neckline_tests", {}).get(
             "minimum_tolerance_ticks", 2))
         tolerance_atr = float(MAIN_RULES.get("neckline_tests", {}).get("tolerance_atr", 0.5))
         tolerances = np.maximum(minimum_ticks * self.tick_size,
-                                np.where(np.isfinite(self.atr_values),
-                                         tolerance_atr * np.asarray(self.atr_values, dtype=float), 0.0))
-        minimum_date = pd.Timestamp(self.bars[-1]["date"]) - pd.DateOffset(
-            years=10 if self.timeframe == "1w" else 6)
-        minimum_index = bisect_left(self.date_strings, str(minimum_date.date()))
+                                np.where(np.isfinite(atr_arr),
+                                         tolerance_atr * atr_arr, 0.0))
+        cutoff_str = _subtract_calendar_years_str(
+            self.date_strings[-1], 10 if self.timeframe == "1w" else 6)
+        minimum_index = bisect_left(self.date_strings, cutoff_str)
         self.neckline_potential_pair_cache.prune(minimum_index)
         self.neckline_potential_pair_cache.add(
-            neckline_pivots, np.asarray(self.atr_values, dtype=float), highs, tolerances,
+            neckline_pivots, atr_arr, highs, tolerances,
             self.tick_size, self.timeframe, minimum_index=minimum_index)
 
     def _report_progress(self, force=False, phase="recognition"):
@@ -655,16 +696,16 @@ class DailyRecognitionSession:
     def _maintain_candidates(self):
         if not self.bars:
             return
+        self._ensure_bar_views()
         i = len(self.bars) - 1
-        current_date = pd.Timestamp(self.bars[i]["date"])
         years = int(MAIN_RULES.get("timeframes", {}).get(self.timeframe, {}).get(
             "structure_window_calendar_years", 5 if self.timeframe == "1d" else 10))
-        cutoff = current_date - pd.DateOffset(years=years)
+        cutoff_str = _subtract_calendar_years_str(self.date_strings[i], years)
         retained = {}
         for key, candidate in self.active.items():
             sequence = candidate["sequence"]
             first = min(p.index for p in sequence)
-            if pd.Timestamp(self.bars[first]["date"]) < cutoff:
+            if self.date_strings[first] < cutoff_str:
                 pattern = candidate.get("pattern")
                 if pattern is not None:
                     self._retire_main_pattern(pattern, "structure_window_ended")
@@ -746,6 +787,7 @@ class DailyRecognitionSession:
     def _check_bull_flag(self):
         if len(self.flag_candidates) < 1 or len(self.bars) < 2:
             return []
+        self._ensure_bar_views()
         i = len(self.bars) - 1
         minimum = 2 * self.tick_size
         prior_atr = self.atr_values[i - 1]
@@ -768,13 +810,19 @@ class DailyRecognitionSession:
                 continue
             lo0, hi0, lo1, hi1, lo2 = [float(p.price) for p in seq]
             i0, i1, i2, i3, i4 = [p.index for p in seq]
-            if any(float(self.bars[j]["close"]) < lo0 for j in range(seq[-1].confirmed_at, i + 1)):
+            cache_seq_key = (key, tuple((p.index, float(p.price), p.confirmed_at) for p in seq))
+            checked_through = self._flag_floor_checked.get(cache_seq_key)
+            scan_start = seq[-1].confirmed_at if checked_through is None else checked_through + 1
+            if scan_start <= i and any(self.close_values[j] < lo0 for j in range(scan_start, i + 1)):
                 self.flag_candidates.pop(key, None)
+                self._flag_floor_checked.pop(cache_seq_key, None)
+                self._flag_geometry_cache.pop(cache_seq_key, None)
                 formation = self.flag_formations.get(pattern_id)
                 if formation is not None and formation.state == "forming":
                     self._terminate_flag_formation(formation, "invalidated", self.date_strings[i],
                                                    "close_below_impulse_floor", lo0)
                 continue
+            self._flag_floor_checked[cache_seq_key] = i
             impulse, correction = hi0 - lo0, hi0 - lo2
             if (i1 - i0 < 4 or i4 - i1 < 5 or impulse <= 0 or
                     correction < impulse * 0.12 or correction > impulse * 0.50 or
@@ -783,17 +831,22 @@ class DailyRecognitionSession:
             upper = _line((i1, hi0), (i3, hi1))
             if upper["slope"] >= 0:
                 continue
-            formation_end = max(p.confirmed_at for p in seq)
-            formation = self.bars[i1:formation_end + 1]
-            coverage = _neckline_formation_coverage(
-                np.asarray([b["high"] for b in formation]),
-                np.asarray(self.atr_values[i1:formation_end + 1]),
-                {"slope": upper["slope"], "intercept": _at(upper, i1)},
-                0, len(formation)-1, self.tick_size)
-            if not coverage["passed"]:
-                continue
-            section = self.bars[i1:i4 + 1]
-            if max(float(b["high"]) for b in section) - min(float(b["low"]) for b in section) > impulse * 0.60:
+            cached_geom = self._flag_geometry_cache.get(cache_seq_key)
+            if cached_geom is None:
+                formation_end = max(p.confirmed_at for p in seq)
+                coverage = _neckline_formation_coverage(
+                    np.asarray(self.high_values[i1:formation_end + 1], dtype=float),
+                    np.asarray(self.atr_values[i1:formation_end + 1], dtype=float),
+                    {"slope": upper["slope"], "intercept": _at(upper, i1)},
+                    0, formation_end - i1, self.tick_size)
+                section_passed = (
+                    coverage["passed"]
+                    and (max(self.high_values[i1:i4 + 1]) - min(self.low_values[i1:i4 + 1]) <= impulse * 0.60)
+                )
+                cached_geom = section_passed
+                if i >= formation_end:
+                    self._flag_geometry_cache[cache_seq_key] = cached_geom
+            if not cached_geom:
                 continue
             formation = self.flag_formations.get(pattern_id)
             if formation is None:
@@ -864,7 +917,7 @@ class DailyRecognitionSession:
             self.emitted_ids.add(pattern_id)
             date = str(pd.Timestamp(self.bars[i]["date"]).date())
             unlocked = float(self.bars[i]["close"]) > hi0
-            first_target = float(_at(upper, i) + impulse) if unlocked else None
+            first_target = float(lo2 + impulse) if unlocked else None
             pattern = Pattern(pattern_id=pattern_id, code=self.code, kind=self.kind, timeframe=self.timeframe,
                               pattern_type="bull_flag", direction="bullish", state="confirmed",
                               formed_at=seq[0].date, confirmed_at=i,
@@ -1171,12 +1224,14 @@ class DailyRecognitionSession:
 
     def _refresh_structures(self, changed_scales=None):
         """Refresh candidate sequences only when a confirmed large-scale pivot changes."""
-        current_date = pd.Timestamp(self.bars[-1]["date"])
+        if not self.bars:
+            return
+        self._ensure_bar_views()
         pressure = self.pressure["pivots"]
         years = int(MAIN_RULES.get("timeframes", {}).get(self.timeframe, {}).get(
             "structure_window_calendar_years", 5 if self.timeframe == "1d" else 10))
-        cutoff = current_date - pd.DateOffset(years=years)
-        start_index = bisect_left(self.date_strings, str(cutoff.date()))
+        cutoff_str = _subtract_calendar_years_str(self.date_strings[-1], years)
+        start_index = bisect_left(self.date_strings, cutoff_str)
         retained = {}
         for key, value in self.active.items():
             if min(p.index for p in value["sequence"]) >= start_index:
@@ -1184,6 +1239,7 @@ class DailyRecognitionSession:
             elif value.get("pattern") is not None:
                 self._retire_main_pattern(value["pattern"], "structure_window_ended")
         self.active = retained
+        low_arr = self._cached_float_array("_low_arr_cache", self.low_values)
         for scale, pivots in self.scale_pivots.items():
             if changed_scales is not None and scale not in changed_scales:
                 continue
@@ -1191,7 +1247,7 @@ class DailyRecognitionSession:
             if not recent:
                 continue
             for family, seq in _structure_candidates(recent, self.timeframe, self.atr_values, self.tick_size,
-                                                      low_values=np.asarray(self.low_values, dtype=float),
+                                                      low_values=low_arr,
                                                       shoulder_pivots=pressure,
                                                       fast_candidate_enumeration=self.boundary_first):
                 key = (family, scale, tuple((p.index, p.kind) for p in seq))
@@ -1319,6 +1375,7 @@ class DailyRecognitionSession:
 
     def _pressure_pivot_can_change_candidate(self, candidate, pressure_pivot):
         """Ignore newly confirmed touches outside this shape's search interval."""
+        self._ensure_bar_views()
         sequence = candidate["sequence"]
         first = min((p for p in sequence if p.kind == "low"), key=lambda p: p.index)
         index = int(pressure_pivot.index)
@@ -1365,12 +1422,11 @@ class DailyRecognitionSession:
             return abs(float(pressure_pivot.price) - _at(upper, index)) <= tolerance
         search_years = int(MAIN_RULES.get("timeframes", {}).get(self.timeframe, {}).get(
             "structure_window_calendar_years", 5 if self.timeframe == "1d" else 10))
-        search_start_date = (pd.Timestamp(self.bars[-1]["date"]) -
-                             pd.DateOffset(years=search_years)) if self.bars else pd.Timestamp.min
-        search_start_index = bisect_left(self.date_strings, str(search_start_date.date()))
+        earliest_str = (_subtract_calendar_years_str(self.date_strings[-1], search_years)
+                        if self.date_strings else "0001-01-01")
+        search_start_index = bisect_left(self.date_strings, earliest_str)
         if family == "w_bottom":
-            earliest = search_start_date
-            if pd.Timestamp(pressure_pivot.date) < earliest:
+            if pressure_pivot.date < earliest_str:
                 return False
             low_points = sorted((p for p in sequence if p.kind == "low"), key=lambda p: p.index)
             middle_highs = [p for pivots in self.scale_pivots.values() for p in pivots
@@ -1407,7 +1463,7 @@ class DailyRecognitionSession:
             for anchor in self.pressure["pivots"]:
                 if anchor.index == index or abs(anchor.index - index) < minimum_gap:
                     continue
-                if (pd.Timestamp(anchor.date) < earliest
+                if (anchor.date < earliest_str
                         or not minimum_level <= float(anchor.price) <= maximum_level):
                     continue
                 left, right = ((anchor, pressure_pivot) if anchor.index < index
@@ -1453,6 +1509,7 @@ class DailyRecognitionSession:
     def _evaluate(self, pressure_pivot=None):
         if not self.active:
             return []
+        self._ensure_bar_views()
         # Some focused callers construct a stream from an already materialized
         # prefix. Keep the same date/index invariant as append_bar before the
         # candidate evaluator indexes the current date or builds cached frames.
@@ -1507,7 +1564,7 @@ class DailyRecognitionSession:
         high_values = frame.attrs["neckline_high_values"]
         low_values = frame.attrs["neckline_low_values"]
         close_values = frame.attrs["neckline_close_values"]
-        atr_values = np.asarray(self.atr_values, dtype=float)
+        atr_values = self._cached_float_array("_atr_arr_cache", self.atr_values)
         frame.attrs["neckline_atr_values"] = atr_values
         event_candidates = []
         all_neckline_pivots = []
@@ -1518,11 +1575,11 @@ class DailyRecognitionSession:
                 if key not in by_identity or float(pivot.scale.split("ATR")[0]) > float(by_identity[key].scale.split("ATR")[0]):
                     by_identity[key] = pivot
         all_neckline_pivots.extend(by_identity.values())
-        cutoff = pd.Timestamp(frame.date.iloc[-1]) - pd.DateOffset(
-            years=10 if self.timeframe == "1w" else 6)
+        cutoff_str = _subtract_calendar_years_str(
+            self.date_strings[-1], 10 if self.timeframe == "1w" else 6)
+        cutoff_index = bisect_left(self.date_strings, cutoff_str)
         for pivot in self.pressure["pivots"]:
-            if pivot.index < int(np.searchsorted(frame.attrs["neckline_date_index"].values,
-                                                cutoff.to_datetime64(), side="left")):
+            if pivot.index < cutoff_index:
                 continue
             main = by_identity.get((pivot.index, pivot.kind))
             if main is None:
@@ -1692,10 +1749,11 @@ class DailyRecognitionSession:
         """Check a frozen, already-qualified boundary on bars without new pivots."""
         if len(self.bars) < 2:
             return []
+        self._ensure_bar_views()
         i = len(self.bars) - 1
         if len(self.close_values) != len(self.bars):
             self.close_values = [float(bar["close"]) for bar in self.bars]
-        current_date = str(pd.Timestamp(self.bars[i]["date"]).date())
+        current_date = self.date_strings[i] if len(self.date_strings) == len(self.bars) else str(pd.Timestamp(self.bars[i]["date"]).date())
         candidates = []
         rules = MAIN_RULES.get("breakout", {})
         buffer_multiple = float(rules.get("close_buffer_previous_atr_multiple", 1.0))
@@ -1736,8 +1794,11 @@ class DailyRecognitionSession:
             guard_key = (pattern.pattern_id, line["slope"], line["intercept"],
                          formation_start, formation_end)
             if candidate.get("formation_guard_key") != guard_key:
+                high_arr = (np.asarray(self.high_values, dtype=float)
+                            if len(self.high_values) == len(self.bars)
+                            else np.asarray([b["high"] for b in self.bars], dtype=float))
                 candidate["formation_guard"] = _neckline_formation_coverage(
-                    np.asarray([b["high"] for b in self.bars]), np.asarray(self.atr_values),
+                    high_arr, np.asarray(self.atr_values),
                     line, formation_start, formation_end, self.tick_size,
                     cache=self.neckline_coverage_cache)
                 candidate["formation_guard_key"] = guard_key
@@ -2030,9 +2091,12 @@ class DailyRecognitionSession:
         if self.bars and row["date"] <= self.bars[-1]["date"]:
             raise ValueError("daily bars must be appended in strictly increasing date order")
         self.bars.append(row)
+        self.bar_dates.append(row["date"])
+        self.open_values.append(float(row["open"]))
         self.high_values.append(float(row["high"]))
         self.low_values.append(float(row["low"]))
         self.close_values.append(float(row["close"]))
+        self.volume_values.append(float(row.get("volume", np.nan)))
         self._prefix_frame_cache = None
         self._prefix_frame_cache_length = -1
         date_text = str(row["date"].date())
@@ -2090,12 +2154,13 @@ class DailyRecognitionSession:
         self._advance_flag_lifecycles(i)
         if len(signals) > 1:
             merged = []
+            today_str = self.date_strings[-1]
             for item in signals:
-                if item["signal_date"] == str(pd.Timestamp(self.bars[-1]["date"]).date()):
+                if item["signal_date"] == today_str:
                     merged.extend(item.get("patterns", [item["pattern"]]))
             if merged:
                 patterns = [Pattern(**item) for item in merged]
-                signals = [self._signal_many(patterns, str(pd.Timestamp(self.bars[-1]["date"]).date()))]
+                signals = [self._signal_many(patterns, today_str)]
         self._report_progress()
         return self._remember(signals)
 

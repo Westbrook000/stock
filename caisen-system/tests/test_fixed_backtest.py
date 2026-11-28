@@ -395,3 +395,70 @@ def test_trade_start_restricts_evaluation_curve_but_retains_full_data_start():
     assert result["evaluation_start"] == "2024-01-31"
     assert result["daily_equity"][0]["date"] == "2024-01-31"
     assert result["metrics"]["annualization_period_years"] < 20 / 365.25
+
+
+def _flag_688282_pattern():
+    return {
+        "pattern_id": "688282:bull_flag:test",
+        "pattern_type": "bull_flag",
+        "direction": "bullish",
+        "confirmed_at": 0,
+        "key_points": {
+            "pivot_1": 40.16, "pivot_1_kind": "low",
+            "pivot_2": 51.46, "pivot_2_kind": "high",
+            "pivot_5": 45.96, "pivot_5_kind": "low",
+        },
+        "evidence": [{
+            "code": "flag_breakout",
+            "value": {
+                "date": "2023-04-20",
+                "prior_high": 51.46,
+                "impulse_size": 11.30,
+                "measured_target_locked": True,
+                "target": None,
+            },
+        }],
+    }
+
+
+def test_overshot_flag_target_on_entry_day_cancels_stop_and_never_shorts_later():
+    frame = bars([
+        ("2023-04-20", 49.00, 51.00, 48.50, 50.59, 1000),
+        ("2023-04-21", 50.84, 58.20, 50.50, 58.00, 1000),
+        ("2023-04-24", 57.42, 57.80, 56.50, 57.00, 1000),
+        ("2023-07-20", 46.00, 46.50, 44.00, 45.00, 1000),
+        ("2026-11-27", 39.65, 40.00, 39.20, 39.65, 1000),
+    ])
+    signal = _signal_with_pattern(_flag_688282_pattern(), signal_date="2023-04-20", entry_date="2023-04-21")
+    result = simulate_fixed_trades(frame, [signal])
+
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["exit_reason"] == "measured_target_already_passed"
+    assert result["trades"][0]["exit_date"] == "2023-04-24"
+    assert result["accounting_checks"]["realized_pnl_matches_ending_equity"] is True
+    assert result["accounting_checks"]["cash_plus_position_equals_equity"] is True
+    completed_roles = [e["role"] for e in result["order_events"] if e.get("status") == "completed"]
+    assert completed_roles == ["entry", "measured_target_already_passed"]
+    assert all(point["shares"] == 0 for point in result["daily_equity"][2:])
+
+
+def test_overshot_flag_target_on_later_bar_also_cancels_stop_cleanly():
+    frame = bars([
+        ("2023-04-20", 49.00, 51.00, 48.50, 50.59, 1000),
+        ("2023-04-21", 50.84, 51.30, 50.10, 51.00, 1000),
+        ("2023-04-24", 51.10, 58.20, 51.00, 58.00, 1000),
+        ("2023-04-25", 57.50, 58.00, 56.80, 57.20, 1000),
+        ("2023-07-20", 46.00, 46.50, 44.00, 45.00, 1000),
+        ("2026-11-27", 39.65, 40.00, 39.20, 39.65, 1000),
+    ])
+    signal = _signal_with_pattern(_flag_688282_pattern(), signal_date="2023-04-20", entry_date="2023-04-21")
+    result = simulate_fixed_trades(frame, [signal])
+
+    assert len(result["trades"]) == 1
+    assert result["trades"][0]["exit_reason"] == "measured_target_already_passed"
+    assert result["trades"][0]["exit_date"] == "2023-04-25"
+    assert result["accounting_checks"]["realized_pnl_matches_ending_equity"] is True
+    assert result["accounting_checks"]["cash_plus_position_equals_equity"] is True
+    completed_roles = [e["role"] for e in result["order_events"] if e.get("status") == "completed"]
+    assert completed_roles == ["entry", "measured_target_already_passed"]
+    assert all(point["shares"] == 0 for point in result["daily_equity"][3:])

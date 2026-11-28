@@ -53,8 +53,13 @@ RECOGNIZER_VERSION = DAILY_ENGINE_VERSION
 ENGINE_VERSION = DAILY_ENGINE_VERSION
 BENCHMARK_PATH = (Path(__file__).resolve().parents[1] / "reports" / "daily-research" /
                   "benchmark" / "benchmark-execution-v7-current-rules-36-flag-history.json")
+_DEFAULT_BENCHMARK_PATH = BENCHMARK_PATH
 LEGACY_BENCHMARK_PATH = (Path(__file__).resolve().parents[1] / "reports" / "daily-research" /
                          "benchmark" / "benchmark-execution-v5-current-rules-36.json")
+FALLBACK_BENCHMARK_PATHS = (
+    Path(__file__).resolve().parents[1] / "reports" / "daily-research" /
+    "benchmark" / "benchmark-execution-v6-current-rules-36.json",
+)
 BENCHMARK_SELECTION_VERSION = "same-current-rules-36-v1"
 BENCHMARK_POLICY_SCOPE = "same-current-code-36-account-serial-vs-spawn"
 BENCHMARK_TARGET_SESSIONS = {"short": 220, "medium": 520, "long": 1000}
@@ -68,6 +73,8 @@ _WORKER_PROGRESS_QUEUE = None
 
 def _set_worker_progress_queue(progress_queue):
     global _WORKER_PROGRESS_QUEUE
+    for env_name in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[env_name] = "1"
     _WORKER_PROGRESS_QUEUE = progress_queue
 
 
@@ -186,7 +193,14 @@ def load_research_bars(instrument, root="."):
     bars["date"] = pd.to_datetime(bars["date"], errors="coerce")
     for column in required[1:]:
         bars[column] = pd.to_numeric(bars[column], errors="coerce")
-    bars = bars.dropna(subset=required).sort_values("date", kind="mergesort")
+    valid = bars[required].notna().all(axis=1)
+    prices = bars[["open", "high", "low", "close"]]
+    valid &= (prices > 0).all(axis=1)
+    valid &= bars["volume"] >= 0
+    valid &= bars["high"] >= bars[["open", "low", "close"]].max(axis=1)
+    valid &= bars["low"] <= bars[["open", "high", "close"]].min(axis=1)
+    rejected_rows = int((~valid).sum())
+    bars = bars.loc[valid].sort_values("date", kind="mergesort")
     bars = bars.drop_duplicates("date", keep="last").reset_index(drop=True)
     tick_size, tick_source = _instrument_tick(root, instrument)
     bars.attrs["quality"] = {"tick_size": tick_size, "tick_size_source": tick_source,
@@ -195,72 +209,109 @@ def load_research_bars(instrument, root="."):
     return {"bars": bars, "data_revision": data_revision,
             "first_date": bars.date.min().date().isoformat() if not bars.empty else None,
             "last_date": bars.date.max().date().isoformat() if not bars.empty else None,
-            "normalized_rows": len(bars), "tick_size": tick_size, "tick_size_source": tick_source,
+            "normalized_rows": len(bars), "rejected_rows": rejected_rows,
+            "tick_size": tick_size, "tick_size_source": tick_source,
             "tick_size_source_urls": list(TICK_SIZE_SOURCE_URLS.values()),
             "tick_rule_version": TICK_RULE_VERSION, "source": "local_csv"}
 
 
-def _validated_benchmark_config(expected_recognizer=None):
+def _default_benchmark_candidates():
+    if BENCHMARK_PATH == _DEFAULT_BENCHMARK_PATH:
+        candidates = [BENCHMARK_PATH]
+        for path in FALLBACK_BENCHMARK_PATHS:
+            if path.exists():
+                candidates.append(path)
+        return candidates
+    return [BENCHMARK_PATH]
+
+
+def _benchmark_explicitly_failed():
     if not BENCHMARK_PATH.exists():
-        return None
+        return False
     try:
-        benchmark = json.loads(BENCHMARK_PATH.read_text(encoding="utf-8"))
-        recognizer = benchmark.get("recommended_recognizer")
-        selected = int(benchmark.get("recommended_workers", 0))
-        selected_run = benchmark.get("worker_counts", {}).get(str(selected), {})
-        selected_peak = int(selected_run.get("process_tree_peak_bytes", 0))
-        reference_ledger_signature = benchmark.get("reference_ledger_signature_sha256")
-        candidate_ledger_signature = benchmark.get("candidate_ledger_signature_sha256")
-        reference_event_signature = benchmark.get("reference_event_signature_sha256")
-        candidate_event_signature = benchmark.get("candidate_event_signature_sha256")
-        selected_ledger_signature = selected_run.get("ledger_signature_sha256")
-        selected_event_signature = selected_run.get("event_signature_sha256")
-        if (benchmark.get("status") != "complete" or benchmark.get("parity_passed") is not True
-                or benchmark.get("benchmark_protocol_version") != BENCHMARK_PROTOCOL_VERSION
-                or benchmark.get("policy_scope") != BENCHMARK_POLICY_SCOPE
-                or benchmark.get("reference_count") != 36
-                or benchmark.get("reference_mode") != "single_process_same_current_code"
-                or benchmark.get("source_unchanged_during_run") is not True
-                or benchmark.get("source_sha256") != _current_execution_source_hashes()
-                or benchmark.get("source_sha256_after") != _current_execution_source_hashes()
-                or not _is_sha256_hex(reference_ledger_signature)
-                or not _is_sha256_hex(candidate_ledger_signature)
-                or reference_ledger_signature != candidate_ledger_signature
-                or not _is_sha256_hex(selected_ledger_signature)
-                or selected_ledger_signature != reference_ledger_signature
-                or benchmark.get("event_parity_passed") is not True
-                or not _is_sha256_hex(reference_event_signature)
-                or not _is_sha256_hex(candidate_event_signature)
-                or reference_event_signature != candidate_event_signature
-                or not _is_sha256_hex(selected_event_signature)
-                or selected_event_signature != reference_event_signature
-                or benchmark.get("accounting_checks_passed") is not True
-                or benchmark.get("data_revisions_match_references") is not True
-                or benchmark.get("performance_gate_passed") is not True
-                or float(benchmark.get("speedup_vs_serial", 0)) <= 1.0
-                or benchmark.get("universe_id") != UNIVERSE_ID
-                or benchmark.get("versions") != _version_metadata()
-                or recognizer not in ("v7", "boundary_first")
-                or (expected_recognizer is not None and recognizer != expected_recognizer)
-                or selected not in BENCHMARK_WORKER_COUNTS
-                or selected_run.get("parity_passed") is not True
-                or selected_run.get("event_parity_passed") is not True
-                or selected_event_signature != reference_event_signature
-                or selected_run.get("accounting_checks_passed") is not True
-                or selected_run.get("data_revisions_match_references") is not True
-                or selected_run.get("execution_mode") != "spawn"
-                or selected_run.get("account_count") != 36
-                or selected_run.get("memory_status") != "pass"
-                or selected_peak <= 0 or selected_peak > BENCHMARK_PROCESS_TREE_RSS_CAP
-                or benchmark.get("process_tree_memory_cap_bytes") != BENCHMARK_PROCESS_TREE_RSS_CAP):
-            return None
-        return {"workers": selected, "recognizer": recognizer, "source": str(BENCHMARK_PATH),
-                "payload": benchmark}
+        payload = json.loads(BENCHMARK_PATH.read_text(encoding="utf-8"))
+        return payload.get("status") == "parity_failed" or payload.get("parity_passed") is False
     except (OSError, ValueError, TypeError):
-        return None
+        return False
 
 
-def _resolve_workers(workers, recognizer=None):
+def default_multiprocess_workers(cpu_count=None):
+    """Choose a safe bounded spawn worker count when no current parity certificate exists."""
+    if cpu_count is None:
+        env_workers = os.environ.get("CAISEN_DEFAULT_WORKERS")
+        if env_workers is not None and str(env_workers).strip() != "":
+            selected = int(env_workers)
+            if selected not in BENCHMARK_WORKER_COUNTS:
+                raise ValueError("CAISEN_DEFAULT_WORKERS must be 1, 2, 4, 6, 8 or 10")
+            return selected
+    cores = int(cpu_count if cpu_count is not None else (os.cpu_count() or 1))
+    cap = max(1, min(8, cores - 2 if cores > 4 else cores))
+    return max((count for count in BENCHMARK_WORKER_COUNTS if count <= cap), default=1)
+
+
+def _validated_benchmark_config(expected_recognizer=None):
+    for candidate_path in _default_benchmark_candidates():
+        if not candidate_path.exists():
+            continue
+        try:
+            benchmark = json.loads(candidate_path.read_text(encoding="utf-8"))
+            recognizer = benchmark.get("recommended_recognizer")
+            selected = int(benchmark.get("recommended_workers", 0))
+            selected_run = benchmark.get("worker_counts", {}).get(str(selected), {})
+            selected_peak = int(selected_run.get("process_tree_peak_bytes", 0))
+            reference_ledger_signature = benchmark.get("reference_ledger_signature_sha256")
+            candidate_ledger_signature = benchmark.get("candidate_ledger_signature_sha256")
+            reference_event_signature = benchmark.get("reference_event_signature_sha256")
+            candidate_event_signature = benchmark.get("candidate_event_signature_sha256")
+            selected_ledger_signature = selected_run.get("ledger_signature_sha256")
+            selected_event_signature = selected_run.get("event_signature_sha256")
+            if (benchmark.get("status") != "complete" or benchmark.get("parity_passed") is not True
+                    or benchmark.get("benchmark_protocol_version") != BENCHMARK_PROTOCOL_VERSION
+                    or benchmark.get("policy_scope") != BENCHMARK_POLICY_SCOPE
+                    or benchmark.get("reference_count") != 36
+                    or benchmark.get("reference_mode") != "single_process_same_current_code"
+                    or benchmark.get("source_unchanged_during_run") is not True
+                    or benchmark.get("source_sha256") != _current_execution_source_hashes()
+                    or benchmark.get("source_sha256_after") != _current_execution_source_hashes()
+                    or not _is_sha256_hex(reference_ledger_signature)
+                    or not _is_sha256_hex(candidate_ledger_signature)
+                    or reference_ledger_signature != candidate_ledger_signature
+                    or not _is_sha256_hex(selected_ledger_signature)
+                    or selected_ledger_signature != reference_ledger_signature
+                    or benchmark.get("event_parity_passed") is not True
+                    or not _is_sha256_hex(reference_event_signature)
+                    or not _is_sha256_hex(candidate_event_signature)
+                    or reference_event_signature != candidate_event_signature
+                    or not _is_sha256_hex(selected_event_signature)
+                    or selected_event_signature != reference_event_signature
+                    or benchmark.get("accounting_checks_passed") is not True
+                    or benchmark.get("data_revisions_match_references") is not True
+                    or benchmark.get("performance_gate_passed") is not True
+                    or float(benchmark.get("speedup_vs_serial", 0)) <= 1.0
+                    or benchmark.get("universe_id") != UNIVERSE_ID
+                    or benchmark.get("versions") != _version_metadata()
+                    or recognizer not in ("v7", "boundary_first")
+                    or (expected_recognizer is not None and recognizer != expected_recognizer)
+                    or selected not in BENCHMARK_WORKER_COUNTS
+                    or selected_run.get("parity_passed") is not True
+                    or selected_run.get("event_parity_passed") is not True
+                    or selected_event_signature != reference_event_signature
+                    or selected_run.get("accounting_checks_passed") is not True
+                    or selected_run.get("data_revisions_match_references") is not True
+                    or selected_run.get("execution_mode") != "spawn"
+                    or selected_run.get("account_count") != 36
+                    or selected_run.get("memory_status") != "pass"
+                    or selected_peak <= 0 or selected_peak > BENCHMARK_PROCESS_TREE_RSS_CAP
+                    or benchmark.get("process_tree_memory_cap_bytes") != BENCHMARK_PROCESS_TREE_RSS_CAP):
+                continue
+            return {"workers": selected, "recognizer": recognizer, "source": str(candidate_path),
+                    "payload": benchmark}
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
+
+
+def _resolve_workers(workers, recognizer=None, fallback_workers=None):
     if workers is not None:
         workers = int(workers)
         if workers not in BENCHMARK_WORKER_COUNTS:
@@ -269,27 +320,37 @@ def _resolve_workers(workers, recognizer=None):
     config = _validated_benchmark_config(expected_recognizer=recognizer)
     if config:
         return config["workers"], config["source"]
+    fb = fallback_workers if fallback_workers is not None else os.environ.get("CAISEN_DEFAULT_WORKERS")
+    if fb is not None and str(fb).strip() != "" and not _benchmark_explicitly_failed():
+        if str(fb).strip().lower() == "auto":
+            selected = default_multiprocess_workers()
+        else:
+            selected = int(fb)
+            if selected not in BENCHMARK_WORKER_COUNTS:
+                raise ValueError("workers must be 1, 2, 4, 6, 8 or 10")
+        if selected > 1:
+            return selected, "default_multiprocess_fallback"
     return 1, "default_ineligible_benchmark" if _has_benchmark_artifact() else "default_no_benchmark"
 
 
 def _has_benchmark_artifact():
-    return BENCHMARK_PATH.exists() or LEGACY_BENCHMARK_PATH.exists()
+    return any(path.exists() for path in _default_benchmark_candidates()) or LEGACY_BENCHMARK_PATH.exists()
 
 
-def _resolve_execution_config(workers=None, recognizer=None):
+def _resolve_execution_config(workers=None, recognizer=None, fallback_workers=None):
     if recognizer not in (None, "v7", "boundary_first"):
         raise ValueError("recognizer must be v7 or boundary_first")
     if workers is not None:
         selected, source = _resolve_workers(workers)
         return selected, source, recognizer or DEFAULT_RECOGNIZER
     if recognizer is not None:
-        selected, source = _resolve_workers(None, recognizer=recognizer)
+        selected, source = _resolve_workers(None, recognizer=recognizer, fallback_workers=fallback_workers)
         return selected, source, recognizer
     config = _validated_benchmark_config()
     if config:
         return config["workers"], config["source"], config["recognizer"]
-    source = "default_ineligible_benchmark" if _has_benchmark_artifact() else "default_no_benchmark"
-    return 1, source, DEFAULT_RECOGNIZER
+    selected, source = _resolve_workers(None, fallback_workers=fallback_workers)
+    return selected, source, DEFAULT_RECOGNIZER
 
 
 def _effective_rule_metadata():
@@ -309,10 +370,11 @@ def _effective_rule_metadata():
     }
 
 
-def resolve_daily_research_config(workers=None, recognizer=None, execution_mode="spawn"):
+def resolve_daily_research_config(workers=None, recognizer=None, execution_mode="spawn",
+                                  fallback_workers=None):
     """Return the exact production configuration used for a regular daily run."""
     selected_workers, worker_source, selected_recognizer = _resolve_execution_config(
-        workers, recognizer)
+        workers, recognizer, fallback_workers=fallback_workers)
     if execution_mode not in ("spawn", "in_process"):
         raise ValueError("execution_mode must be spawn or in_process")
     engine_version = (BOUNDARY_FIRST_ENGINE_VERSION if selected_recognizer == "boundary_first"
@@ -536,6 +598,7 @@ def _prepare_account(instrument, root, date_to, trade_start, progress_callback=N
         "first_date": loaded["first_date"],
         "last_date": loaded["last_date"],
         "normalized_rows": int(loaded["normalized_rows"]),
+        "rejected_rows": int(loaded.get("rejected_rows", 0)),
         "warnings": [],
     }
     bars = loaded["bars"].copy()
@@ -793,11 +856,13 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
                        workers=None, progress_callback=None, root=None, symbols=None,
                        allow_test_universe=False, recognizer=None, execution_mode=None,
                        dispatch_sessions=None, signal_cache_dir=None, recognition_config=None,
-                       require_signal_cache=False, worker_source_override=None):
+                       require_signal_cache=False, worker_source_override=None,
+                       fallback_workers=None):
     """Recognize and replay isolated accounts with a bounded worker pool."""
     actual_execution_mode = execution_mode or ("in_process" if allow_test_universe else "spawn")
     effective_config = resolve_daily_research_config(
-        workers=workers, recognizer=recognizer, execution_mode=actual_execution_mode)
+        workers=workers, recognizer=recognizer, execution_mode=actual_execution_mode,
+        fallback_workers=fallback_workers)
     workers = effective_config["workers"]
     worker_source = worker_source_override or effective_config["worker_source"]
     recognizer = effective_config["recognizer"]
@@ -874,6 +939,7 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
 
     progress_state = {"run_id": run_id, "status": "running", "stage": "recognition_and_replay",
                       "completed": 0, "total": total, "elapsed_seconds": 0.0,
+                      "symbols_per_minute": 0.0, "eta_seconds": None, "cache_hits": 0,
                       "active_symbols": []}
     _atomic_write(progress_path, json.dumps(progress_state, ensure_ascii=False, indent=2))
     started = time.perf_counter()
@@ -885,6 +951,7 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
     timings = {"load_seconds": 0.0, "recognition_seconds": 0.0, "backtrader_seconds": 0.0}
     rss_start = _rss_peak_bytes()
     completed = 0
+    cache_hits = 0
     completed_symbols = set()
     worker_progress = {}
     worker_progress_lock = Lock()
@@ -916,8 +983,14 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
         now = time.monotonic()
         if not force and now - last_progress_write < 2.0:
             return
+        elapsed = time.perf_counter() - started
+        rate_per_min = (completed / elapsed * 60.0) if elapsed > 0 and completed > 0 else 0.0
+        eta_seconds = (elapsed * (total - completed) / completed) if completed > 0 and completed < total else 0.0 if completed >= total else None
         progress_state.update(status=status, completed=completed, total=total,
-                              elapsed_seconds=time.perf_counter() - started)
+                              elapsed_seconds=elapsed,
+                              symbols_per_minute=round(rate_per_min, 2),
+                              eta_seconds=round(eta_seconds, 1) if eta_seconds is not None else None,
+                              cache_hits=cache_hits)
         if symbol:
             progress_state["symbol"] = symbol
         with worker_progress_lock:
@@ -930,10 +1003,12 @@ def run_daily_research(universe_path, output_dir, date_to=DEFAULT_DATE_TO, trade
         last_progress_write = now
 
     def accept_summary(row):
-        nonlocal completed
+        nonlocal completed, cache_hits
         account_summaries.append(row)
         code, kind = str(row["code"]), str(row["kind"])
         completed_symbols.add("%s:%s" % (kind, code))
+        if (row.get("recognition_stats") or {}).get("cache_hit") is True:
+            cache_hits += 1
         if row.get("error"):
             errors.append({"code": code, "kind": kind, "error": row["error"]})
         completed += 1

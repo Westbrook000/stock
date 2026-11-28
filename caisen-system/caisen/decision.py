@@ -333,7 +333,7 @@ def _result(code, kind, action, reasons, patterns, qualities, selected, confirme
 
 def _explain(action, reasons):
     if action == "CONSIDER_BUY":
-        return "结构已有效突破确认；下一交易日开盘介入，按实际成交价止损8%、止盈20%。"
+        return "结构已有效突破确认；下一交易日开盘介入，按实际成交价止损8%，止盈参考形态冻结第一等幅目标。"
     if action == "WATCH":
         return "形态已成型，收盘在冻结边界下方 3 ATR 内，尚未确认突破。"
     if action == "SELL_IF_HELD":

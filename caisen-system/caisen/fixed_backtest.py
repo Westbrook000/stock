@@ -289,16 +289,24 @@ class _FixedRiskRewardStrategy(bt.Strategy):
         self.order_events = []
         self.curve = []
 
+    def _cancel_exit_orders(self, exclude_ref=None):
+        for ref, order in list(self.exit_orders.items()):
+            if exclude_ref is not None and ref == exclude_ref:
+                continue
+            if order.alive():
+                self.cancel(order)
+        self.exit_orders.clear()
+
     def next_open(self):
         today = self.data.datetime.date(0).isoformat()
+        if self.position.size == 0 and self.exit_orders:
+            self._cancel_exit_orders()
         if self.position.size and self.position_meta and self.position_meta.get("target_overshot"):
             if float(self.data.open[0]) <= self.position_meta["stop_price"]:
                 # Preserve the stop's gap fill when the next open crosses it.
                 self.position_meta["target_overshot"] = False
             else:
-                for order in self.exit_orders.values():
-                    if order.alive():
-                        self.cancel(order)
+                self._cancel_exit_orders()
                 order = self.close(exectype=bt.Order.Market)
                 self.pending = order.ref
                 self.order_meta[order.ref] = {"role": "measured_target_already_passed"}
@@ -341,10 +349,10 @@ class _FixedRiskRewardStrategy(bt.Strategy):
 
     def next(self):
         today = self.data.datetime.date(0).isoformat()
+        if self.position.size == 0 and self.exit_orders:
+            self._cancel_exit_orders()
         if today == self.p.last_date and self.position.size:
-            for order in self.exit_orders.values():
-                if order.alive():
-                    self.cancel(order)
+            self._cancel_exit_orders()
             # Enable close-on-close only for this final liquidation order.
             self.broker.set_coc(True)
             order = self.close(exectype=bt.Order.Market)
@@ -378,6 +386,9 @@ class _FixedRiskRewardStrategy(bt.Strategy):
         if not meta:
             return
         if order.status in (order.Submitted, order.Accepted):
+            if (meta["role"] in ("stop_loss", "take_profit")
+                    and (self.position.size == 0 or order.ref not in self.exit_orders)):
+                self.cancel(order)
             return
         if order.status == order.Completed:
             date = bt.num2date(order.executed.dt).date().isoformat()
@@ -441,7 +452,9 @@ class _FixedRiskRewardStrategy(bt.Strategy):
                                             and float(self.data.high[0]) >= entry["target_price"]),
                                         "exit_shares": abs(int(order.executed.size))})
                     self.position_meta = None
+                self._cancel_exit_orders(exclude_ref=order.ref)
         elif order.status in (order.Canceled, order.Margin, order.Rejected, order.Expired):
+            self.exit_orders.pop(order.ref, None)
             self.order_events.append({"order_ref": order.ref, "role": meta["role"],
                                       "status": order.getstatusname().lower()})
             if meta["role"] == "entry":

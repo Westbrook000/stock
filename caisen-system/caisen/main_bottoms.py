@@ -142,6 +142,15 @@ def _neckline_test_tolerance_at(index, atr_values, tick_size):
                if np.isfinite(known_atr) else 0.0)
 
 
+def _subtract_calendar_years_str(date_str: str, years: int) -> str:
+    """Subtract whole calendar years from a YYYY-MM-DD string, matching DateOffset(years=N)."""
+    year = int(date_str[:4]) - int(years)
+    month_day = date_str[4:]
+    if month_day == "-02-29" and not (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+        return f"{year:04d}-02-28"
+    return f"{year:04d}{month_day}"
+
+
 def _date_text(dates, index, date_strings=None):
     """Format a bar date without repeatedly boxing a Timestamp from an index."""
     index = int(index)
@@ -476,8 +485,10 @@ def _line_coverage_prefixes(high_values, tolerances, slope, intercept, start, co
                 maximum, worst_index = -np.inf, None
                 scan_start = first
             indexes = np.arange(scan_start, end + 1, dtype=int)
-            highs = np.asarray(high_values, dtype=float)[scan_start:end + 1]
-            allowances = np.asarray(tolerances, dtype=float)[scan_start:end + 1]
+            high_arr = high_values if isinstance(high_values, np.ndarray) and high_values.dtype == np.float64 else np.asarray(high_values, dtype=float)
+            tol_arr = tolerances if isinstance(tolerances, np.ndarray) and tolerances.dtype == np.float64 else np.asarray(tolerances, dtype=float)
+            highs = high_arr[scan_start:end + 1]
+            allowances = tol_arr[scan_start:end + 1]
             excesses = highs - (float(slope) * indexes + float(intercept)) - allowances
             excesses = np.where(np.isfinite(highs) & np.isfinite(allowances), excesses, -np.inf)
             if len(excesses):
@@ -1180,20 +1191,28 @@ def _triangle_boundaries_intact(sequence, pivots, atr_values=None, tick_size=0.0
         return False
     high_indices, high_prices, high_tolerances, low_indices, low_prices, low_tolerances = (
         vectors or _triangle_pivot_vectors(pivots, atr_values, tick_size))
+    u_slope, u_intercept = float(upper["slope"]), float(upper["intercept"])
+    l_slope, l_intercept = float(lower["slope"]), float(lower["intercept"])
     high_start = bisect_left(high_indices, lows[0].index)
     high_end = bisect_right(high_indices, lows[-1].index)
-    h_indices = high_indices[high_start:high_end]
-    if len(h_indices) and np.any(high_prices[high_start:high_end] >
-                                  upper["slope"] * h_indices + upper["intercept"]
-                                  + high_tolerances[high_start:high_end]):
-        return False
+    if high_end - high_start <= 64:
+        for k in range(high_start, high_end):
+            if float(high_prices[k]) > u_slope * int(high_indices[k]) + u_intercept + float(high_tolerances[k]):
+                return False
+    else:
+        h_indices = high_indices[high_start:high_end]
+        if np.any(high_prices[high_start:high_end] > u_slope * h_indices + u_intercept + high_tolerances[high_start:high_end]):
+            return False
     low_start = bisect_left(low_indices, lows[0].index)
     low_end = bisect_right(low_indices, lows[-1].index)
-    l_indices = low_indices[low_start:low_end]
-    if len(l_indices) and np.any(low_prices[low_start:low_end] <
-                                  lower["slope"] * l_indices + lower["intercept"]
-                                  - low_tolerances[low_start:low_end]):
-        return False
+    if low_end - low_start <= 64:
+        for k in range(low_start, low_end):
+            if float(low_prices[k]) < l_slope * int(low_indices[k]) + l_intercept - float(low_tolerances[k]):
+                return False
+    else:
+        l_indices = low_indices[low_start:low_end]
+        if np.any(low_prices[low_start:low_end] < l_slope * l_indices + l_intercept - low_tolerances[low_start:low_end]):
+            return False
     return True
 
 
@@ -1328,13 +1347,57 @@ def _structure_candidates(pivots, timeframe, atr_values=None, tick_size=0.01,
             second = (seconds[0][2] if fast_candidate_enumeration else
                       min(seconds, key=lambda item: (item[0], item[1], item[2].index))[2])
             candidates.append(("w_bottom", [first, second]))
+    ihs_rules = MAIN_RULES.get("inverse_head_shoulders", {})
+    maximum_shoulder_gap = float(ihs_rules.get("maximum_shoulder_gap_to_head_depth_ratio", 0.50))
+    maximum_leg_ratio = float(ihs_rules.get("maximum_leg_duration_ratio", 2.5))
+    min_shoulder_atr = float(ihs_rules.get("minimum_shoulder_head_separation_atr_multiple", 1.0))
+    min_ticks = float(MAIN_RULES.get("neckline_tests", {}).get("minimum_tolerance_ticks", 2))
+    shoulder_low_idx_arg = shoulder_low_indices if shoulder_low_indices_sorted else None
+    low_idx_arg = low_indices_ordered if low_indices_sorted else None
     for head in lows:
-        lefts = [pivot for pivot in lows if pivot.index < head.index and pivot.price > head.price]
-        rights = [pivot for pivot in lows if pivot.index > head.index and pivot.price > head.price]
+        head_price = float(head.price)
+        head_tol = _pivot_tolerance(head, atr_values, tick_size)
+        raw_lefts = [pivot for pivot in lows if pivot.index < head.index and pivot.price > head.price]
+        raw_rights = [pivot for pivot in lows if pivot.index > head.index and pivot.price > head.price]
+        if not raw_lefts or not raw_rights:
+            continue
+        lefts = []
+        for left in raw_lefts:
+            known_atr = (atr_values[left.index]
+                         if atr_values is not None and left.index < len(atr_values) else np.nan)
+            required_lift = max(min_ticks * tick_size,
+                                min_shoulder_atr * float(known_atr) if np.isfinite(known_atr) else 0.0)
+            if float(left.price) - head_price < required_lift:
+                continue
+            if low_values is not None:
+                seg = np.asarray(low_values[left.index:min(len(low_values), head.index + 1)], dtype=float)
+                seg = seg[np.isfinite(seg)]
+                if len(seg) and float(np.min(seg)) < head_price - head_tol:
+                    continue
+            lefts.append(left)
+        if not lefts:
+            continue
+        rights = []
+        for right in raw_rights:
+            known_atr = (atr_values[right.index]
+                         if atr_values is not None and right.index < len(atr_values) else np.nan)
+            required_lift = max(min_ticks * tick_size,
+                                min_shoulder_atr * float(known_atr) if np.isfinite(known_atr) else 0.0)
+            if float(right.price) - head_price < required_lift:
+                continue
+            if low_values is not None:
+                seg = np.asarray(low_values[head.index:min(len(low_values), right.index + 1)], dtype=float)
+                seg = seg[np.isfinite(seg)]
+                if len(seg) and float(np.min(seg)) < head_price - head_tol:
+                    continue
+            if not _ihs_right_shoulder_intact(
+                    head, right, shoulder_lows, atr_values, tick_size,
+                    low_pivot_indexes=shoulder_low_idx_arg):
+                continue
+            rights.append(right)
+        if not rights:
+            continue
         shoulder_pairs = []
-        ihs_rules = MAIN_RULES.get("inverse_head_shoulders", {})
-        maximum_shoulder_gap = float(ihs_rules.get("maximum_shoulder_gap_to_head_depth_ratio", 0.50))
-        maximum_leg_ratio = float(ihs_rules.get("maximum_leg_duration_ratio", 2.5))
         selected_pair = None
         pair_order = (((left, right) for right in reversed(rights) for left in reversed(lefts))
                       if fast_candidate_enumeration else
@@ -1348,64 +1411,71 @@ def _structure_candidates(pivots, timeframe, atr_values=None, tick_size=0.01,
                     highs, high_indices_ordered, high_indices_sorted, left.index, right.index)
                 if len(neck_highs) < 2:
                     continue
-                depth = max(float(pivot.price) for pivot in neck_highs) - float(head.price)
+                depth = max(float(pivot.price) for pivot in neck_highs) - head_price
                 if depth <= 0:
                     continue
                 shoulder_gap = abs(float(left.price) - float(right.price)) / depth
                 if shoulder_gap > maximum_shoulder_gap:
                     continue
-                if not _ihs_shoulders_have_depth(left, head, right, atr_values, tick_size):
-                    continue
                 if not _ihs_valley_intact(
                         left, head, right, lows, atr_values, tick_size,
-                        low_values=low_values,
-                        low_pivot_indexes=(low_indices_ordered if low_indices_sorted else None)):
+                        low_values=None,
+                        low_pivot_indexes=low_idx_arg):
                     continue
-                if not _ihs_right_shoulder_intact(
-                        head, right, shoulder_lows, atr_values, tick_size,
-                        low_pivot_indexes=(shoulder_low_indices
-                                           if shoulder_low_indices_sorted else None)):
-                    continue
-                local_span = (head.index - left.index) + (right.index - head.index)
+                local_span = left_leg + right_leg
                 shoulder_pairs.append((local_span, shoulder_gap, -(right.index - left.index),
                                        left.index, [left, head, right]))
                 if fast_candidate_enumeration:
                     selected_pair = [left, head, right]
                     break
         if shoulder_pairs:
-            # Keep the most recently completed right shoulder, then the nearest
-            # significant left shoulder. This preserves a known large structure
-            # without letting a later post-breakout low replace its right shoulder.
             selected = (selected_pair if fast_candidate_enumeration else min(
                 shoulder_pairs, key=lambda item: (
                     -item[4][2].index, -item[4][0].index, item[1], item[3]))[4])
             candidates.append(("inverse_head_shoulders", selected))
+    high_indices_list = high_indices.tolist()
+    high_prices_list = high_prices.tolist()
+    pair_max_high = {}
+    for pos_a, low_a in enumerate(lows):
+        idx_a = low_a.index
+        price_a = float(low_a.price)
+        for low_b in lows[pos_a + 1:]:
+            if float(low_b.price) <= price_a:
+                continue
+            idx_b = low_b.index
+            start_h = bisect_right(high_indices_list, idx_a)
+            end_h = bisect_left(high_indices_list, idx_b)
+            if end_h <= start_h:
+                continue
+            if end_h - start_h <= 64:
+                best_k = start_h
+                best_p = high_prices_list[start_h]
+                for k in range(start_h + 1, end_h):
+                    if high_prices_list[k] > best_p:
+                        best_p = high_prices_list[k]
+                        best_k = k
+            else:
+                best_k = start_h + int(np.argmax(high_prices[start_h:end_h]))
+            pair_max_high[(idx_a, idx_b)] = high_pivot_by_index[high_indices_list[best_k]]
     for first in lows:
         triangle_candidates = []
         seconds = [pivot for pivot in lows if pivot.index > first.index
                    and float(pivot.price) > float(first.price)]
         for second in seconds:
-            first_start = bisect_right(high_indices, first.index)
-            first_end = bisect_left(high_indices, second.index)
-            if first_end <= first_start:
+            first_high_pivot = pair_max_high.get((first.index, second.index))
+            if first_high_pivot is None:
                 continue
-            first_high_index = first_start + int(np.argmax(high_prices[first_start:first_end]))
-            first_high_pivot = high_pivot_by_index[int(high_indices[first_high_index])]
+            first_high_price = float(first_high_pivot.price)
             for third in lows:
                 if third.index <= second.index or float(third.price) <= float(second.price):
                     continue
-                second_start = bisect_right(high_indices, second.index)
-                second_end = bisect_left(high_indices, third.index)
-                if second_end <= second_start:
-                    continue
-                second_high_index = second_start + int(np.argmax(high_prices[second_start:second_end]))
-                second_high_pivot = high_pivot_by_index[int(high_indices[second_high_index])]
-                if float(first_high_pivot.price) <= float(second_high_pivot.price):
+                second_high_pivot = pair_max_high.get((second.index, third.index))
+                if second_high_pivot is None or first_high_price <= float(second_high_pivot.price):
                     continue
                 sequence = [first, first_high_pivot, second, second_high_pivot, third]
                 if not _triangle_boundaries_intact(sequence, pivots, atr_values, tick_size, vectors):
                     continue
-                width = float(first_high_pivot.price) - float(first.price)
+                width = first_high_price - float(first.price)
                 triangle_candidates.append((-(third.index - first.index), -width,
                                             second.index, ["triangle_bottom", sequence]))
         if triangle_candidates:
@@ -2061,37 +2131,87 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
         quality_date = min(entry["breakout_date"] for entry in neckline_history
                            if entry.get("candidate") and entry.get("state") == "invalidated")
     background = background_bars if background_bars is not None else bars
-    background = background.copy()
-    background["date"] = pd.to_datetime(background.date, errors="coerce")
-    quality_history = background[background.date <= pd.Timestamp(quality_date)]
-    finite_low = pd.to_numeric(quality_history.low, errors="coerce").dropna()
-    finite_high = pd.to_numeric(quality_history.high, errors="coerce").dropna()
     low_position = {"passed": False, "position_pass": False, "drawdown_pass": False,
                     "history_end": quality_date, "range_low": None, "range_high": None,
                     "position_ratio": None, "prepattern_high": None, "prepattern_drawdown": None}
-    if len(finite_low) and len(finite_high):
-        range_low = min(float(finite_low.min()), prior_context.get("low", np.inf))
-        range_high = max(float(finite_high.max()), prior_context.get("high", -np.inf))
-        ratio = ((structure_low - range_low) / (range_high - range_low)
-                 if range_high > range_low else np.inf)
-        low_rules = MAIN_RULES.get("low_position", {})
-        cutoff = pd.Timestamp(dates[first_trough.index]) - pd.DateOffset(
-            years=int(low_rules.get("prepattern_lookback_calendar_years", 2)))
-        prepattern = quality_history[(quality_history.date >= cutoff)
-                                     & (quality_history.date < pd.Timestamp(dates[first_trough.index]))]
-        prior_high = pd.to_numeric(prepattern.high, errors="coerce").dropna()
-        pre_high = max(float(prior_high.max()) if len(prior_high) else -np.inf,
-                       prior_context.get("two_year_high", {}).get(date_strings[first_trough.index], -np.inf))
-        if not np.isfinite(pre_high):
-            pre_high = None
-        drawdown = (pre_high - structure_low) / pre_high if pre_high and pre_high > 0 else None
-        low_position.update({"range_low": range_low, "range_high": range_high,
-                             "position_ratio": float(ratio), "position_pass": bool(
-                                 0 <= ratio <= float(low_rules.get("full_history_position_max", 0.30))),
-                             "prepattern_high": pre_high, "prepattern_drawdown": drawdown,
-                             "drawdown_pass": bool(drawdown is not None and drawdown >= float(
-                                 low_rules.get("minimum_prepattern_drawdown", 0.30)))})
-        low_position["passed"] = bool(low_position["position_pass"] or low_position["drawdown_pass"])
+    bg_date_strings = background.attrs.get("date_strings")
+    bg_lows = background.attrs.get("neckline_low_values")
+    bg_highs = background.attrs.get("neckline_high_values")
+    if (bg_date_strings is not None and bg_lows is not None and bg_highs is not None
+            and len(bg_date_strings) == len(background)
+            and len(bg_lows) == len(background)
+            and len(bg_highs) == len(background)):
+        prefix_cache = background.attrs.get("_low_pos_prefix")
+        if prefix_cache is None or prefix_cache.get("length") != len(bg_lows):
+            low_valid = np.isfinite(bg_lows)
+            high_valid = np.isfinite(bg_highs)
+            prefix_cache = {
+                "length": len(bg_lows),
+                "min_low": np.minimum.accumulate(np.where(low_valid, bg_lows, np.inf)),
+                "max_high": np.maximum.accumulate(np.where(high_valid, bg_highs, -np.inf)),
+                "has_low": np.maximum.accumulate(low_valid),
+                "has_high": np.maximum.accumulate(high_valid),
+            }
+            background.attrs["_low_pos_prefix"] = prefix_cache
+        end_idx = bisect_right(bg_date_strings, quality_date)
+        if end_idx > 0 and bool(prefix_cache["has_low"][end_idx - 1]) and bool(prefix_cache["has_high"][end_idx - 1]):
+            range_low = min(float(prefix_cache["min_low"][end_idx - 1]), prior_context.get("low", np.inf))
+            range_high = max(float(prefix_cache["max_high"][end_idx - 1]), prior_context.get("high", -np.inf))
+            ratio = ((structure_low - range_low) / (range_high - range_low)
+                     if range_high > range_low else np.inf)
+            low_rules = MAIN_RULES.get("low_position", {})
+            first_trough_date = date_strings[first_trough.index]
+            cutoff_str = _subtract_calendar_years_str(
+                first_trough_date, int(low_rules.get("prepattern_lookback_calendar_years", 2)))
+            lo_bound = bisect_left(bg_date_strings, cutoff_str)
+            hi_bound = min(end_idx, bisect_left(bg_date_strings, first_trough_date))
+            if lo_bound < hi_bound:
+                slice_h = bg_highs[lo_bound:hi_bound]
+                finite_h = slice_h[np.isfinite(slice_h)]
+                local_pre_high = float(finite_h.max()) if len(finite_h) else -np.inf
+            else:
+                local_pre_high = -np.inf
+            pre_high = max(local_pre_high,
+                           prior_context.get("two_year_high", {}).get(first_trough_date, -np.inf))
+            if not np.isfinite(pre_high):
+                pre_high = None
+            drawdown = (pre_high - structure_low) / pre_high if pre_high and pre_high > 0 else None
+            low_position.update({"range_low": range_low, "range_high": range_high,
+                                 "position_ratio": float(ratio), "position_pass": bool(
+                                     0 <= ratio <= float(low_rules.get("full_history_position_max", 0.30))),
+                                 "prepattern_high": pre_high, "prepattern_drawdown": drawdown,
+                                 "drawdown_pass": bool(drawdown is not None and drawdown >= float(
+                                     low_rules.get("minimum_prepattern_drawdown", 0.30)))})
+            low_position["passed"] = bool(low_position["position_pass"] or low_position["drawdown_pass"])
+    else:
+        background = background.copy()
+        background["date"] = pd.to_datetime(background.date, errors="coerce")
+        quality_history = background[background.date <= pd.Timestamp(quality_date)]
+        finite_low = pd.to_numeric(quality_history.low, errors="coerce").dropna()
+        finite_high = pd.to_numeric(quality_history.high, errors="coerce").dropna()
+        if len(finite_low) and len(finite_high):
+            range_low = min(float(finite_low.min()), prior_context.get("low", np.inf))
+            range_high = max(float(finite_high.max()), prior_context.get("high", -np.inf))
+            ratio = ((structure_low - range_low) / (range_high - range_low)
+                     if range_high > range_low else np.inf)
+            low_rules = MAIN_RULES.get("low_position", {})
+            cutoff = pd.Timestamp(dates[first_trough.index]) - pd.DateOffset(
+                years=int(low_rules.get("prepattern_lookback_calendar_years", 2)))
+            prepattern = quality_history[(quality_history.date >= cutoff)
+                                         & (quality_history.date < pd.Timestamp(dates[first_trough.index]))]
+            prior_high = pd.to_numeric(prepattern.high, errors="coerce").dropna()
+            pre_high = max(float(prior_high.max()) if len(prior_high) else -np.inf,
+                           prior_context.get("two_year_high", {}).get(date_strings[first_trough.index], -np.inf))
+            if not np.isfinite(pre_high):
+                pre_high = None
+            drawdown = (pre_high - structure_low) / pre_high if pre_high and pre_high > 0 else None
+            low_position.update({"range_low": range_low, "range_high": range_high,
+                                 "position_ratio": float(ratio), "position_pass": bool(
+                                     0 <= ratio <= float(low_rules.get("full_history_position_max", 0.30))),
+                                 "prepattern_high": pre_high, "prepattern_drawdown": drawdown,
+                                 "drawdown_pass": bool(drawdown is not None and drawdown >= float(
+                                     low_rules.get("minimum_prepattern_drawdown", 0.30)))})
+            low_position["passed"] = bool(low_position["position_pass"] or low_position["drawdown_pass"])
     if not low_position["passed"]:
         return None
 
@@ -2113,7 +2233,7 @@ def _make_main_pattern(bars, code, kind, timeframe, family, sequence, pivots,
                 neckline_invalidation = {"date": _date_text(dates, index, date_strings), "index": int(index),
                                          "level": float(_at(neckline, index))}
                 break
-            if target_values and float(frame.high.iloc[index]) >= target_values[0]:
+            if target_values and float(high_values[index]) >= target_values[0]:
                 target_reached = {"date": _date_text(dates, index, date_strings), "index": int(index),
                                   "price": target_values[0]}
                 break

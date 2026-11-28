@@ -937,3 +937,42 @@ def test_spawn_pool_smoke_writes_one_independent_account(tmp_path):
     assert progress["stage"] == "report_written"
     assert progress["active_symbols"] == []
     assert Path(progress["report_path"]).is_file()
+
+
+def test_default_multiprocess_fallback_activates_on_missing_or_stale_benchmark_but_blocks_parity_failed(tmp_path, monkeypatch):
+    from caisen import daily_research
+
+    assert daily_research.default_multiprocess_workers(cpu_count=12) == 8
+    assert daily_research.default_multiprocess_workers(cpu_count=4) == 4
+    assert daily_research.default_multiprocess_workers(cpu_count=1) == 1
+
+    monkeypatch.delenv("CAISEN_DEFAULT_WORKERS", raising=False)
+    missing_path = tmp_path / "missing-benchmark.json"
+    monkeypatch.setattr(daily_research, "BENCHMARK_PATH", missing_path)
+    monkeypatch.setattr(daily_research, "LEGACY_BENCHMARK_PATH", tmp_path / "missing-legacy.json")
+    expected_auto = daily_research.default_multiprocess_workers()
+    assert daily_research._resolve_workers(None, fallback_workers="auto") == (
+        expected_auto if expected_auto > 1 else 1,
+        "default_multiprocess_fallback" if expected_auto > 1 else "default_no_benchmark",
+    )
+
+    stale_path = tmp_path / "stale-benchmark.json"
+    stale_path.write_text(json.dumps({
+        "status": "complete",
+        "parity_passed": True,
+        "source_sha256": {"caisen/main_bottoms.py": "stale"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(daily_research, "BENCHMARK_PATH", stale_path)
+    assert daily_research._resolve_workers(None, fallback_workers="auto") == (
+        expected_auto if expected_auto > 1 else 1,
+        "default_multiprocess_fallback" if expected_auto > 1 else "default_ineligible_benchmark",
+    )
+
+    monkeypatch.setenv("CAISEN_DEFAULT_WORKERS", "6")
+    assert daily_research.default_multiprocess_workers() == 6
+    assert daily_research._resolve_workers(None) == (6, "default_multiprocess_fallback")
+
+    failed_path = tmp_path / "failed-benchmark.json"
+    failed_path.write_text(json.dumps({"status": "parity_failed", "parity_passed": False}), encoding="utf-8")
+    monkeypatch.setattr(daily_research, "BENCHMARK_PATH", failed_path)
+    assert daily_research._resolve_workers(None, fallback_workers="auto") == (1, "default_ineligible_benchmark")
